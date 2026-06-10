@@ -1,0 +1,20 @@
+# VCS and CI
+.git
+.github
+
+# Composer installs fresh inside the image
+vendor
+
+# Secrets and local runtime data — never bake these in
+.env
+.env.*
+!.env.example
+workspace
+data
+*.log
+
+# Tooling caches and dev-only material
+.php-cs-fixer.cache
+.phpstan.cache
+tests
+tutorial

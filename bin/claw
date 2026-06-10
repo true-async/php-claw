@@ -1,0 +1,94 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Claw\Agent\AgentInterface;
+use Claw\Agent\ClaudeAgent;
+use Claw\Agent\OpenAiCompatibleAgent;
+use Claw\Chat\ConsoleChat;
+use Claw\Config;
+use Claw\Exceptions\ClawException;
+use Claw\Http\CurlHttpClient;
+use Claw\Http\HttpClientInterface;
+use Claw\Session;
+use Claw\Tool\BashTool;
+use Claw\Tool\DateTool;
+use Claw\Tool\ListFilesTool;
+use Claw\Tool\PhpEvalTool;
+use Claw\Tool\ReadFileTool;
+use Claw\Tool\Registry;
+use Claw\Tool\Workspace;
+use Claw\Tool\WriteFileTool;
+
+require __DIR__ . '/../vendor/autoload.php';
+
+const DEFAULT_SYSTEM = 'You are Claw, a helpful coding assistant. Be concise. '
+    . 'Use the tools to inspect and change files and run commands in the workspace.';
+
+try {
+    $config = Config::load(__DIR__ . '/../.env');
+} catch (ClawException $e) {
+    fwrite(STDERR, 'Config error: ' . $e->getMessage() . "\n");
+    exit(1);
+}
+
+// Workspace: the sandbox directory for the file/bash tools.
+if (!is_dir($config->workspace)) {
+    mkdir($config->workspace, 0o775, true);
+}
+$workspaceDir = realpath($config->workspace);
+if ($workspaceDir === false) {
+    fwrite(STDERR, "Cannot resolve workspace: {$config->workspace}\n");
+    exit(1);
+}
+
+// Transport is a single request; retries are cause-aware at the agent level.
+$http = new CurlHttpClient();
+
+$agent = makeAgent($config, $http);   // agents retry internally (cause-aware)
+if ($agent === null) {
+    fwrite(STDERR, "Agent '{$config->agent}' is not wired yet.\n");
+    exit(1);
+}
+
+$workspace = new Workspace($workspaceDir);
+$tools = new Registry();
+$tools->add(new BashTool($workspaceDir));
+$tools->add(new ReadFileTool($workspace));
+$tools->add(new WriteFileTool($workspace));
+$tools->add(new ListFilesTool($workspace));
+$tools->add(new DateTool());
+$tools->add(new PhpEvalTool());
+
+$persona = __DIR__ . '/../CLAUDE.md';
+$system = is_file($persona) ? (string) file_get_contents($persona) : DEFAULT_SYSTEM;
+
+$chat = match ($config->channel) {
+    'console' => new ConsoleChat(),
+    default => null,   // telegram not wired yet
+};
+if ($chat === null) {
+    fwrite(STDERR, "Channel '{$config->channel}' is not wired yet.\n");
+    exit(1);
+}
+
+fwrite(STDOUT, "claw ready ({$config->agent} / {$config->model}). Type a message, Ctrl+D to exit.\n");
+
+// One console conversation. Session::run() awaits directly on the main
+// coroutine; the reactor drives stdin / HTTP / subprocess I/O.
+$conversation = $chat->accept();
+(new Session($conversation, $agent, $tools, $system, $config->model, $config->maxHistory))->run();
+
+function makeAgent(Config $config, HttpClientInterface $http): ?AgentInterface
+{
+    return match ($config->agent) {
+        'claude' => new ClaudeAgent($http, $config->apiKey),
+        'openai-compatible' => new OpenAiCompatibleAgent(
+            $http,
+            $config->apiKey,
+            $config->baseUrl ?? 'https://api.deepseek.com',
+        ),
+        default => null,
+    };
+}

@@ -1,0 +1,11 @@
+parameters:
+    level: 8
+    paths:
+        - src
+        - bin/claw
+        - tests
+    # Official TrueAsync stubs (dev-only). Scan just the Async namespace —
+    # the package's root src/ also redeclares the global \PDO, which would
+    # clash with PHPStan's built-in PDO knowledge.
+    scanDirectories:
+        - vendor/true-async/ide-helper/src/Async

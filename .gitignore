@@ -1,0 +1,14 @@
+# Secrets — never commit
+/.env
+
+# Composer
+/vendor/
+
+# Tooling caches
+/.php-cs-fixer.cache
+/.phpstan.cache
+
+# Runtime data
+/data/
+/workspace/
+*.log
