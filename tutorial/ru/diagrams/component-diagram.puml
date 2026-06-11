@@ -1,0 +1,73 @@
+@startuml component-diagram
+skinparam componentStyle rectangle
+skinparam ArrowColor #333333
+skinparam NoteBackgroundColor #FFFDE7
+skinparam PackageBackgroundColor #FAFAFA
+
+title php-claw — Component Diagram
+
+actor "User" as User
+
+package "Messenger" {
+    [Telegram / CLI] as cTelegram
+}
+
+package "Chat" #E8EAF6 {
+    [ChatImpl] as cChat
+    [Conversation] as cConversation
+}
+
+package "Session" #FFFDE7 {
+    [Session] as cSession
+}
+
+package "Agent" #E8F4E8 {
+    [ClaudeAgent] as cAgent
+}
+
+package "Tool" #FFF3E0 {
+    [ShellTool] as cShell
+    [FileTool] as cFile
+    [WebTool] as cWeb
+}
+
+cloud "Claude API" {
+    [LLM] as cLLM
+}
+
+() ChatInterface  as CI
+() AgentInterface as AI
+() ToolInterface  as TI
+
+cChat  -- CI
+cAgent -- AI
+cShell -- TI
+cFile  -- TI
+cWeb   -- TI
+
+User      <-->  cTelegram     : messages
+cTelegram <-->  cChat         : Bot API
+cChat     -->   cConversation : new conversation
+cConversation ..> cSession    : Message
+
+cSession  -->   CI            : send(text)
+CI        -->   cSession      : receive(): Message
+
+cSession  -->   AI            : AgentRequest\n(history + specs)
+AI        ..>   cSession      : AgentResponse\n(text | toolCalls)
+
+cAgent    -->   cLLM          : HTTP (Anthropic API)
+
+cSession  -->   TI            : execute(ToolCall)
+TI        ..>   cSession      : ToolResult
+
+note bottom of cSession
+    Agentic loop:
+    1. receive user message
+    2. add to history
+    3. send to agent (full history)
+    4. if isCompleted -> reply to user
+    5. else execute tools -> go to 3
+end note
+
+@enduml
