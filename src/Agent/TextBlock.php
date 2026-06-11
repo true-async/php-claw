@@ -7,9 +7,9 @@ namespace Claw\Agent;
 /**
  * Plain text content.
  */
-final class TextBlock implements ContentBlock
+final readonly class TextBlock implements ContentBlockInterface
 {
-    public function __construct(public readonly string $text)
+    public function __construct(public string $text)
     {
     }
 }

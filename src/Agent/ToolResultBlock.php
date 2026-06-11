@@ -7,12 +7,12 @@ namespace Claw\Agent;
 /**
  * The result of executing a tool, sent back to the model.
  */
-final class ToolResultBlock implements ContentBlock
+final readonly class ToolResultBlock implements ContentBlockInterface
 {
     public function __construct(
-        public readonly string $toolUseId,
-        public readonly string $content,
-        public readonly bool $isError = false,
+        public string $toolUseId,
+        public string $content,
+        public bool   $isError = false,
     ) {
     }
 }

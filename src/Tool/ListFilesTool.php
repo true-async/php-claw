@@ -10,11 +10,11 @@ use Claw\Exceptions\ToolException;
  * List the files and directories in a workspace directory (one level). Safe.
  * Directories are suffixed with "/"; files show their size.
  */
-final class ListFilesTool implements ToolInterface
+final readonly class ListFilesTool implements ToolInterface
 {
     public function __construct(
-        private readonly Workspace $workspace,
-        private readonly int $maxEntries = 1000,
+        private Workspace $workspace,
+        private int       $maxEntries = 1000,
     ) {
     }
 

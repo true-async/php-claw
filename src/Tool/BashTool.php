@@ -13,9 +13,9 @@ use Claw\Exceptions\ToolException;
  * proc_open's pipes are driven by libuv, so the read is non-blocking; whether a
  * given command is allowed is the permission layer's job, not this tool's.
  */
-final class BashTool implements ToolInterface
+final readonly class BashTool implements ToolInterface
 {
-    public function __construct(private readonly string $cwd)
+    public function __construct(private string $cwd)
     {
     }
 

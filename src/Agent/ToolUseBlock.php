@@ -7,15 +7,15 @@ namespace Claw\Agent;
 /**
  * The model's request to call a tool.
  */
-final class ToolUseBlock implements ContentBlock
+final readonly class ToolUseBlock implements ContentBlockInterface
 {
     /**
      * @param array<string, mixed> $input
      */
     public function __construct(
-        public readonly string $id,
-        public readonly string $name,
-        public readonly array $input,
+        public string $id,
+        public string $name,
+        public array  $input,
     ) {
     }
 }

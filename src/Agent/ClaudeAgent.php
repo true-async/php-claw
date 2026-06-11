@@ -142,7 +142,7 @@ final class ClaudeAgent extends AbstractAgent
     /**
      * @return array<string, mixed>
      */
-    private static function encodeBlock(ContentBlock $block): array
+    private static function encodeBlock(ContentBlockInterface $block): array
     {
         return match (true) {
             $block instanceof TextBlock => ['type' => 'text', 'text' => $block->text],

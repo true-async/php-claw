@@ -7,14 +7,14 @@ namespace Claw\Agent;
 /**
  * One conversation turn: a role plus a list of content blocks.
  */
-final class Message
+final readonly class Message
 {
     /**
-     * @param list<ContentBlock> $content
+     * @param list<ContentBlockInterface> $content
      */
     public function __construct(
-        public readonly Role $role,
-        public readonly array $content,
+        public Role  $role,
+        public array $content,
     ) {
     }
 

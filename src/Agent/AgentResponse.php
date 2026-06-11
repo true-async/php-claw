@@ -11,7 +11,7 @@ namespace Claw\Agent;
 final class AgentResponse
 {
     /**
-     * @param list<ContentBlock> $content
+     * @param list<ContentBlockInterface> $content
      * @param list<ToolUseBlock> $toolCalls
      */
     public function __construct(
@@ -26,5 +26,10 @@ final class AgentResponse
     public function wantsToolUse(): bool
     {
         return $this->stopReason === StopReason::ToolUse || $this->toolCalls !== [];
+    }
+
+    public function isCompleted(): bool
+    {
+        return $this->stopReason === StopReason::EndTurn;
     }
 }

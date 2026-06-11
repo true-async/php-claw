@@ -11,9 +11,9 @@ use Claw\Exceptions\ToolException;
  * and rejects absolute paths and `..` escapes (checked after realpath, so any
  * traversal that lands outside the root is caught).
  */
-final class Workspace
+final readonly class Workspace
 {
-    private readonly string $root;
+    private string $root;
 
     public function __construct(string $root)
     {

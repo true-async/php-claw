@@ -9,9 +9,9 @@ use Claw\Exceptions\ToolException;
 /**
  * Write a text file in the workspace (creates or overwrites). Mutating.
  */
-final class WriteFileTool implements ToolInterface
+final readonly class WriteFileTool implements ToolInterface
 {
-    public function __construct(private readonly Workspace $workspace)
+    public function __construct(private Workspace $workspace)
     {
     }
 

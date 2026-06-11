@@ -55,6 +55,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
      * becomes a leading `system` message; tool results become `tool` messages.
      *
      * @return array<string, mixed>
+     * @throws \JsonException
      */
     public static function encodeRequest(AgentRequest $request): array
     {
@@ -141,12 +142,13 @@ final class OpenAiCompatibleAgent extends AbstractAgent
      * (each tool result is its own `tool` message).
      *
      * @return list<array<string, mixed>>
+     * @throws \JsonException
      */
     private static function encodeMessage(Message $message): array
     {
         $toolResults = array_values(array_filter(
             $message->content,
-            static fn (ContentBlock $block): bool => $block instanceof ToolResultBlock,
+            static fn (ContentBlockInterface $block): bool => $block instanceof ToolResultBlock,
         ));
 
         if ($toolResults !== []) {

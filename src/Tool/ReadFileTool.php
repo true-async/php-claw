@@ -9,14 +9,14 @@ use Claw\Exceptions\ToolException;
 /**
  * Read a text file from the workspace. Safe (read-only).
  */
-final class ReadFileTool implements ToolInterface
+final readonly class ReadFileTool implements ToolInterface
 {
     /**
      * @param positive-int $maxBytes maximum bytes to return (longer files are truncated)
      */
     public function __construct(
-        private readonly Workspace $workspace,
-        private readonly int $maxBytes = 100_000,
+        private Workspace $workspace,
+        private int       $maxBytes = 100_000,
     ) {
     }
 
