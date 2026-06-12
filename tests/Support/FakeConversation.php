@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Support;
 
 use Claw\Chat\ConversationInterface;
+use Claw\Chat\Status;
 
 /**
  * Returns scripted messages then null (auto-closes), and captures replies — lets
@@ -32,4 +33,6 @@ final class FakeConversation implements ConversationInterface
     {
         $this->sent[] = $text;
     }
+
+    public function updateStatus(?Status $status): void {}
 }

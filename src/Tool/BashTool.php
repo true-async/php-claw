@@ -66,7 +66,11 @@ final readonly class BashTool implements ToolInterface
             'LANG' => 'C.UTF-8',
         ];
 
-        $process = proc_open(['/bin/sh', '-c', $command], $descriptors, $pipes, $this->cwd, $env);
+        // POSIX `sh` on Unix; on Windows /bin/sh is not a valid path, so fall back
+        // to a `sh` resolved from PATH (e.g. the one shipped with Git Bash).
+        $shell = DIRECTORY_SEPARATOR === '\\' ? 'sh' : '/bin/sh';
+
+        $process = proc_open([$shell, '-c', $command], $descriptors, $pipes, $this->cwd, $env);
         if (!\is_resource($process)) {
             throw new ToolException('bash: failed to start the command');
         }

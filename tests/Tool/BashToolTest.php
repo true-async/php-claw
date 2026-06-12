@@ -37,7 +37,14 @@ final class BashToolTest
         $dir = $this->dir();
         $bash = new BashTool($dir);
 
-        Assert::same($bash->handle(['command' => 'pwd']), realpath($dir));
+        $pwd = $bash->handle(['command' => 'pwd']);
+        if (DIRECTORY_SEPARATOR === '\\') {
+            // MSYS/Git `sh` reports a POSIX path (/tmp/…) that can't equal PHP's
+            // realpath (C:\…\Temp\…); assert it ran in the right dir by name.
+            Assert::true(str_ends_with($pwd, '/' . basename($dir)));
+        } else {
+            Assert::same($pwd, realpath($dir));
+        }
 
         putenv('CLAW_LEAK=secret');
         Assert::same($bash->handle(['command' => 'echo "[$CLAW_LEAK]"']), '[]');   // not leaked

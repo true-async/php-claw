@@ -73,12 +73,7 @@ if ($chat === null) {
     exit(1);
 }
 
-fwrite(STDOUT, "claw ready ({$config->agent} / {$config->model}). Type a message, Ctrl+D to exit.\n");
-
-// One console conversation. Session::run() awaits directly on the main
-// coroutine; the reactor drives stdin / HTTP / subprocess I/O.
-$conversation = $chat->accept();
-(new Session($conversation, $agent, $tools, $system, $config->model, $config->maxHistory))->run();
+new Session($chat->accept(), $agent, $tools, $system, $config->model, $config->maxHistory)->run();
 
 function makeAgent(Config $config, HttpClientInterface $http): ?AgentInterface
 {

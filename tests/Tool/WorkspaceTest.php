@@ -20,10 +20,13 @@ final class WorkspaceTest
         mkdir($root . '/sub');
         file_put_contents($root . '/sub/b.txt', 'y');
 
-        Assert::same($workspace->resolveExisting('a.txt'), $root . '/a.txt');
-        Assert::same($workspace->resolveExisting('sub/b.txt'), $root . '/sub/b.txt');
-        Assert::same($workspace->resolveExisting('sub/../a.txt'), $root . '/a.txt'); // .. that stays inside is fine
-        Assert::same($workspace->resolveForWrite('new.txt'), $root . '/new.txt');
+        // resolve* returns realpath() output, which is OS-native (\ on Windows),
+        // so build the expected paths with DIRECTORY_SEPARATOR rather than '/'.
+        $ds = DIRECTORY_SEPARATOR;
+        Assert::same($workspace->resolveExisting('a.txt'), $root . $ds . 'a.txt');
+        Assert::same($workspace->resolveExisting('sub/b.txt'), $root . $ds . 'sub' . $ds . 'b.txt');
+        Assert::same($workspace->resolveExisting('sub/../a.txt'), $root . $ds . 'a.txt'); // .. that stays inside is fine
+        Assert::same($workspace->resolveForWrite('new.txt'), $root . $ds . 'new.txt');
 
         $this->cleanup($root);
     }
