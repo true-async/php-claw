@@ -28,6 +28,6 @@ final class ConsoleChat implements ChatInterface
 
     public function accept(): ConversationInterface
     {
-        return new ConsoleConversation($this->input, $this->output);
+        return new AsyncConsoleConversation();
     }
 }

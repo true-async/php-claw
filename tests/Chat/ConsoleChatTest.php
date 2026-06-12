@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Chat;
 
-use Claw\Chat\ConsoleChat;
+use Claw\Chat\ConsoleConversation;
 use Testo\Assert;
 use Testo\Test;
 
@@ -17,7 +17,7 @@ final class ConsoleChatTest
         fwrite($input, "hello\n\nbye\n");
         rewind($input);
 
-        $conversation = (new ConsoleChat($input, $this->memoryStream()))->accept();
+        $conversation = new ConsoleConversation($input, $this->memoryStream());
 
         Assert::same($conversation->receive(), 'hello');
         Assert::same($conversation->receive(), 'bye');   // blank line skipped
@@ -29,10 +29,10 @@ final class ConsoleChatTest
     {
         $output = $this->memoryStream();
 
-        (new ConsoleChat($this->memoryStream(), $output))->accept()->send('hi there');
+        (new ConsoleConversation($this->memoryStream(), $output))->send('hi there');
 
         rewind($output);
-        Assert::same(stream_get_contents($output), "hi there\n");
+        Assert::same(stream_get_contents($output), "Claw: hi there\n");
     }
 
     /**

@@ -15,4 +15,11 @@ interface ConversationInterface
     public function receive(): ?string;
 
     public function send(string $text): void;
+
+    /**
+     * Show a transient status line (typing indicator, tool call, token usage).
+     * Pass null to clear it. The status must never interleave with send() output —
+     * implementations are responsible for clearing before writing permanent lines.
+     */
+    public function updateStatus(?Status $status): void;
 }
