@@ -8,25 +8,25 @@ to run several tools at once without blocking itself, and to keep talking to the
 To do that we need to make the code **asynchronous**.
 Right now the application's main loop looks like this:
 ```php
-    public function run(): void
-    {
-        while (($text = $this->conversation->receive()) !== null) {
-            // A failure ends this task, not the conversation. React by cause.
-            try {
-                $this->handle($text);
-            } catch (ContextLengthException $e) {
-                
-            }
+public function run(): void
+{
+    while (($text = $this->conversation->receive()) !== null) {
+        // A failure ends this task, not the conversation. React by cause.
+        try {
+            $this->handle($text);
+        } catch (ContextLengthException $e) {
+            
         }
     }
+}
 ```
 
 And inside `handle()` there are two more loops: a small loop over all the Tools, and the big loop.
 ```php
-            $results = [];
-            foreach ($response->toolCalls as $call) {
-                $results[] = $this->execute($call);
-            }
+$results = [];
+foreach ($response->toolCalls as $call) {
+    $results[] = $this->execute($call);
+}
 ```
 
 The simplest way to add asynchrony is to call the `run` method in a separate coroutine. Then the
@@ -35,12 +35,12 @@ application can handle many different chats.
 You can also run `$this->execute($call)` in a coroutine:
 
 ```php
-            $results = [];
-            foreach ($response->toolCalls as $call) {
-                $results[] = spawn($this->execute(...), $call);
-            }
+$results = [];
+foreach ($response->toolCalls as $call) {
+    $results[] = spawn($this->execute(...), $call);
+}
 
-            $results = await_all($results);
+$results = await_all($results);
 ```
 
 Then each Tool becomes asynchronous, and if it launches something through `shell` or uses input/output
