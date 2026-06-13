@@ -12,3 +12,6 @@
 /data/
 /workspace/
 *.log
+
+# IDE
+/.idea/
