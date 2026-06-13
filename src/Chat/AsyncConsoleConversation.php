@@ -53,13 +53,18 @@ final class AsyncConsoleConversation implements ConversationInterface
     private string $banner = '';
     private ?Coroutine $spinner = null;
     private ?Coroutine $resizeWatcher = null;
-    private bool $awaitingInput = false;
     private string $statusLabel = '';
     private string $tokens = '';
+    private bool $awaitingInput = true;   // the background reader keeps the prompt active
 
     /** @var list<string> Chat lines (with trailing "\n"), replayed after a resize. */
     private array $history = [];
     private const int HISTORY_MAX = 500;
+
+    private ?Coroutine $reader = null;
+    /** @var list<string> Submitted lines awaiting consumption by receive(). */
+    private array $inbox = [];
+    private bool $eof = false;
 
     public function __construct()
     {
@@ -67,56 +72,69 @@ final class AsyncConsoleConversation implements ConversationInterface
         $this->buildLayout();
         $this->draw();
 
-        // Restore terminal state on exit.
-        register_shutdown_function($this->restoreTerminal(...));
-
         // Repaint when the window is resized (runs in this thread's reactor).
         $this->resizeWatcher = spawn($this->watchResize(...));
+
+        // Read input in the background so the user can type even while the agent
+        // is busy ("thinking"). receive() just consumes what this produces.
+        $this->reader = spawn($this->readLoop(...));
     }
 
     public function receive(): ?string
     {
-        $this->cancelSpinner();
-
-        // Pure async IO: fgets(STDIN) parks the coroutine, so the spinner and the
-        // resize watcher keep running while we wait. The terminal echoes typing
-        // (cooked mode handles backspace); we own the cursor so it does not jump.
-        $this->awaitingInput = true;
-        try {
-            while (true) {
-                fwrite(STDOUT, "\033[{$this->inputRow};1H\033[2K");
-                fflush(STDOUT);
-                $line = fgets(STDIN);
-                if ($line === false) {
-                    // EOF (Ctrl-D / closed stdin): the conversation is over. Tear
-                    // down the background watcher so nothing keeps the loop alive.
-                    $this->close();
-                    return null;
-                }
-                $line = trim($line);
-                if ($line !== '') {
-                    break;
-                }
-            }
-        } finally {
-            $this->awaitingInput = false;
+        // The background reader (readLoop) does the actual input; here we just
+        // wait for the next submitted line. Because the reader keeps reading
+        // while the agent works, the user can type ahead during "thinking".
+        while ($this->inbox === [] && !$this->eof) {
+            delay(50);
         }
 
-        // Re-anchor the fixed chrome (the Enter newline may nudge the last rows),
-        // record the line in history, and park the cursor back on the input row.
-        fwrite(
-            STDOUT,
-            "\033[{$this->chatStart};{$this->chatRows}r"
-            . "\033[{$this->statusRow};1H\033[2K"
-            . "\033[{$this->sepTopRow};1H\033[2K" . self::C_SEP . $this->sep . self::C_RESET
-            . "\033[{$this->inputRow};1H\033[2K"
-            . "\033[{$this->sepBotRow};1H\033[2K" . self::C_SEP . $this->sep . self::C_RESET
-        );
-        $this->appendChat(self::C_USER . 'User: ' . self::C_RESET . $line . "\n");
-        fwrite(STDOUT, "\033[{$this->inputRow};1H");
-        fflush(STDOUT);
+        if ($this->inbox !== []) {
+            return array_shift($this->inbox);
+        }
 
-        return $line;
+        $this->close();   // EOF — nothing more to read
+
+        return null;
+    }
+
+    /**
+     * Background input reader: keeps the prompt on the input row, reads lines
+     * (cooked mode echoes them and handles backspace), records each in history
+     * and queues it for receive(). Runs for the whole session; cancelled by close().
+     */
+    private function readLoop(): void
+    {
+        while (true) {
+            fwrite(STDOUT, "\033[{$this->inputRow};1H\033[2K");
+            fflush(STDOUT);
+            $line = fgets(STDIN);
+
+            if ($line === false) {
+                $this->eof = true;   // EOF (Ctrl-D / closed stdin)
+                return;
+            }
+
+            $line = trim($line);
+
+            if ($line === '') {
+                continue;
+            }
+
+            // Re-assert the scroll region + separators (the Enter newline may
+            // nudge them), record the line, then re-home the cursor.
+
+            fwrite(
+                STDOUT,
+                "\033[{$this->chatStart};{$this->chatRows}r"
+                . "\033[{$this->sepTopRow};1H\033[2K" . self::C_SEP . $this->sep . self::C_RESET
+                . "\033[{$this->sepBotRow};1H\033[2K" . self::C_SEP . $this->sep . self::C_RESET
+                . "\033[{$this->inputRow};1H\033[2K"
+            );
+
+            $this->appendChat(self::C_USER . 'User: ' . self::C_RESET . $line . "\n");
+            $this->inbox[] = $line;
+        }
     }
 
     public function send(string $text): void
@@ -135,13 +153,11 @@ final class AsyncConsoleConversation implements ConversationInterface
         if ($status === null) {
             $this->statusLabel = '';
             $this->writeStatus('');
-            $this->writeInput('');
             return;
         }
 
         if ($status->animated) {
             $this->statusLabel = $status->label();
-            $this->writeInput('');
             $this->spinner = spawn($this->spin(...));
         } else {
             // "Done": activity stops; token usage moves to the bottom bar.
@@ -156,6 +172,13 @@ final class AsyncConsoleConversation implements ConversationInterface
     {
         $this->cancelSpinner();
         $this->cancelResizeWatcher();
+
+        if ($this->reader !== null) {
+            $this->reader->cancel();
+            $this->reader = null;
+        }
+
+        $this->restoreTerminal();
     }
 
     public function __destruct()
@@ -185,6 +208,7 @@ final class AsyncConsoleConversation implements ConversationInterface
             . "\033[{$this->chatStart};1H"
             . "\033[?25h"
         );
+
         $this->writeBar();
         $this->renderHistory();
         fflush(STDOUT);
@@ -195,6 +219,7 @@ final class AsyncConsoleConversation implements ConversationInterface
     {
         $this->buildLayout();
         $this->draw();
+
         if ($this->awaitingInput) {
             fwrite(STDOUT, "\033[{$this->inputRow};1H");   // keep the cursor on the input row
             fflush(STDOUT);
@@ -211,6 +236,7 @@ final class AsyncConsoleConversation implements ConversationInterface
         $right = '';
         $used  = mb_strwidth(self::stripAnsi($left)) + mb_strwidth(self::stripAnsi($right));
         $gap   = max(1, $this->cols - $used);
+
         fwrite(STDOUT, "\033[s\033[{$this->barRow};1H\033[2K" . $left . str_repeat(' ', $gap) . $right . self::C_RESET . "\033[u");
         fflush(STDOUT);
     }
@@ -226,12 +252,6 @@ final class AsyncConsoleConversation implements ConversationInterface
         fflush(STDOUT);
     }
 
-    private function writeInput(string $text): void
-    {
-        fwrite(STDOUT, "\033[s\033[{$this->inputRow};1H\033[2K{$text}" . self::C_RESET . "\033[u");
-        fflush(STDOUT);
-    }
-
     private function writeChat(string $text): void
     {
         fwrite(STDOUT, "\033[{$this->chatRows};1H{$text}" . self::C_RESET);
@@ -242,10 +262,17 @@ final class AsyncConsoleConversation implements ConversationInterface
     private function appendChat(string $line): void
     {
         $this->history[] = $line;
+
         if (\count($this->history) > self::HISTORY_MAX) {
             $this->history = \array_slice($this->history, -self::HISTORY_MAX);
         }
+
         $this->writeChat($line);
+
+        // Return the cursor to the input row: the background reader waits there,
+        // and cooked-mode echo must land on the input line, not in the history.
+        fwrite(STDOUT, "\033[{$this->inputRow};1H");
+        fflush(STDOUT);
     }
 
     /** Replay buffered history into the scroll region (after a full redraw). */
@@ -276,18 +303,9 @@ final class AsyncConsoleConversation implements ConversationInterface
     /** Re-detect the terminal size every ~200ms and relayout when it changes. */
     private function watchResize(): void
     {
-        try {
-            while (true) {
-                delay(200);
-                try {
-                    $this->syncSize();
-                } catch (\Async\OperationCanceledException $e) {
-                    throw $e;                       // cancellation must propagate
-                } catch (\Throwable) {
-                    // A transient detect/relayout error must not kill resize handling.
-                }
-            }
-        } catch (\Async\OperationCanceledException) {
+        while (true) {
+            delay(200);
+            $this->syncSize();
         }
     }
 
@@ -307,13 +325,14 @@ final class AsyncConsoleConversation implements ConversationInterface
         static $frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
         $frame = 0;
 
-        try {
-            while (true) {
-                $this->writeStatus(self::C_SPIN . $frames[$frame % 10] . self::C_RESET . self::C_DIM . $this->statusLabel . self::C_RESET);
-                $frame++;
-                delay(100);
-            }
-        } catch (\Async\OperationCanceledException) {
+        // Cancelled via cancelSpinner() — the runtime unwinds the cancellation.
+        while (true) {
+            $this->writeStatus(
+                self::C_SPIN . $frames[$frame % 10] . self::C_RESET . self::C_DIM . $this->statusLabel . self::C_RESET
+            );
+
+            $frame++;
+            delay(100);
         }
     }
 
@@ -322,8 +341,6 @@ final class AsyncConsoleConversation implements ConversationInterface
         fwrite(STDOUT, "\033[0m\033[r\033[{$this->rows};1H\n");
         fflush(STDOUT);
     }
-
-    // ── Size & layout ──────────────────────────────────────────────────────────
 
     /**
      * @return array{int,int}  [rows, cols]
@@ -356,9 +373,11 @@ final class AsyncConsoleConversation implements ConversationInterface
         if (($rows < 4 || $cols < 20) && function_exists('readline_info')) {
             $w = (int)(readline_info('terminal_width') ?: 0);
             $h = (int)(readline_info('terminal_height') ?: 0);
+
             if ($w > 20) {
                 $cols = $w;
             }
+
             if ($h > 4) {
                 $rows = $h;
             }
@@ -376,6 +395,7 @@ final class AsyncConsoleConversation implements ConversationInterface
     private static function winConsoleSize(): ?array
     {
         static $k = null;
+
         try {
             if ($k === null) {
                 $k = \FFI::cdef(
