@@ -8,7 +8,9 @@ use Claw\Agent\Usage;
 
 final class TokenUsageBlock implements StatusBlockInterface
 {
-    public function __construct(private readonly Usage $usage) {}
+    public function __construct(private readonly Usage $usage)
+    {
+    }
 
     public function render(): string
     {

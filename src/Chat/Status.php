@@ -23,7 +23,8 @@ final class Status
     public function __construct(
         private readonly array $blocks,
         public readonly bool $animated = false,
-    ) {}
+    ) {
+    }
 
     public static function typing(string $message = 'Thinking…'): self
     {
@@ -42,7 +43,7 @@ final class Status
 
     public function render(): string
     {
-        return implode('', array_map(static fn(StatusBlockInterface $b) => $b->render(), $this->blocks));
+        return implode('', array_map(static fn (StatusBlockInterface $b) => $b->render(), $this->blocks));
     }
 
     /**
@@ -52,9 +53,9 @@ final class Status
     public function label(): string
     {
         $blocks = $this->animated
-            ? array_filter($this->blocks, static fn(StatusBlockInterface $b) => !($b instanceof SpinnerBlock))
+            ? array_filter($this->blocks, static fn (StatusBlockInterface $b) => !($b instanceof SpinnerBlock))
             : $this->blocks;
 
-        return implode('', array_map(static fn(StatusBlockInterface $b) => $b->render(), $blocks));
+        return implode('', array_map(static fn (StatusBlockInterface $b) => $b->render(), $blocks));
     }
 }

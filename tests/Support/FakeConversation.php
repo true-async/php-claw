@@ -34,5 +34,7 @@ final class FakeConversation implements ConversationInterface
         $this->sent[] = $text;
     }
 
-    public function updateStatus(?Status $status): void {}
+    public function updateStatus(?Status $status): void
+    {
+    }
 }

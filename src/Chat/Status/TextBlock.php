@@ -6,7 +6,9 @@ namespace Claw\Chat\Status;
 
 final class TextBlock implements StatusBlockInterface
 {
-    public function __construct(private readonly string $text) {}
+    public function __construct(private readonly string $text)
+    {
+    }
 
     public function render(): string
     {

@@ -10,22 +10,6 @@ namespace Claw\Chat;
  */
 final class ConsoleChat implements ChatInterface
 {
-    /** @var resource */
-    private $input;
-
-    /** @var resource */
-    private $output;
-
-    /**
-     * @param resource|null $input
-     * @param resource|null $output
-     */
-    public function __construct($input = null, $output = null)
-    {
-        $this->input = $input ?? STDIN;
-        $this->output = $output ?? STDOUT;
-    }
-
     public function accept(): ConversationInterface
     {
         return new AsyncConsoleConversation();

@@ -29,12 +29,10 @@ final class AsyncConsoleConversation implements ConversationInterface
 {
     // ANSI color shortcuts
     private const string C_RESET   = "\033[0m";
-    private const string C_BOLD    = "\033[1m";
     private const string C_DIM     = "\033[2m";
     private const string C_BANNER  = "\033[1;96m";   // bold bright cyan — banner
     private const string C_SEP     = "\033[90m";      // dark gray — separator
     private const string C_SPIN    = "\033[93m";      // bright yellow — spinner
-    private const string C_TOOL    = "\033[96m";      // cyan — tool name
     private const string C_TOKENS  = "\033[32m";      // green — token count
     private const string C_USER    = "\033[97m";      // bright white — user prefix
     private const string C_CLAW    = "\033[1;97m";    // bold white — claw response prefix
@@ -51,7 +49,9 @@ final class AsyncConsoleConversation implements ConversationInterface
     private int $barRow = 0;      // bottom slot bar (tokens left, reserved right)
     private string $sep = '';
     private string $banner = '';
+    /** @var Coroutine<mixed>|null */
     private ?Coroutine $spinner = null;
+    /** @var Coroutine<mixed>|null */
     private ?Coroutine $resizeWatcher = null;
     private string $statusLabel = '';
     private string $tokens = '';
@@ -61,6 +61,7 @@ final class AsyncConsoleConversation implements ConversationInterface
     private array $history = [];
     private const int HISTORY_MAX = 500;
 
+    /** @var Coroutine<mixed>|null */
     private ?Coroutine $reader = null;
     /** @var list<string> Submitted lines awaiting consumption by receive(). */
     private array $inbox = [];
@@ -303,7 +304,7 @@ final class AsyncConsoleConversation implements ConversationInterface
     /** Re-detect the terminal size every ~200ms and relayout when it changes. */
     private function watchResize(): void
     {
-        while (true) {
+        while (true) { // @phpstan-ignore while.alwaysTrue (infinite loop; cancelled via cancelResizeWatcher())
             delay(200);
             $this->syncSize();
         }
@@ -326,7 +327,7 @@ final class AsyncConsoleConversation implements ConversationInterface
         $frame = 0;
 
         // Cancelled via cancelSpinner() — the runtime unwinds the cancellation.
-        while (true) {
+        while (true) { // @phpstan-ignore while.alwaysTrue
             $this->writeStatus(
                 self::C_SPIN . $frames[$frame % 10] . self::C_RESET . self::C_DIM . $this->statusLabel . self::C_RESET
             );
