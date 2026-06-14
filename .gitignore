@@ -15,3 +15,6 @@
 
 # IDE
 /.idea/
+
+# Agent tooling (Serena MCP — auto-generated config + cache)
+/.serena/
