@@ -19,6 +19,7 @@ use Claw\Tool\ListFilesTool;
 use Claw\Tool\PhpEvalTool;
 use Claw\Tool\ReadFileTool;
 use Claw\Tool\Registry;
+use Claw\Tool\ScheduleTool;
 use Claw\Tool\Workspace;
 use Claw\Tool\WriteFileTool;
 
@@ -87,7 +88,13 @@ try {
     exit(1);
 }
 
-new Session($chat->accept(), $agent, $tools, $system, $config->model, $config->maxHistory, store: $store)->run();
+$conversation = $chat->accept();
+
+// The schedule tool delivers reminders straight to the user, so it's wired with
+// this conversation's send() as its sink.
+$tools->add(new ScheduleTool($conversation->send(...)));
+
+new Session($conversation, $agent, $tools, $system, $config->model, $config->maxHistory, store: $store)->run();
 
 function makeAgent(Config $config, HttpClientInterface $http): ?AgentInterface
 {
