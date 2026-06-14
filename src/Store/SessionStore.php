@@ -36,6 +36,15 @@ final class SessionStore
             );
             // Persisted "always allow" rules: a row means the tool runs without asking.
             $this->pdo->exec('CREATE TABLE IF NOT EXISTS rules (name TEXT PRIMARY KEY)');
+            // Audit log: one row per tool call (including blocked/denied ones).
+            $this->pdo->exec(
+                'CREATE TABLE IF NOT EXISTS audit (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    call     TEXT NOT NULL,
+                    is_error INTEGER NOT NULL,
+                    result   TEXT NOT NULL
+                )',
+            );
         } catch (\PDOException $e) {
             throw new ClawException('SessionStore: cannot open ' . $path . ': ' . $e->getMessage(), 0, $e);
         }
@@ -97,6 +106,42 @@ final class SessionStore
         }
 
         $stmt->execute(['name' => $tool]);
+    }
+
+    /** Record one tool call (its summary), the outcome flag, and the result text. */
+    public function logToolCall(string $call, string $result, bool $isError): void
+    {
+        $stmt = $this->pdo->prepare('INSERT INTO audit (call, is_error, result) VALUES (:call, :err, :result)');
+        if ($stmt === false) {
+            throw new ClawException('SessionStore: failed to prepare audit insert');
+        }
+
+        $stmt->execute(['call' => $call, 'err' => $isError ? 1 : 0, 'result' => $result]);
+    }
+
+    /**
+     * The full audit trail, oldest first.
+     *
+     * @return list<array{call: string, isError: bool, result: string}>
+     */
+    public function auditTrail(): array
+    {
+        $stmt = $this->pdo->query('SELECT call, is_error, result FROM audit ORDER BY id');
+        if ($stmt === false) {
+            return [];
+        }
+
+        /** @var list<array{call: string, is_error: int, result: string}> $rows */
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+        return array_map(
+            static fn (array $row): array => [
+                'call' => $row['call'],
+                'isError' => $row['is_error'] !== 0,
+                'result' => $row['result'],
+            ],
+            $rows,
+        );
     }
 
     /**
