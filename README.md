@@ -83,5 +83,6 @@ Composer shortcuts: `composer test`, `composer analyse`, `composer cs`, `compose
 Console agent that runs end to end: Config, async HTTP with cause-aware retry, Claude &
 DeepSeek backends, the tool set (`bash`, `read_file`, `write_file`, `list_files`, `date`,
 `php_eval`, `schedule`), the session loop, a permission gatekeeper (confirm + persisted
-"always" rules), and per-conversation SQLite persistence (history survives restarts). Next:
-a Telegram channel (chat-id allowlist) and an audit log of tool calls.
+"always" rules), per-conversation SQLite persistence (history survives restarts), and a
+Telegram channel (chat-id allowlist, long-poll, "typing…" indicator). Next: an audit log of
+tool calls.

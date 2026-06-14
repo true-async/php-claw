@@ -3,10 +3,15 @@
 
 declare(strict_types=1);
 
+use function Async\spawn;
+
 use Claw\Agent\AgentInterface;
 use Claw\Agent\ClaudeAgent;
 use Claw\Agent\OpenAiCompatibleAgent;
 use Claw\Chat\ConsoleChat;
+use Claw\Chat\ConversationInterface;
+use Claw\Chat\TelegramChat;
+use Claw\Chat\TelegramClient;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
@@ -55,46 +60,57 @@ if ($agent === null) {
 }
 
 $workspace = new Workspace($workspaceDir);
-$tools = new Registry();
-$tools->add(new BashTool($workspaceDir));
-$tools->add(new ReadFileTool($workspace));
-$tools->add(new WriteFileTool($workspace));
-$tools->add(new ListFilesTool($workspace));
-$tools->add(new DateTool());
-$tools->add(new PhpEvalTool());
 
 $persona = __DIR__ . '/../CLAUDE.md';
 $system = is_file($persona) ? (string) file_get_contents($persona) : DEFAULT_SYSTEM;
 
 $chat = match ($config->channel) {
     'console' => new ConsoleChat(),
-    default => null,   // telegram not wired yet
+    'telegram' => new TelegramChat(
+        new TelegramClient($http, $config->telegramToken),
+        $config->isChatAllowed(...),   // authorization: drop anyone not on the allowlist
+    ),
+    default => null,
 };
 if ($chat === null) {
     fwrite(STDERR, "Channel '{$config->channel}' is not wired yet.\n");
     exit(1);
 }
 
-// One SQLite file per conversation, so history survives restarts. The console is
-// a single conversation; the Telegram gateway will open one file per chat_id.
+// One SQLite file per conversation (keyed by its id), so history survives restarts.
 $sessionsDir = $workspaceDir . '/sessions';
 if (!is_dir($sessionsDir)) {
     mkdir($sessionsDir, 0o775, true);
 }
-try {
-    $store = new SessionStore($sessionsDir . '/console.db');
-} catch (ClawException $e) {
-    fwrite(STDERR, 'Store error: ' . $e->getMessage() . "\n");
-    exit(1);
+
+// Build the per-conversation tool set + store and run its session. Tools are
+// per-conversation because `schedule` delivers reminders to that exact chat.
+$runSession = static function (ConversationInterface $conversation) use ($agent, $workspace, $workspaceDir, $system, $config, $sessionsDir): void {
+    $tools = new Registry();
+    $tools->add(new BashTool($workspaceDir));
+    $tools->add(new ReadFileTool($workspace));
+    $tools->add(new WriteFileTool($workspace));
+    $tools->add(new ListFilesTool($workspace));
+    $tools->add(new DateTool());
+    $tools->add(new PhpEvalTool());
+    $tools->add(new ScheduleTool($conversation->send(...)));
+
+    $store = new SessionStore($sessionsDir . '/' . $conversation->id() . '.db');
+
+    new Session($conversation, $agent, $tools, $system, $config->model, $config->maxHistory, store: $store)->run();
+};
+
+if ($chat instanceof TelegramChat) {
+    // Many chats: long-poll in the background, then one Session per authorized chat.
+    spawn($chat->poll(...));
+    for (;;) {
+        $conversation = $chat->accept();
+        spawn(static fn () => $runSession($conversation));
+    }
 }
 
-$conversation = $chat->accept();
-
-// The schedule tool delivers reminders straight to the user, so it's wired with
-// this conversation's send() as its sink.
-$tools->add(new ScheduleTool($conversation->send(...)));
-
-new Session($conversation, $agent, $tools, $system, $config->model, $config->maxHistory, store: $store)->run();
+// Console: a single conversation, run inline.
+$runSession($chat->accept());
 
 function makeAgent(Config $config, HttpClientInterface $http): ?AgentInterface
 {
