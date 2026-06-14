@@ -31,6 +31,11 @@ final class FakeConversation implements ConversationInterface
         $this->incoming = [...$messages, null];   // close after the scripted messages
     }
 
+    public function id(): string
+    {
+        return 'test';
+    }
+
     public function confirm(string $prompt): Approval
     {
         $this->confirmed[] = $prompt;

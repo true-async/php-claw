@@ -33,6 +33,11 @@ final class ConsoleConversation implements ConversationInterface
         $this->output = $output;
     }
 
+    public function id(): string
+    {
+        return 'console';
+    }
+
     public function receive(): ?string
     {
         // Push any visible status (e.g. token count) into scroll history before
