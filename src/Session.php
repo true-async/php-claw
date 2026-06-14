@@ -11,7 +11,6 @@ use Claw\Agent\Role;
 use Claw\Agent\ToolResultBlock;
 use Claw\Agent\ToolSpec;
 use Claw\Agent\ToolUseBlock;
-use Claw\Chat\Approval;
 use Claw\Chat\ConversationInterface;
 use Claw\Chat\Status;
 use Claw\Exceptions\AgentException;
@@ -20,10 +19,14 @@ use Claw\Exceptions\ContextLengthException;
 use Claw\Exceptions\QuotaExceededException;
 use Claw\Exceptions\RateLimitException;
 use Claw\Exceptions\ToolException;
-use Claw\Permission\Decision;
+use Claw\Exec\AuditMiddleware;
+use Claw\Exec\ChainExecutor;
+use Claw\Exec\ExecutorInterface;
+use Claw\Exec\PermissionMiddleware;
 use Claw\Permission\Policy;
 use Claw\Store\SessionStore;
 use Claw\Tool\Registry;
+use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
 
 /**
@@ -45,6 +48,9 @@ final class Session
      */
     private readonly array $specs;
 
+    /** Runs each tool call through the security/audit middleware chain. */
+    private readonly ExecutorInterface $executor;
+
     public function __construct(
         private readonly ConversationInterface $conversation,
         private readonly AgentInterface $agent,
@@ -56,6 +62,16 @@ final class Session
         private readonly ?SessionStore $store = null,
     ) {
         $this->specs = $this->buildSpecs();
+
+        // Tool execution funnels through one chain: audit logs every call (even
+        // denials), permission gates it, and the terminal stage runs the tool.
+        $this->executor = new ChainExecutor(
+            middlewares: [
+                new AuditMiddleware($this->store),
+                new PermissionMiddleware($this->policy, $this->tools, $this->conversation, $this->store),
+            ],
+            terminal: $this->runTool(...),
+        );
     }
 
     /** Drive the conversation: each message is one task. Ends when it closes. */
@@ -171,63 +187,17 @@ final class Session
 
     private function execute(ToolUseBlock $call): ToolResultBlock
     {
-        // The gatekeeper runs before the tool: a hard rule blocks it outright, a
-        // Mutating tool asks the user, Safe ones run straight through. A refusal
-        // (or block) is returned to the model as an error tool_result, so the
-        // agent simply continues without having done the action.
+        return $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
+    }
+
+    /** Terminal stage of the executor: resolve the tool and run it; failures become error results. */
+    private function runTool(ToolCall $call): ToolResultBlock
+    {
         try {
-            $tool = $this->tools->get($call->name);
-
-            $verdict = $this->policy->check($tool, $call->input);
-            if ($verdict->decision === Decision::Deny) {
-                return new ToolResultBlock($call->id, 'blocked: ' . $verdict->reason, true);
-            }
-
-            if ($verdict->decision === Decision::Confirm && !$this->approved($call)) {
-                return new ToolResultBlock($call->id, 'denied by the user', true);
-            }
-
-            return new ToolResultBlock($call->id, $tool->handle($call->input), false);
+            return new ToolResultBlock($call->id, $this->tools->get($call->name)->handle($call->input), false);
         } catch (ToolException $e) {
             return new ToolResultBlock($call->id, $e->getMessage(), true);
         }
-    }
-
-    /**
-     * Decide a Confirm: a saved "always" rule skips the prompt; otherwise ask the
-     * user. An "always" answer is remembered so we never ask for that tool again.
-     */
-    private function approved(ToolUseBlock $call): bool
-    {
-        if ($this->store !== null && $this->store->isToolAllowed($call->name)) {
-            return true;
-        }
-
-        return match ($this->conversation->confirm($this->confirmPrompt($call))) {
-            Approval::No     => false,
-            Approval::Once   => true,
-            Approval::Always => $this->remember($call->name),
-        };
-    }
-
-    /** Persist an "always allow" rule (if a store is configured) and allow the call. */
-    private function remember(string $tool): bool
-    {
-        $this->store?->allowTool($tool);
-
-        return true;
-    }
-
-    /** A short, human-readable summary of a tool call for the approval prompt. */
-    private function confirmPrompt(ToolUseBlock $call): string
-    {
-        $detail = '';
-        if ($call->input !== []) {
-            $encoded = json_encode($call->input, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $detail = $encoded === false ? '' : ' ' . $encoded;
-        }
-
-        return "Allow `{$call->name}`{$detail}?";
     }
 
     /**
