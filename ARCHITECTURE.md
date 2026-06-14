@@ -254,7 +254,6 @@ php-claw/
   bin/claw                  entrypoint: bootstrap reactor; accept() -> spawn Session
   src/
     Config.php
-    Scheduler.php           periodic tasks via the reactor timer (every/tick/run)
     Session.php             conversation state + agentic loop (run/handle/execute)
     Chat/  ChatInterface.php (accept) ConversationInterface.php
            ConsoleChat.php ConsoleConversation.php TelegramChat.php (todo)
@@ -270,6 +269,7 @@ php-claw/
     Tool/  ToolInterface.php Risk.php ToolCall.php Registry.php Workspace.php
            ReadFileTool.php WriteFileTool.php ListFilesTool.php BashTool.php (proc_open)
            DateTool.php (current time) PhpEvalTool.php (eval one expression; Dangerous)
+           ScheduleTool.php (one-shot reminder; spawns a delay coroutine)
     Permission/  Policy.php
     Store/  SessionStore.php Schema.php
     Exceptions/  ClawException.php (base) ConfigException.php ChatException.php
