@@ -81,6 +81,11 @@ final class AsyncConsoleConversation implements ConversationInterface
         $this->reader = spawn($this->readLoop(...));
     }
 
+    public function id(): string
+    {
+        return 'console';
+    }
+
     public function receive(): ?string
     {
         // The background reader (readLoop) does the actual input; here we just
