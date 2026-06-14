@@ -17,6 +17,13 @@ interface ConversationInterface
     public function send(string $text): void;
 
     /**
+     * Ask the human to approve an action. May await. Used by the permission
+     * layer before running a Mutating tool. A closed conversation (EOF) is
+     * treated as a refusal (Approval::No).
+     */
+    public function confirm(string $prompt): Approval;
+
+    /**
      * Show a transient status line (typing indicator, tool call, token usage).
      * Pass null to clear it. The status must never interleave with send() output —
      * implementations are responsible for clearing before writing permanent lines.
