@@ -23,6 +23,7 @@ use Claw\Exec\AuditMiddleware;
 use Claw\Exec\ChainExecutor;
 use Claw\Exec\ExecutorInterface;
 use Claw\Exec\PermissionMiddleware;
+use Claw\Exec\TimeoutMiddleware;
 use Claw\Permission\Policy;
 use Claw\Store\SessionStore;
 use Claw\Tool\Registry;
@@ -60,18 +61,22 @@ final class Session
         private readonly int $maxHistory = 0,
         private readonly Policy $policy = new Policy(),
         private readonly ?SessionStore $store = null,
+        private readonly int $toolTimeoutMs = 0,
     ) {
         $this->specs = $this->buildSpecs();
 
         // Tool execution funnels through one chain: audit logs every call (even
-        // denials), permission gates it, and the terminal stage runs the tool.
-        $this->executor = new ChainExecutor(
-            middlewares: [
-                new AuditMiddleware($this->store),
-                new PermissionMiddleware($this->policy, $this->tools, $this->conversation, $this->store),
-            ],
-            terminal: $this->runTool(...),
-        );
+        // denials), permission gates it, an optional timeout bounds the run, and
+        // the terminal stage runs the tool.
+        $middlewares = [
+            new AuditMiddleware($this->store),
+            new PermissionMiddleware($this->policy, $this->tools, $this->conversation, $this->store),
+        ];
+        if ($this->toolTimeoutMs > 0) {
+            $middlewares[] = new TimeoutMiddleware($this->toolTimeoutMs);   // innermost: bound each tool run
+        }
+
+        $this->executor = new ChainExecutor($middlewares, $this->runTool(...));
     }
 
     /** Drive the conversation: each message is one task. Ends when it closes. */
