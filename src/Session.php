@@ -11,6 +11,7 @@ use Claw\Agent\Role;
 use Claw\Agent\ToolResultBlock;
 use Claw\Agent\ToolSpec;
 use Claw\Agent\ToolUseBlock;
+use Claw\Chat\Approval;
 use Claw\Chat\ConversationInterface;
 use Claw\Chat\Status;
 use Claw\Exceptions\AgentException;
@@ -19,6 +20,9 @@ use Claw\Exceptions\ContextLengthException;
 use Claw\Exceptions\QuotaExceededException;
 use Claw\Exceptions\RateLimitException;
 use Claw\Exceptions\ToolException;
+use Claw\Permission\Decision;
+use Claw\Permission\Policy;
+use Claw\Store\SessionStore;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolInterface;
 
@@ -30,6 +34,9 @@ final class Session
 {
     /** @var list<Message> */
     private array $history = [];
+
+    /** How many history messages are already written to the store. */
+    private int $persisted = 0;
 
     /**
      * Tool specs are constant for the session — built once.
@@ -45,6 +52,8 @@ final class Session
         private readonly string $system,
         private readonly string $model,
         private readonly int $maxHistory = 0,
+        private readonly Policy $policy = new Policy(),
+        private readonly ?SessionStore $store = null,
     ) {
         $this->specs = $this->buildSpecs();
     }
@@ -52,10 +61,18 @@ final class Session
     /** Drive the conversation: each message is one task. Ends when it closes. */
     public function run(): void
     {
+        // Resume a prior conversation: the stored history becomes the starting
+        // context, so the agent "remembers" across restarts.
+        if ($this->store !== null) {
+            $this->history = $this->store->load();
+            $this->persisted = \count($this->history);
+        }
+
         while (($text = $this->conversation->receive()) !== null) {
             // A failure ends this task, not the conversation. React by cause.
             try {
                 $this->handle($text);
+                $this->persist();
             } catch (ContextLengthException $e) {
                 $this->conversation->send('The conversation got too long for the model. Please start a new one.');
             } catch (QuotaExceededException $e) {
@@ -138,14 +155,79 @@ final class Session
         }
     }
 
+    /** Write the messages added since the last save to the store (the new tail only). */
+    private function persist(): void
+    {
+        if ($this->store === null) {
+            return;
+        }
+
+        $new = \array_slice($this->history, $this->persisted);
+        if ($new !== []) {
+            $this->store->append(...$new);
+            $this->persisted = \count($this->history);
+        }
+    }
+
     private function execute(ToolUseBlock $call): ToolResultBlock
     {
-        // LATER: through the Executor + middleware chain (security, approvals, audit).
+        // The gatekeeper runs before the tool: a hard rule blocks it outright, a
+        // Mutating tool asks the user, Safe ones run straight through. A refusal
+        // (or block) is returned to the model as an error tool_result, so the
+        // agent simply continues without having done the action.
         try {
-            return new ToolResultBlock($call->id, $this->tools->get($call->name)->handle($call->input), false);
+            $tool = $this->tools->get($call->name);
+
+            $verdict = $this->policy->check($tool, $call->input);
+            if ($verdict->decision === Decision::Deny) {
+                return new ToolResultBlock($call->id, 'blocked: ' . $verdict->reason, true);
+            }
+
+            if ($verdict->decision === Decision::Confirm && !$this->approved($call)) {
+                return new ToolResultBlock($call->id, 'denied by the user', true);
+            }
+
+            return new ToolResultBlock($call->id, $tool->handle($call->input), false);
         } catch (ToolException $e) {
             return new ToolResultBlock($call->id, $e->getMessage(), true);
         }
+    }
+
+    /**
+     * Decide a Confirm: a saved "always" rule skips the prompt; otherwise ask the
+     * user. An "always" answer is remembered so we never ask for that tool again.
+     */
+    private function approved(ToolUseBlock $call): bool
+    {
+        if ($this->store !== null && $this->store->isToolAllowed($call->name)) {
+            return true;
+        }
+
+        return match ($this->conversation->confirm($this->confirmPrompt($call))) {
+            Approval::No     => false,
+            Approval::Once   => true,
+            Approval::Always => $this->remember($call->name),
+        };
+    }
+
+    /** Persist an "always allow" rule (if a store is configured) and allow the call. */
+    private function remember(string $tool): bool
+    {
+        $this->store?->allowTool($tool);
+
+        return true;
+    }
+
+    /** A short, human-readable summary of a tool call for the approval prompt. */
+    private function confirmPrompt(ToolUseBlock $call): string
+    {
+        $detail = '';
+        if ($call->input !== []) {
+            $encoded = json_encode($call->input, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $detail = $encoded === false ? '' : ' ' . $encoded;
+        }
+
+        return "Allow `{$call->name}`{$detail}?";
     }
 
     /**

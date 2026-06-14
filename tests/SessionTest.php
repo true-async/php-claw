@@ -13,12 +13,14 @@ use Claw\Agent\TextBlock;
 use Claw\Agent\ToolResultBlock;
 use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
+use Claw\Chat\Approval;
 use Claw\Exceptions\AgentException;
 use Claw\Exceptions\AuthException;
 use Claw\Exceptions\ContextLengthException;
 use Claw\Exceptions\QuotaExceededException;
 use Claw\Exceptions\RateLimitException;
 use Claw\Session;
+use Claw\Store\SessionStore;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
@@ -62,6 +64,50 @@ final class SessionTest
         Assert::same($toolResult->toolUseId, 't1');
         Assert::same($toolResult->content, 'echoed: hi');
         Assert::false($toolResult->isError);
+    }
+
+    #[Test]
+    public function skipsMutatingToolWhenUserDenies(): void
+    {
+        $toolUse = new ToolUseBlock('t1', 'touch', ['command' => 'echo hi']);
+        $agent = new ScriptedAgent(
+            new AgentResponse([$toolUse], [$toolUse], StopReason::ToolUse, new Usage()),
+            new AgentResponse([new TextBlock('ok')], [], StopReason::EndTurn, new Usage(), 'ok'),
+        );
+        $conversation = new FakeConversation('go');
+        $conversation->confirmReplies = [Approval::No];   // the user refuses
+        $registry = new Registry();
+        $registry->add($this->mutatingTool());
+
+        (new Session($conversation, $agent, $registry, 's', 'm'))->run();
+
+        // the user was asked, the tool did NOT run, and the model heard the refusal
+        Assert::same(count($conversation->confirmed), 1);
+        $toolResult = $agent->requests[1]->messages[2]->content[0];
+        Assert::true($toolResult instanceof ToolResultBlock);
+        Assert::true($toolResult->isError);
+        Assert::true(str_contains($toolResult->content, 'denied'));
+    }
+
+    #[Test]
+    public function runsMutatingToolWhenUserApproves(): void
+    {
+        $toolUse = new ToolUseBlock('t1', 'touch', ['command' => 'echo hi']);
+        $agent = new ScriptedAgent(
+            new AgentResponse([$toolUse], [$toolUse], StopReason::ToolUse, new Usage()),
+            new AgentResponse([new TextBlock('ok')], [], StopReason::EndTurn, new Usage(), 'ok'),
+        );
+        $conversation = new FakeConversation('go');
+        $conversation->confirmReplies = [Approval::Once];   // the user approves once
+        $registry = new Registry();
+        $registry->add($this->mutatingTool());
+
+        (new Session($conversation, $agent, $registry, 's', 'm'))->run();
+
+        $toolResult = $agent->requests[1]->messages[2]->content[0];
+        Assert::true($toolResult instanceof ToolResultBlock);
+        Assert::false($toolResult->isError);
+        Assert::true(str_contains($toolResult->content, 'ran: echo hi'));
     }
 
     #[Test]
@@ -173,6 +219,74 @@ final class SessionTest
         Assert::true(str_contains($conversation->sent[0], 'Quota exhausted'));
     }
 
+    #[Test]
+    public function alwaysApprovalIsRememberedAndSkipsTheSecondPrompt(): void
+    {
+        $path = sys_get_temp_dir() . '/claw-rules-' . uniqid('', true) . '.db';
+
+        try {
+            $call = static fn (string $id): ToolUseBlock => new ToolUseBlock($id, 'touch', ['command' => 'echo hi']);
+            $agent = new ScriptedAgent(
+                new AgentResponse([$call('t1')], [$call('t1')], StopReason::ToolUse, new Usage()),
+                new AgentResponse([$call('t2')], [$call('t2')], StopReason::ToolUse, new Usage()),
+                new AgentResponse([new TextBlock('ok')], [], StopReason::EndTurn, new Usage(), 'ok'),
+            );
+            $conversation = new FakeConversation('go');
+            $conversation->confirmReplies = [Approval::Always];   // approve, and remember it
+            $registry = new Registry();
+            $registry->add($this->mutatingTool());
+
+            (new Session($conversation, $agent, $registry, 's', 'm', store: new SessionStore($path)))->run();
+
+            // asked exactly once; the second call ran straight through the saved rule
+            Assert::same(count($conversation->confirmed), 1);
+
+            $firstResult = $agent->requests[1]->messages[2]->content[0];
+            Assert::true($firstResult instanceof ToolResultBlock);
+            Assert::false($firstResult->isError);
+
+            $secondResult = $agent->requests[2]->messages[4]->content[0];
+            Assert::true($secondResult instanceof ToolResultBlock);
+            Assert::false($secondResult->isError);
+        } finally {
+            @unlink($path);
+        }
+    }
+
+    #[Test]
+    public function remembersHistoryAcrossSessionsViaStore(): void
+    {
+        $path = sys_get_temp_dir() . '/claw-session-' . uniqid('', true) . '.db';
+
+        try {
+            // First run: one message, answered with plain text.
+            $agent1 = new ScriptedAgent(
+                new AgentResponse([new TextBlock('hi there')], [], StopReason::EndTurn, new Usage(), 'hi there'),
+            );
+            (new Session(new FakeConversation('hello'), $agent1, new Registry(), 's', 'm', store: new SessionStore($path)))->run();
+
+            // Second run: a fresh Session reopening the same file. The prior turn
+            // is loaded and replayed to the model as context.
+            $agent2 = new ScriptedAgent(
+                new AgentResponse([new TextBlock('again')], [], StopReason::EndTurn, new Usage(), 'again'),
+            );
+            (new Session(new FakeConversation('and now?'), $agent2, new Registry(), 's', 'm', store: new SessionStore($path)))->run();
+
+            // The second model call saw: user 'hello', assistant 'hi there', user 'and now?'.
+            $messages = $agent2->requests[0]->messages;
+            Assert::same(count($messages), 3);
+            Assert::same($messages[0]->role, Role::User);
+            Assert::same($messages[1]->role, Role::Assistant);
+            Assert::same($messages[2]->role, Role::User);
+
+            $first = $messages[0]->content[0];
+            Assert::true($first instanceof TextBlock);
+            Assert::same($first->text, 'hello');
+        } finally {
+            @unlink($path);
+        }
+    }
+
     private function echoTool(): ToolInterface
     {
         return new class () implements ToolInterface {
@@ -199,6 +313,36 @@ final class SessionTest
             public function handle(array $input): string
             {
                 return 'echoed: ' . ($input['msg'] ?? '');
+            }
+        };
+    }
+
+    private function mutatingTool(): ToolInterface
+    {
+        return new class () implements ToolInterface {
+            public function name(): string
+            {
+                return 'touch';
+            }
+
+            public function description(): string
+            {
+                return 'a mutating action that needs approval';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object', 'properties' => ['command' => ['type' => 'string']]];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Mutating;
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ran: ' . ($input['command'] ?? '');
             }
         };
     }
