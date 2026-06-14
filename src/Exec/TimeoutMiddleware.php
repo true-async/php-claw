@@ -34,7 +34,13 @@ final readonly class TimeoutMiddleware implements MiddlewareInterface
 
         try {
             return await($coroutine, timeout($this->timeoutMs));
-        } catch (OperationCanceledException) {
+        } catch (\Throwable $e) {
+            // Only the timeout cancellation is ours; a genuine tool failure
+            // propagates rather than being masked as a timeout.
+            if ($e::class !== OperationCanceledException::class) {
+                throw $e;
+            }
+
             $coroutine->cancel();   // propagates into a running bash subprocess and kills it
 
             return new ToolResultBlock(
