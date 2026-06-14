@@ -11,6 +11,9 @@ namespace Claw\Chat;
  */
 interface ConversationInterface
 {
+    /** A stable identifier for this conversation, used to key its persistence (the store file). */
+    public function id(): string;
+
     /** Next message from this chat, or null when the conversation is closed. May await. */
     public function receive(): ?string;
 
