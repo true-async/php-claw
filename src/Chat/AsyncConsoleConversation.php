@@ -147,6 +147,25 @@ final class AsyncConsoleConversation implements ConversationInterface
         $this->appendChat($colored ?? $msg);
     }
 
+    public function confirm(string $prompt): Approval
+    {
+        // The agent is mid-turn, so Session::run() is not consuming the inbox —
+        // the next line the background reader queues is the user's answer.
+        $this->cancelSpinner();
+        $this->writeStatus('');
+        $this->appendChat(self::C_SPIN . '⚠ ' . $prompt . ' [y = once / a = always / N = no]' . self::C_RESET . "\n");
+
+        while ($this->inbox === [] && !$this->eof) {
+            delay(50);
+        }
+
+        if ($this->inbox === []) {
+            return Approval::No;   // EOF — treat as refusal
+        }
+
+        return Approval::fromInput((string) array_shift($this->inbox));
+    }
+
     public function updateStatus(?Status $status): void
     {
         $this->cancelSpinner();

@@ -63,6 +63,16 @@ final class ConsoleConversation implements ConversationInterface
         fwrite($this->output, 'Claw: ' . $text . "\n");
     }
 
+    public function confirm(string $prompt): Approval
+    {
+        $this->clearStatus();
+        fwrite($this->output, $prompt . ' [y = once / a = always / N = no] ');
+
+        $line = fgets($this->input);
+
+        return $line === false ? Approval::No : Approval::fromInput($line);
+    }
+
     public function updateStatus(?Status $status): void
     {
         if ($status === null) {

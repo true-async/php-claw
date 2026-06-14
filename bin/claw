@@ -12,6 +12,7 @@ use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Http\HttpClientInterface;
 use Claw\Session;
+use Claw\Store\SessionStore;
 use Claw\Tool\BashTool;
 use Claw\Tool\DateTool;
 use Claw\Tool\ListFilesTool;
@@ -73,7 +74,20 @@ if ($chat === null) {
     exit(1);
 }
 
-new Session($chat->accept(), $agent, $tools, $system, $config->model, $config->maxHistory)->run();
+// One SQLite file per conversation, so history survives restarts. The console is
+// a single conversation; the Telegram gateway will open one file per chat_id.
+$sessionsDir = $workspaceDir . '/sessions';
+if (!is_dir($sessionsDir)) {
+    mkdir($sessionsDir, 0o775, true);
+}
+try {
+    $store = new SessionStore($sessionsDir . '/console.db');
+} catch (ClawException $e) {
+    fwrite(STDERR, 'Store error: ' . $e->getMessage() . "\n");
+    exit(1);
+}
+
+new Session($chat->accept(), $agent, $tools, $system, $config->model, $config->maxHistory, store: $store)->run();
 
 function makeAgent(Config $config, HttpClientInterface $http): ?AgentInterface
 {
