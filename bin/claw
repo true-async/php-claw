@@ -97,7 +97,16 @@ $runSession = static function (ConversationInterface $conversation) use ($agent,
 
     $store = new SessionStore($sessionsDir . '/' . $conversation->id() . '.db');
 
-    new Session($conversation, $agent, $tools, $system, $config->model, $config->maxHistory, store: $store)->run();
+    new Session(
+        $conversation,
+        $agent,
+        $tools,
+        $system,
+        $config->model,
+        $config->maxHistory,
+        store: $store,
+        toolTimeoutMs: $config->turnTimeoutMs,   // cap each tool run (kills a hung bash)
+    )->run();
 };
 
 if ($chat instanceof TelegramChat) {
