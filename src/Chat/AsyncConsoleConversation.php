@@ -155,16 +155,11 @@ final class AsyncConsoleConversation implements ConversationInterface
         $this->appendChat($colored ?? $msg);
     }
 
-    /**
-     * @param list<string> $messages
-     */
-    public function showDeferred(array $messages): void
+    public function showDeferred(string $message): void
     {
-        // Render only the newly-queued lines (dim); keep the full set for redraws.
-        foreach (\array_slice($messages, \count($this->deferred)) as $line) {
-            $this->writeChat(self::C_DIM . 'User: ' . $line . self::C_RESET . "\n");
-        }
-        $this->deferred = $messages;
+        // Queue one dim line below the history; keep it for redraws until flushed.
+        $this->deferred[] = $message;
+        $this->writeChat(self::C_DIM . 'User: ' . $message . self::C_RESET . "\n");
 
         fwrite(STDOUT, "\033[{$this->inputRow};1H");
         fflush(STDOUT);

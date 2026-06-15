@@ -54,10 +54,7 @@ final class QueuedConversation implements ConversationInterface
         $this->sent[] = $text;
     }
 
-    /**
-     * @param list<string> $messages
-     */
-    public function showDeferred(array $messages): void
+    public function showDeferred(string $message): void
     {
     }
 
