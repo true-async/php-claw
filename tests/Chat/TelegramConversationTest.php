@@ -30,6 +30,8 @@ final class TelegramConversationTest
         $sent = is_array($sent) ? $sent : [];
         Assert::same($sent['chat_id'] ?? null, 7);
         Assert::same($sent['action'] ?? null, 'typing');
+
+        $conversation->updateStatus(Status::done(new Usage()));   // stop the keep-alive coroutine
     }
 
     #[Test]
