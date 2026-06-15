@@ -67,6 +67,9 @@ final class AsyncConsoleConversation implements ConversationInterface
     private array $inbox = [];
     private bool $eof = false;
 
+    /** @var (callable(): void)|null Invoked when the user types "/stop". */
+    private $onInterrupt = null;
+
     public function __construct()
     {
         [$this->rows, $this->cols] = self::detectSize();
@@ -84,6 +87,11 @@ final class AsyncConsoleConversation implements ConversationInterface
     public function id(): string
     {
         return 'console';
+    }
+
+    public function onInterrupt(callable $handler): void
+    {
+        $this->onInterrupt = $handler;
     }
 
     public function receive(): ?string
@@ -124,6 +132,14 @@ final class AsyncConsoleConversation implements ConversationInterface
             $line = trim($line);
 
             if ($line === '') {
+                continue;
+            }
+
+            if ($line === '/stop') {
+                if ($this->onInterrupt !== null) {
+                    ($this->onInterrupt)();
+                }
+
                 continue;
             }
 
