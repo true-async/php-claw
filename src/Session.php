@@ -4,6 +4,12 @@ declare(strict_types=1);
 
 namespace Claw;
 
+use function Async\await;
+
+use Async\Coroutine;
+
+use function Async\spawn;
+
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentRequest;
 use Claw\Agent\Message;
@@ -52,6 +58,9 @@ final class Session
     /** Runs each tool call through the security/audit middleware chain. */
     private readonly ExecutorInterface $executor;
 
+    /** @var Coroutine<mixed>|null The coroutine running the current turn, so "/stop" can cancel it. */
+    private ?Coroutine $currentTurn = null;
+
     public function __construct(
         private readonly ConversationInterface $conversation,
         private readonly AgentInterface $agent,
@@ -77,6 +86,9 @@ final class Session
         }
 
         $this->executor = new ChainExecutor($middlewares, $this->runTool(...));
+
+        // A "/stop" from the user cancels the in-flight turn (if one is running).
+        $this->conversation->onInterrupt($this->requestStop(...));
     }
 
     /** Drive the conversation: each message is one task. Ends when it closes. */
@@ -90,9 +102,14 @@ final class Session
         }
 
         while (($text = $this->conversation->receive()) !== null) {
-            // A failure ends this task, not the conversation. React by cause.
+            // The turn runs in its own coroutine so a "/stop" can cancel it
+            // mid-flight. A failure ends this task, not the conversation.
+            $checkpoint = \count($this->history);
+            $turn = spawn(fn () => $this->handle($text));
+            $this->currentTurn = $turn;
+
             try {
-                $this->handle($text);
+                await($turn);
                 $this->persist();
             } catch (ContextLengthException $e) {
                 $this->conversation->send('The conversation got too long for the model. Please start a new one.');
@@ -104,8 +121,27 @@ final class Session
                 $this->conversation->send('Configuration error: ' . $e->getMessage());
             } catch (AgentException $e) {
                 $this->conversation->send('Error: ' . $e->getMessage());
+            } catch (\Throwable $e) {
+                if ($e::class !== \Async\AsyncCancellation::class) {
+                    $this->currentTurn = null;
+
+                    throw $e;
+                }
+
+                // "/stop": discard the abandoned turn so the history stays valid
+                // (no dangling tool_use), then acknowledge.
+                $this->history = \array_slice($this->history, 0, $checkpoint);
+                $this->conversation->send('Stopped.');
+            } finally {
+                $this->currentTurn = null;
             }
         }
+    }
+
+    /** Cancel the in-flight turn, if any (invoked when the user sends "/stop"). */
+    private function requestStop(): void
+    {
+        $this->currentTurn?->cancel();
     }
 
     private function quotaMessage(QuotaExceededException $e): string

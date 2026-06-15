@@ -47,6 +47,36 @@ final class TelegramChatTest
         Assert::same($conversation->receive(), 'ok');
     }
 
+    #[Test]
+    public function routesCallbackQueryAnswerToTheChat(): void
+    {
+        $chat = $this->chat([111]);
+        $chat->ingest(self::dm(fromId: 111, chatId: 111, text: 'hi'));   // creates the conversation
+
+        $conversation = $chat->accept();
+        Assert::same($conversation->receive(), 'hi');
+
+        // A button press for that chat is delivered as its data token (here "a").
+        $chat->ingest(self::callback(fromId: 111, chatId: 111, id: 'cq1', data: 'a'));
+        Assert::same($conversation->receive(), 'a');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function callback(int $fromId, int $chatId, string $id, string $data): array
+    {
+        return [
+            'update_id' => 2,
+            'callback_query' => [
+                'id' => $id,
+                'from' => ['id' => $fromId],
+                'data' => $data,
+                'message' => ['chat' => ['id' => $chatId, 'type' => 'private']],
+            ],
+        ];
+    }
+
     /**
      * @param list<int> $allowed
      */

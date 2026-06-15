@@ -17,6 +17,9 @@ final class TelegramConversation implements ConversationInterface
     /** @var list<string> Inbound messages awaiting consumption. */
     private array $inbox = [];
 
+    /** @var (callable(): void)|null Invoked when the user sends "/stop". */
+    private $onInterrupt = null;
+
     public function __construct(
         private readonly int $chatId,
         private readonly TelegramClient $client,
@@ -28,10 +31,23 @@ final class TelegramConversation implements ConversationInterface
         return (string) $this->chatId;
     }
 
-    /** Queue an inbound message (called by the gateway). */
+    /** Queue an inbound message (called by the gateway), or fire the interrupt on "/stop". */
     public function deliver(string $text): void
     {
+        if ($text === '/stop') {
+            if ($this->onInterrupt !== null) {
+                ($this->onInterrupt)();
+            }
+
+            return;
+        }
+
         $this->inbox[] = $text;
+    }
+
+    public function onInterrupt(callable $handler): void
+    {
+        $this->onInterrupt = $handler;
     }
 
     // Return type stays ?string to match ConversationInterface (other channels
@@ -53,9 +69,16 @@ final class TelegramConversation implements ConversationInterface
 
     public function confirm(string $prompt): Approval
     {
-        // Text-reply approval: the next inbound message is the answer. While the
-        // turn runs, receive() is not consuming, so the reply lands here.
-        $this->send($prompt . "\n\nReply: y = once, a = always, anything else = no.");
+        // Inline buttons. Their callback_data are the same y/a/n tokens a typed
+        // reply uses, so a click and a text reply both flow through deliver() into
+        // the inbox — confirm() just waits for whichever arrives.
+        $this->client->sendMessage($this->chatId, $prompt, [
+            'inline_keyboard' => [[
+                ['text' => '✅ Once', 'callback_data' => 'y'],
+                ['text' => '♾️ Always', 'callback_data' => 'a'],
+                ['text' => '✖️ No', 'callback_data' => 'n'],
+            ]],
+        ]);
 
         while ($this->inbox === []) {
             delay(50);

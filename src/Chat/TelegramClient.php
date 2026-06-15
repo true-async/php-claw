@@ -35,7 +35,7 @@ final readonly class TelegramClient
         $url = $this->base . 'getUpdates?' . http_build_query([
             'offset' => $offset,
             'timeout' => $timeoutSeconds,
-            'allowed_updates' => '["message"]',
+            'allowed_updates' => '["message","callback_query"]',
         ]);
 
         $data = $this->http->get($url)->json();
@@ -59,15 +59,29 @@ final readonly class TelegramClient
         return $updates;
     }
 
-    public function sendMessage(int $chatId, string $text): void
+    /**
+     * @param array<string, mixed>|null $replyMarkup optional inline keyboard, etc.
+     */
+    public function sendMessage(int $chatId, string $text, ?array $replyMarkup = null): void
     {
-        $this->call('sendMessage', ['chat_id' => $chatId, 'text' => $text]);
+        $payload = ['chat_id' => $chatId, 'text' => $text];
+        if ($replyMarkup !== null) {
+            $payload['reply_markup'] = $replyMarkup;
+        }
+
+        $this->call('sendMessage', $payload);
     }
 
     /** Show a transient chat action (e.g. "typing…"); Telegram clears it after ~5s. */
     public function sendChatAction(int $chatId, string $action): void
     {
         $this->call('sendChatAction', ['chat_id' => $chatId, 'action' => $action]);
+    }
+
+    /** Acknowledge a button press so Telegram stops showing the client-side spinner. */
+    public function answerCallbackQuery(string $callbackQueryId): void
+    {
+        $this->call('answerCallbackQuery', ['callback_query_id' => $callbackQueryId]);
     }
 
     /**
