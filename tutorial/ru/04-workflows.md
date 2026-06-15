@@ -107,3 +107,208 @@ PHP и `TrueAsync`.
 (`spawn`/`await`), а каждый вложенный вызов проходит через тот же слой безопасности и
 аудита, что и обычный инструмент. То, ради чего затевался весь проект, в одном живом
 примере: ИИ пишет асинхронный PHP, и этот PHP по-настоящему работает.
+
+## Спускаемся в машинное отделение
+
+Теория красива, но всё решается в деталях. Давайте проследим, как рождался код,
+потому что на этом пути нас поджидала пара ловушек, и одна едва не оказалась
+смертельной.
+
+### Сначала решаем, чем навык должен быть
+
+Любому существу нужен скелет. Скелет Workflow это контракт: что навык умеет рассказать
+о себе и как его запустить.
+
+```php
+interface WorkflowInterface
+{
+    public function name(): string;
+    public function description(): string;
+
+    /** @return array<string, mixed> */
+    public function inputSchema(): array;
+
+    /**
+     * @param array<string, mixed> $input
+     *
+     * @return array<string, mixed>
+     */
+    public function run(array $input, WorkflowContext $ctx): array;
+}
+```
+
+Обратите внимание на тонкость, которая кажется мелочью, а решает всё: `run` возвращает
+не строку, а массив. Почему? Потому что навык должен уметь кормить своим результатом
+другой навык. Строку пришлось бы разбирать заново, а структура передаётся как есть.
+Так из маленьких навыков складываются большие.
+
+### Опасная дверь
+
+Теперь самое страшное. Этот код будет **по-настоящему исполняться** на машине. Дай ему
+волю, и сгенерированный класс позовёт что угодно: сотрёт файлы, уйдёт в сеть, запустит
+шелл.
+
+Решение оказалось почти философским: у навыка должна быть ровно **одна дверь** наружу.
+Мы назвали её `WorkflowContext`, и через неё проходит каждый вызов инструмента и каждый
+вызов соседнего навыка.
+
+```php
+public function call(string $tool, array $input): string
+{
+    $id = 'wf-' . $this->depth . '-' . (++$this->calls);
+    $result = $this->executor->call(new ToolCall($id, $tool, $input));
+
+    if ($result->isError) {
+        throw new WorkflowException("tool '{$tool}' failed: " . $result->content);
+    }
+
+    return $result->content;
+}
+```
+
+Красота в том, что `call` не делает ничего особенного сам. Он передаёт вызов тому же
+`executor`, через который ходят обычные инструменты агента, а значит навык бесплатно
+получает весь уже построенный слой защиты: проверку прав, аудит, таймаут. Дверь одна,
+и она под охраной.
+
+Есть и вторая опасность, потоньше. Навык может позвать другой навык, тот третий, а
+третий снова первый. Бесконечная рекурсия, и процесс ложится. Поэтому у той же двери
+стоит счётчик глубины:
+
+```php
+public function run(string $workflow, array $input): array
+{
+    if ($this->depth >= $this->maxDepth) {
+        throw new WorkflowException("workflow recursion limit ({$this->maxDepth}) reached at '{$workflow}'");
+    }
+
+    return $this->runner->run($workflow, $input, $this->depth + 1);
+}
+```
+
+### Ловушка одного процесса
+
+А вот ловушка, которая чуть не сгубила всю затею, и заметить её заранее непросто.
+
+Вспомните: `TrueAsync` это **один процесс** на множество чатов. Теперь представьте, что
+у двух собеседников есть навык с одним именем, скажем `Digest`. Оба лежат как класс
+`Digest`. И в миг, когда мы подгрузим второй, PHP встанет на дыбы: «Cannot redeclare
+class». Один процесс не терпит двух классов с одинаковым полным именем.
+
+Спасение в том, чтобы дать каждому навыку уникальное пространство имён, привязанное к
+области видимости:
+
+```php
+public function classFor(string $name, bool $shared = false): string
+{
+    return $shared
+        ? self::NS_ROOT . '\\Common\\' . $name
+        : self::NS_ROOT . '\\Session\\' . $this->sessionSegment . '\\' . $name;
+}
+```
+
+Общий навык живёт в `ClawWorkflow\Common\Digest`, а сессионный в
+`ClawWorkflow\Session\S42\Digest`. Имена больше не сталкиваются. А чтобы PHP нашёл файл
+по такому имени, мы вешаем простейший автолоадер, превращающий имя класса в путь:
+
+```php
+spl_autoload_register(static function (string $class) use ($base): void {
+    if (!str_starts_with($class, self::NS_ROOT . '\\')) {
+        return;
+    }
+
+    $relative = substr($class, \strlen(self::NS_ROOT) + 1);
+    $path = $base . '/' . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($path)) {
+        require $path;
+    }
+});
+```
+
+Имя класса собирается только из проверенных идентификаторов, так что подсунуть путь с
+`../` и сбежать из папки не выйдет.
+
+### Навык в дикой природе
+
+Хватит теории, посмотрим на живого зверя. Вот навык, который агент сочинил из готовых
+инструментов: посчитать PHP-файлы и записать датированный отчёт.
+
+```php
+namespace ClawWorkflow\Common;
+
+use Claw\Workflow\WorkflowContext;
+use Claw\Workflow\WorkflowInterface;
+
+final class ProjectStats implements WorkflowInterface
+{
+    public function name(): string
+    {
+        return 'ProjectStats';
+    }
+
+    public function description(): string
+    {
+        return 'Counts PHP files in the workspace and writes a dated report.';
+    }
+
+    public function inputSchema(): array
+    {
+        return ['type' => 'object', 'properties' => []];
+    }
+
+    public function run(array $input, WorkflowContext $ctx): array
+    {
+        $date  = $ctx->call('current_date', []);
+        $count = trim($ctx->call('bash', ['command' => "find . -name '*.php' | wc -l"]));
+
+        $ctx->call('write_file', [
+            'path'    => 'reports/php-files.txt',
+            'content' => "{$date}: {$count} PHP files",
+        ]);
+
+        return ['date' => $date, 'php_files' => (int) $count];
+    }
+}
+```
+
+Заметьте: ни одного прямого `exec`, ни одного `file_put_contents`. Только вежливые
+обращения через `$ctx`. Навык не трогает мир напрямую, он стучится в дверь.
+
+А теперь то, ради чего всё затевалось: цикл и вызов соседнего навыка. Проверим список
+сайтов, и если какой-то упал, позовём навык-уведомитель.
+
+```php
+public function run(array $input, WorkflowContext $ctx): array
+{
+    $down = [];
+
+    foreach ($input['urls'] as $url) {
+        $code = trim($ctx->call('bash', [
+            'command' => 'curl -s -o /dev/null -w "%{http_code}" ' . escapeshellarg($url),
+        ]));
+
+        if ($code !== '200') {
+            $down[] = $url;
+        }
+    }
+
+    if ($down !== []) {
+        $ctx->run('NotifyOwner', ['message' => 'Down: ' . implode(', ', $down)]);
+    }
+
+    return ['checked' => count($input['urls']), 'down' => $down];
+}
+```
+
+Здесь видно всё сразу: обычный PHP-цикл, вызов инструмента через `call` и вызов
+**другого навыка** через `run`. Маленький `SiteWatch` опёрся на `NotifyOwner`, как
+ветка опирается на ствол.
+
+### Что осталось за кадром
+
+Ядро готово: контракт, единственная дверь, защита от рекурсии, два дома для навыков и
+автолоадер. Но один страж ещё не на посту. Прежде чем сказать `require` чужому коду,
+его нужно **прочитать** и убедиться, что внутри только вызовы из разрешённой палитры:
+без `eval`, без прямого шелла, без побегов в файловую систему. Этим займётся отдельный
+смотритель, статический проверяющий, и именно он превратит «ИИ написал код» в «ИИ
+написал проверенный код». О нём в следующий раз.
