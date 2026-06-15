@@ -2,8 +2,8 @@
 
 The current behaviour of the code blocks the user from entering new messages while
 the AI agent or a Tool is still working. We call the AI-agent + Tools processing
-cycle the `Turn-Loop` — the function that handles one user input and returns a
-result. In the code we also rename the `handle` method to `turnLoop`.
+cycle the `Turn-Loop`. It is the function that handles one user input and returns
+a result. In the code we also rename the `handle` method to `turnLoop`.
 
 As you might guess, to make this asynchronous we need to run the `turnLoop` logic
 in a separate coroutine, so it doesn't block user input. But what do we do with the
@@ -124,7 +124,7 @@ new messages, which are displayed in grey. After a successful reply, the agent
 immediately picks up the whole chat.
 
 It would also be nice to add the ability to cancel the `Turn-Loop` if the user
-changes their mind — for example, by pressing "ESC" or sending the `/stop` command.
+changes their mind, for example by pressing "ESC" or sending the `/stop` command.
 
 For example:
 ```php
@@ -156,8 +156,8 @@ how coroutines actually work in `TrueAsync` and how they pass control around.
 ## TrueAsync coroutines and suspend
 
 Coroutines in `TrueAsync` always yield control cooperatively. You cannot take control
-away from a coroutine — as happens, say, in `Go` — or interrupt it at an arbitrary
-point. When a coroutine wants to yield control it calls the `suspend()` function. From
+away from a coroutine, as happens for example in `Go`, nor can you interrupt it at
+an arbitrary point. When a coroutine wants to yield control it calls the `suspend()` function. From
 that moment the coroutine doesn't know when control will return to it. It also doesn't
 and cannot know where exactly control will be passed.
 
@@ -275,8 +275,8 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 CLAW_ALLOWED_CHATS=11111111,22222222   # who is allowed to use the bot
 ```
 
-`CLAW_ALLOWED_CHATS` is the security guarantee. This way only those users — or trusted
-people — can interact with the bot.
+`CLAW_ALLOWED_CHATS` is the security guarantee. This way only those users, or trusted
+people, can interact with the bot.
 
 ## Extra features included in the release
 
