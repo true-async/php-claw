@@ -45,6 +45,11 @@ final class FakeConversation implements ConversationInterface
 
     public function receive(): ?string
     {
+        // Yield so a turn spawned by the previous message can run before we hand
+        // over the next one — mirroring a real channel where input arrives between
+        // turns rather than all at once.
+        \Async\delay(1);
+
         return array_shift($this->incoming);
     }
 

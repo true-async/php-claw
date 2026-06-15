@@ -5,7 +5,13 @@ declare(strict_types=1);
 namespace Claw;
 
 use Async\AsyncCancellation;
+
+use function Async\await;
+
 use Async\Coroutine;
+
+use function Async\spawn;
+
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentRequest;
 use Claw\Agent\Message;
@@ -31,9 +37,6 @@ use Claw\Store\SessionStore;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
-
-use function Async\await;
-use function Async\spawn;
 
 /**
  * One conversation. The main loop reads user input continuously and never blocks
