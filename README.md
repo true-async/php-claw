@@ -80,9 +80,10 @@ Composer shortcuts: `composer test`, `composer analyse`, `composer cs`, `compose
 
 ## Status
 
-Console agent that runs end to end: Config, async HTTP with cause-aware retry, Claude &
-DeepSeek backends, the tool set (`bash`, `read_file`, `write_file`, `list_files`, `date`,
-`php_eval`, `schedule`), the session loop, a permission gatekeeper (confirm + persisted
-"always" rules), per-conversation SQLite persistence (history survives restarts), and a
-Telegram channel (chat-id allowlist, long-poll, "typing…" indicator). Next: an audit log of
-tool calls.
+Console + Telegram agent that runs end to end: Config, async HTTP with cause-aware retry,
+Claude & DeepSeek backends, the tool set (`bash`, `read_file`, `write_file`, `list_files`,
+`date`, `php_eval`, `schedule`), the session loop, a tool-execution middleware chain
+(permission gatekeeper with confirm + persisted "always" rules, audit log, per-tool
+timeout), per-conversation SQLite persistence (history survives restarts), `/stop` to cancel
+a running turn, and a Telegram channel (chat-id allowlist, long-poll, "typing…" indicator,
+inline approval buttons). Next: skills, and OS-level sandboxing of the `bash` tool.
