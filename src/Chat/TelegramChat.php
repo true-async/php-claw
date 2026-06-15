@@ -70,6 +70,13 @@ final class TelegramChat implements ChatInterface
      */
     public function ingest(array $update): void
     {
+        $callback = $update['callback_query'] ?? null;
+        if (\is_array($callback)) {
+            $this->ingestCallback($callback);
+
+            return;
+        }
+
         $message = $update['message'] ?? null;
         if (!\is_array($message)) {
             return;
@@ -103,5 +110,34 @@ final class TelegramChat implements ChatInterface
         }
 
         $conversation->deliver(trim($text));
+    }
+
+    /**
+     * Route a button press: authorize the clicker, acknowledge it, and deliver its
+     * data token to the chat's pending confirm() — the same path as a typed reply.
+     *
+     * @param array<string, mixed> $callback
+     */
+    private function ingestCallback(array $callback): void
+    {
+        $from = \is_array($callback['from'] ?? null) ? $callback['from'] : [];
+        if (!($this->isAllowed)((int) ($from['id'] ?? 0))) {
+            return;
+        }
+
+        $id = (string) ($callback['id'] ?? '');
+        if ($id !== '') {
+            $this->client->answerCallbackQuery($id);
+        }
+
+        $message = \is_array($callback['message'] ?? null) ? $callback['message'] : [];
+        $chat = \is_array($message['chat'] ?? null) ? $message['chat'] : [];
+        $chatId = (int) ($chat['id'] ?? 0);
+        $data = $callback['data'] ?? null;
+
+        $conversation = $this->conversations[$chatId] ?? null;
+        if ($conversation !== null && \is_string($data)) {
+            $conversation->deliver($data);
+        }
     }
 }

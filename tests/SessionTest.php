@@ -287,6 +287,30 @@ final class SessionTest
         }
     }
 
+    #[Test]
+    public function stopCancelsTheRunningTurn(): void
+    {
+        // A slow round-trip, so the "/stop" lands while the turn is mid-flight.
+        $agent = new class () implements AgentInterface {
+            public function send(AgentRequest $request): AgentResponse
+            {
+                \Async\delay(1000);
+
+                return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done');
+            }
+        };
+        $conversation = new FakeConversation('hello');
+        $session = new Session($conversation, $agent, new Registry(), 's', 'm');
+
+        $run = \Async\spawn(static fn () => $session->run());
+        \Async\delay(50);                    // let the turn start and the agent begin awaiting
+        $conversation->triggerInterrupt();   // the user sends "/stop"
+        \Async\await($run);
+
+        Assert::true(\in_array('Stopped.', $conversation->sent, true));
+        Assert::false(\in_array('done', $conversation->sent, true));   // the answer never arrived
+    }
+
     private function echoTool(): ToolInterface
     {
         return new class () implements ToolInterface {

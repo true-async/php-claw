@@ -20,6 +20,13 @@ interface ConversationInterface
     public function send(string $text): void;
 
     /**
+     * Register a handler invoked when the user asks to interrupt the running turn
+     * (e.g. sends "/stop"). The command is consumed by the channel, not delivered
+     * as a normal message.
+     */
+    public function onInterrupt(callable $handler): void;
+
+    /**
      * Ask the human to approve an action. May await. Used by the permission
      * layer before running a Mutating tool. A closed conversation (EOF) is
      * treated as a refusal (Approval::No).
