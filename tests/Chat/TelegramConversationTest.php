@@ -52,23 +52,6 @@ final class TelegramConversationTest
     }
 
     #[Test]
-    public function stopCommandFiresInterruptAndIsNotQueued(): void
-    {
-        /** @var \ArrayObject<int, int> $fired */
-        $fired = new \ArrayObject();
-        $conversation = new TelegramConversation(7, new TelegramClient(new FakeHttpClient(new HttpResponse(200, '{"ok":true}')), 'TOK'));
-        $conversation->onInterrupt(static function () use ($fired): void {
-            $fired[] = 1;
-        });
-
-        $conversation->deliver('/stop');
-        $conversation->deliver('hello');
-
-        Assert::same(count($fired), 1);
-        Assert::same($conversation->receive(), 'hello');   // "/stop" was consumed, not queued
-    }
-
-    #[Test]
     public function updateStatusIsSilentWhenClearedOrDone(): void
     {
         $http = new FakeHttpClient(new HttpResponse(200, '{"ok":true}'));

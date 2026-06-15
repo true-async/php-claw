@@ -9,3 +9,8 @@ parameters:
     # clash with PHPStan's built-in PDO knowledge.
     scanDirectories:
         - vendor/true-async/ide-helper/src/Async
+    # Async\Cancellation (the Throwable root that AsyncCancellation extends) lives
+    # in the package root, not under src/Async. Pull in just that file so PHPStan
+    # knows the class is catchable, without scanning all of src/ (it redeclares \PDO).
+    scanFiles:
+        - vendor/true-async/ide-helper/src/Cancellation.php

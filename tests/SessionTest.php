@@ -299,13 +299,11 @@ final class SessionTest
                 return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done');
             }
         };
-        $conversation = new FakeConversation('hello');
-        $session = new Session($conversation, $agent, new Registry(), 's', 'm');
+        // The turn starts on "hello" (and parks on the slow send); "/stop" arrives
+        // while it runs and the main loop cancels it.
+        $conversation = new FakeConversation('hello', '/stop');
 
-        $run = \Async\spawn(static fn () => $session->run());
-        \Async\delay(50);                    // let the turn start and the agent begin awaiting
-        $conversation->triggerInterrupt();   // the user sends "/stop"
-        \Async\await($run);
+        (new Session($conversation, $agent, new Registry(), 's', 'm'))->run();
 
         Assert::true(\in_array('Stopped.', $conversation->sent, true));
         Assert::false(\in_array('done', $conversation->sent, true));   // the answer never arrived
