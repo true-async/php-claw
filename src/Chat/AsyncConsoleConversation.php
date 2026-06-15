@@ -36,6 +36,8 @@ final class AsyncConsoleConversation implements ConversationInterface
     private const string C_TOKENS  = "\033[32m";      // green — token count
     private const string C_USER    = "\033[97m";      // bright white — user prefix
     private const string C_CLAW    = "\033[1;97m";    // bold white — claw response prefix
+    private const string C_WARN    = "\033[33m";      // yellow — non-fatal PHP warning/notice
+    private const string C_ERR     = "\033[91m";      // bright red — PHP error-level diagnostic
 
     // ── Render state ──────────────────────────────────────────────────────────
     private int $rows = 0;
@@ -70,6 +72,15 @@ final class AsyncConsoleConversation implements ConversationInterface
     /** @var list<string> Raw user lines typed but not yet sent to the agent (rendered dim). */
     private array $deferred = [];
 
+    /** The latest non-fatal PHP diagnostic, shown as its own block below history (never sent to the AI). */
+    private ?string $warning = null;
+
+    /** Whether our error handler is installed, so close() restores exactly once. */
+    private bool $errorHandlerActive = false;
+
+    /** Re-entrancy guard: a diagnostic raised during the repaint must not recurse. */
+    private bool $handlingError = false;
+
     public function __construct()
     {
         [$this->rows, $this->cols] = self::detectSize();
@@ -82,6 +93,11 @@ final class AsyncConsoleConversation implements ConversationInterface
         // Read input in the background so the user can type even while the agent
         // is busy ("thinking"). receive() just consumes what this produces.
         $this->reader = spawn($this->readLoop(...));
+
+        // Capture non-fatal PHP diagnostics so they land in their own block instead
+        // of printing over the fixed TUI layout — and never reach the agent's history.
+        set_error_handler($this->handlePhpError(...));
+        $this->errorHandlerActive = true;
     }
 
     public function id(): string
@@ -238,12 +254,63 @@ final class AsyncConsoleConversation implements ConversationInterface
             $this->reader = null;
         }
 
+        if ($this->errorHandlerActive) {
+            restore_error_handler();
+            $this->errorHandlerActive = false;
+        }
+
         $this->restoreTerminal();
     }
 
     public function __destruct()
     {
         $this->close();
+    }
+
+    /**
+     * Capture a non-fatal PHP diagnostic (warning/notice/deprecation): keep only the
+     * latest one, render it as its own block, and suppress PHP's default output so it
+     * can't corrupt the TUI. Never touches Session history, so it can't reach the AI.
+     */
+    private function handlePhpError(int $level, string $message, string $file = '', int $line = 0): bool
+    {
+        // Respect the @-operator and the configured error_reporting threshold.
+        if ((error_reporting() & $level) === 0) {
+            return false;
+        }
+
+        // Keep only the latest diagnostic; a new one replaces the previous block.
+        $isError = ($level & (E_USER_ERROR | E_RECOVERABLE_ERROR)) !== 0;
+        $color   = $isError ? self::C_ERR : self::C_WARN;
+
+        $this->warning = $color . self::levelName($level) . ': ' . $message
+            . ' (' . basename($file) . ':' . $line . ')' . self::C_RESET;
+
+        // Repaint once; guard against a diagnostic raised during the repaint itself.
+        if (!$this->handlingError) {
+            $this->handlingError = true;
+
+            try {
+                $this->draw();
+                fwrite(STDOUT, "\033[{$this->inputRow};1H");
+                fflush(STDOUT);
+            } finally {
+                $this->handlingError = false;
+            }
+        }
+
+        return true;   // handled — PHP's default handler must not print over the layout
+    }
+
+    private static function levelName(int $level): string
+    {
+        return match ($level) {
+            E_WARNING, E_USER_WARNING         => 'Warning',
+            E_NOTICE, E_USER_NOTICE           => 'Notice',
+            E_DEPRECATED, E_USER_DEPRECATED   => 'Deprecated',
+            E_USER_ERROR, E_RECOVERABLE_ERROR => 'Error',
+            default                           => 'PHP',
+        };
     }
 
     // ── Rendering primitives ───────────────────────────────────────────────────
@@ -343,6 +410,9 @@ final class AsyncConsoleConversation implements ConversationInterface
         $lines = $this->history;
         foreach ($this->deferred as $line) {
             $lines[] = self::C_DIM . 'User: ' . $line . self::C_RESET . "\n";
+        }
+        if ($this->warning !== null) {
+            $lines[] = $this->warning . "\n";   // its own block, below the dim deferred area
         }
 
         foreach (\array_slice($lines, -$height) as $line) {
