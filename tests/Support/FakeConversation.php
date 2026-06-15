@@ -26,25 +26,9 @@ final class FakeConversation implements ConversationInterface
     /** @var list<string> Prompts seen by confirm(). */
     public array $confirmed = [];
 
-    /** @var (callable(): void)|null */
-    private $interrupt = null;
-
     public function __construct(string ...$messages)
     {
         $this->incoming = [...$messages, null];   // close after the scripted messages
-    }
-
-    public function onInterrupt(callable $handler): void
-    {
-        $this->interrupt = $handler;
-    }
-
-    /** Simulate the user sending "/stop" while a turn is running. */
-    public function triggerInterrupt(): void
-    {
-        if ($this->interrupt !== null) {
-            ($this->interrupt)();
-        }
     }
 
     public function id(): string

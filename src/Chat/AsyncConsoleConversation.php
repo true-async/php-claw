@@ -67,8 +67,8 @@ final class AsyncConsoleConversation implements ConversationInterface
     private array $inbox = [];
     private bool $eof = false;
 
-    /** @var (callable(): void)|null Invoked when the user types "/stop". */
-    private $onInterrupt = null;
+    /** @var list<string> Raw user lines typed but not yet sent to the agent (rendered dim). */
+    private array $deferred = [];
 
     public function __construct()
     {
@@ -87,11 +87,6 @@ final class AsyncConsoleConversation implements ConversationInterface
     public function id(): string
     {
         return 'console';
-    }
-
-    public function onInterrupt(callable $handler): void
-    {
-        $this->onInterrupt = $handler;
     }
 
     public function receive(): ?string
@@ -135,14 +130,6 @@ final class AsyncConsoleConversation implements ConversationInterface
                 continue;
             }
 
-            if ($line === '/stop') {
-                if ($this->onInterrupt !== null) {
-                    ($this->onInterrupt)();
-                }
-
-                continue;
-            }
-
             // Re-assert the scroll region + separators (the Enter newline may
             // nudge them), record the line, then re-home the cursor.
 
@@ -154,18 +141,37 @@ final class AsyncConsoleConversation implements ConversationInterface
                 . "\033[{$this->inputRow};1H\033[2K"
             );
 
-            $this->appendChat(self::C_USER . 'User: ' . self::C_RESET . $line . "\n");
+            // A typed line is "deferred" until a turn picks it up: queue it for
+            // receive() and show it dim in the deferred sub-area below history.
+            $this->deferred[] = $line;
             $this->inbox[] = $line;
+            $this->writeChat(self::C_DIM . 'User: ' . $line . self::C_RESET . "\n");
+            fwrite(STDOUT, "\033[{$this->inputRow};1H");
+            fflush(STDOUT);
         }
     }
 
     public function send(string $text): void
     {
+        $this->commitDeferred();
         $this->cancelSpinner();
         $this->writeStatus('');
         $msg     = 'Claw: ' . $text . "\n";
         $colored = preg_replace('/^(Claw: )/', self::C_CLAW . '$1' . self::C_RESET, $msg);
         $this->appendChat($colored ?? $msg);
+    }
+
+    /** Move the deferred (dim) lines into committed history — the turn now has them. */
+    private function commitDeferred(): void
+    {
+        foreach ($this->deferred as $line) {
+            $this->history[] = self::C_USER . 'User: ' . self::C_RESET . $line . "\n";
+        }
+        $this->deferred = [];
+
+        if (\count($this->history) > self::HISTORY_MAX) {
+            $this->history = \array_slice($this->history, -self::HISTORY_MAX);
+        }
     }
 
     public function confirm(string $prompt): Approval
@@ -316,11 +322,17 @@ final class AsyncConsoleConversation implements ConversationInterface
         fflush(STDOUT);
     }
 
-    /** Replay buffered history into the scroll region (after a full redraw). */
+    /** Replay history, then the dim "deferred" sub-area, into the scroll region. */
     private function renderHistory(): void
     {
         $height = $this->chatRows - $this->chatStart + 1;
-        foreach (\array_slice($this->history, -$height) as $line) {
+
+        $lines = $this->history;
+        foreach ($this->deferred as $line) {
+            $lines[] = self::C_DIM . 'User: ' . $line . self::C_RESET . "\n";
+        }
+
+        foreach (\array_slice($lines, -$height) as $line) {
             fwrite(STDOUT, "\033[{$this->chatRows};1H{$line}" . self::C_RESET);
         }
     }
