@@ -17,6 +17,7 @@ final readonly class StepSpec
         public ?string $critic = null,    // critic name; null = default
         public ?ToolSet $toolSet = null,  // tools available to this step
         public bool $optional = false,    // whether the step itself may be skipped
+        public ?string $rubric = null,    // success criteria for the critic; null = critic judges on its own
     ) {
     }
 }

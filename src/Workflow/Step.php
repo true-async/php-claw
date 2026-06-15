@@ -30,6 +30,7 @@ final class Step
         public ?Score $score = null,
         public ?StepOutcome $outcome = null,
         public StepStatus $status = StepStatus::Pending,
+        public readonly ?string $rubric = null,   // success criteria the critic evaluates against
     ) {
     }
 

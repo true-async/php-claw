@@ -32,7 +32,7 @@ final class WorkflowEngine
                 return new StepResult([], new Score(0, true, 'budget exhausted'), StepOutcome::Abort);
             }
 
-            $step = new Step($number, $attempt, $spec->description);
+            $step = new Step($number, $attempt, $spec->description, rubric: $spec->rubric);
             $step->status = StepStatus::Running;
 
             $this->executor->execute($step);
