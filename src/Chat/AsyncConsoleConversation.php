@@ -141,19 +141,13 @@ final class AsyncConsoleConversation implements ConversationInterface
                 . "\033[{$this->inputRow};1H\033[2K"
             );
 
-            // A typed line is "deferred" until a turn picks it up: queue it for
-            // receive() and show it dim in the deferred sub-area below history.
-            $this->deferred[] = $line;
+            // Queue the line; the session reflects it in the UI via showDeferred().
             $this->inbox[] = $line;
-            $this->writeChat(self::C_DIM . 'User: ' . $line . self::C_RESET . "\n");
-            fwrite(STDOUT, "\033[{$this->inputRow};1H");
-            fflush(STDOUT);
         }
     }
 
     public function send(string $text): void
     {
-        $this->commitDeferred();
         $this->cancelSpinner();
         $this->writeStatus('');
         $msg     = 'Claw: ' . $text . "\n";
@@ -161,9 +155,27 @@ final class AsyncConsoleConversation implements ConversationInterface
         $this->appendChat($colored ?? $msg);
     }
 
-    /** Move the deferred (dim) lines into committed history — the turn now has them. */
-    private function commitDeferred(): void
+    /**
+     * @param list<string> $messages
+     */
+    public function showDeferred(array $messages): void
     {
+        // Render only the newly-queued lines (dim); keep the full set for redraws.
+        foreach (\array_slice($messages, \count($this->deferred)) as $line) {
+            $this->writeChat(self::C_DIM . 'User: ' . $line . self::C_RESET . "\n");
+        }
+        $this->deferred = $messages;
+
+        fwrite(STDOUT, "\033[{$this->inputRow};1H");
+        fflush(STDOUT);
+    }
+
+    public function flushDeferred(): void
+    {
+        if ($this->deferred === []) {
+            return;
+        }
+
         foreach ($this->deferred as $line) {
             $this->history[] = self::C_USER . 'User: ' . self::C_RESET . $line . "\n";
         }
@@ -172,6 +184,12 @@ final class AsyncConsoleConversation implements ConversationInterface
         if (\count($this->history) > self::HISTORY_MAX) {
             $this->history = \array_slice($this->history, -self::HISTORY_MAX);
         }
+
+        // Repaint so the just-sent lines show in their committed colour and the
+        // dim sub-area is gone.
+        $this->draw();
+        fwrite(STDOUT, "\033[{$this->inputRow};1H");
+        fflush(STDOUT);
     }
 
     public function confirm(string $prompt): Approval

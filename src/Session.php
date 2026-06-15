@@ -116,10 +116,12 @@ final class Session
             }
 
             $this->deferredMessages[] = $message;
+            $this->conversation->showDeferred($this->deferredMessages);   // reflect the queue in the UI
 
             // One turn at a time. Messages typed while a turn runs pile up and are
             // delivered together when the next turn starts.
             if ($this->currentTurn === null || $this->currentTurn->isCompleted()) {
+                $this->conversation->flushDeferred();   // the queue is now committed (sent)
                 $batch = $this->deferredMessages;
                 $this->deferredMessages = [];
                 $this->currentTurn = spawn(fn () => $this->startTurn($batch));
