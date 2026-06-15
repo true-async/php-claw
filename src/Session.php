@@ -157,10 +157,13 @@ final class Session
 
             $this->conversation->flushDeferred();   // the queued lines are now committed (sent)
 
-            $turn = spawn(fn () => $this->startTurn($batch));
-            $this->currentTurn = $turn;
-            await($turn);
-            $this->currentTurn = null;
+            try {
+                $turn = spawn(fn () => $this->startTurn($batch));
+                $this->currentTurn = $turn;
+                await($turn);
+            } finally {
+                $this->currentTurn = null;
+            }
         }
     }
 
