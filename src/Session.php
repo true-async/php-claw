@@ -97,7 +97,7 @@ final class Session
         $this->executor = new ChainExecutor($middlewares, $this->runTool(...));
 
         // Buffered so the input loop can keep queuing while a turn runs without blocking.
-        $this->inbox = new Channel(1024);
+        $this->inbox = new Channel(16);
     }
 
     /**
@@ -118,7 +118,7 @@ final class Session
         // Turns run in their own coroutine so they chain back-to-back: the moment
         // one finishes, the next starts on whatever queued while it ran. This loop
         // only collects input (and cancels on "/stop") — it never blocks on a turn.
-        $turns = spawn($this->turnsLoop(...));
+        $turns = spawn($this->turnsMainLoop(...));
 
         while (($message = $this->conversation->receive()) !== null) {
             if ($message === '/stop') {
@@ -141,7 +141,7 @@ final class Session
      * (so "/stop" cancels just that turn); when it finishes we immediately pick up
      * whatever queued while it ran. Exits once the chat is closed and drained.
      */
-    private function turnsLoop(): void
+    private function turnsMainLoop(): void
     {
         for (;;) {
             try {
