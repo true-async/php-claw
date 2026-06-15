@@ -101,39 +101,15 @@ final class Session
             $this->persisted = \count($this->history);
         }
 
-        while (($text = $this->conversation->receive()) !== null) {
-            // The turn runs in its own coroutine so a "/stop" can cancel it
-            // mid-flight. A failure ends this task, not the conversation.
-            $checkpoint = \count($this->history);
-            $turn = spawn(fn () => $this->handle($text));
-            $this->currentTurn = $turn;
+        $deferredMessages = [];
+        $currentTurn = null;
 
-            try {
-                await($turn);
-                $this->persist();
-            } catch (ContextLengthException $e) {
-                $this->conversation->send('The conversation got too long for the model. Please start a new one.');
-            } catch (QuotaExceededException $e) {
-                $this->conversation->send($this->quotaMessage($e));
-            } catch (RateLimitException $e) {
-                $this->conversation->send($this->rateLimitMessage($e));
-            } catch (AuthException $e) {
-                $this->conversation->send('Configuration error: ' . $e->getMessage());
-            } catch (AgentException $e) {
-                $this->conversation->send('Error: ' . $e->getMessage());
-            } catch (\Throwable $e) {
-                if ($e::class !== \Async\AsyncCancellation::class) {
-                    $this->currentTurn = null;
+        while (($message = $this->conversation->receive()) !== null) {
+            $deferredMessages[] = $message;
 
-                    throw $e;
-                }
-
-                // "/stop": discard the abandoned turn so the history stays valid
-                // (no dangling tool_use), then acknowledge.
-                $this->history = \array_slice($this->history, 0, $checkpoint);
-                $this->conversation->send('Stopped.');
-            } finally {
-                $this->currentTurn = null;
+            if ($currentTurn === null || $currentTurn->isCompleted()) {
+                $currentTurn = spawn($this->startTurn(...), $deferredMessages);
+                $deferredMessages = [];
             }
         }
     }
@@ -162,11 +138,44 @@ final class Session
         return 'Rate limit reached. Please try again later.';
     }
 
-    /** Process one user message to a final answer (the ReAct loop). */
-    private function handle(string $text): void
+    private function startTurn(string|array $text): void
     {
-        $this->history[] = Message::userText($text);
+        if (is_array($text)) {
+            foreach ($text as $line) {
+                $this->history[] = Message::userText($line);
+            }
+        } else {
+            $this->history[] = Message::userText($text);
+        }
 
+        // The turn runs in its own coroutine so a "/stop" can cancel it
+        // mid-flight. A failure ends this task, not the conversation.
+        $checkpoint = \count($this->history);
+
+        try {
+            $this->turnLoop();
+            $this->persist();
+        } catch (ContextLengthException $e) {
+            $this->conversation->send('The conversation got too long for the model. Please start a new one.');
+        } catch (QuotaExceededException $e) {
+            $this->conversation->send($this->quotaMessage($e));
+        } catch (RateLimitException $e) {
+            $this->conversation->send($this->rateLimitMessage($e));
+        } catch (AuthException $e) {
+            $this->conversation->send('Configuration error: ' . $e->getMessage());
+        } catch (AgentException $e) {
+            $this->conversation->send('Error: ' . $e->getMessage());
+        } catch (\Cancellation $e) {
+            // "/stop": discard the abandoned turn so the history stays valid
+            // (no dangling tool_use), then acknowledge.
+            $this->history = \array_slice($this->history, 0, $checkpoint);
+            $this->conversation->send('Stopped: '.$e->getMessage());
+        }
+    }
+
+    /** Process one user message to a final answer (the ReAct loop). */
+    private function turnLoop(): void
+    {
         $totalInput  = 0;
         $totalOutput = 0;
 
