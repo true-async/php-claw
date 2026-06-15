@@ -53,6 +53,22 @@ final class FakeConversation implements ConversationInterface
         $this->sent[] = $text;
     }
 
+    /** @var list<string> The deferred set last shown (captured for tests). */
+    public array $deferred = [];
+
+    /**
+     * @param list<string> $messages
+     */
+    public function showDeferred(array $messages): void
+    {
+        $this->deferred = $messages;
+    }
+
+    public function flushDeferred(): void
+    {
+        $this->deferred = [];
+    }
+
     public function updateStatus(?Status $status): void
     {
     }

@@ -20,6 +20,17 @@ interface ConversationInterface
     public function send(string $text): void;
 
     /**
+     * Reflect the queued-but-not-yet-sent user messages in the UI (e.g. dim, below
+     * the history). Driven by the session as its deferred queue changes.
+     *
+     * @param list<string> $messages
+     */
+    public function showDeferred(array $messages): void;
+
+    /** Promote the currently-deferred messages to committed history — a turn took them. */
+    public function flushDeferred(): void;
+
+    /**
      * Ask the human to approve an action. May await. Used by the permission
      * layer before running a Mutating tool. A closed conversation (EOF) is
      * treated as a refusal (Approval::No).
