@@ -4,12 +4,8 @@ declare(strict_types=1);
 
 namespace Claw;
 
-use function Async\await;
-
+use Async\AsyncCancellation;
 use Async\Coroutine;
-
-use function Async\spawn;
-
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentRequest;
 use Claw\Agent\Message;
@@ -36,9 +32,14 @@ use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
 
+use function Async\await;
+use function Async\spawn;
+
 /**
- * One conversation: holds history and runs the agentic loop. `run()` drives the
- * dialogue (one message = one task); the model and tools are fixed for its life.
+ * One conversation. The main loop reads user input continuously and never blocks
+ * on the agent: each turn (the ReAct loop) runs in its own coroutine, so the user
+ * can keep typing — messages pile up and are sent to the next turn — and a "/stop"
+ * cancels the running turn.
  */
 final class Session
 {
@@ -47,6 +48,9 @@ final class Session
 
     /** How many history messages are already written to the store. */
     private int $persisted = 0;
+
+    /** @var list<string> User messages received but not yet sent to a turn. */
+    private array $deferredMessages = [];
 
     /**
      * Tool specs are constant for the session — built once.
@@ -86,12 +90,14 @@ final class Session
         }
 
         $this->executor = new ChainExecutor($middlewares, $this->runTool(...));
-
-        // A "/stop" from the user cancels the in-flight turn (if one is running).
-        $this->conversation->onInterrupt($this->requestStop(...));
     }
 
-    /** Drive the conversation: each message is one task. Ends when it closes. */
+    /**
+     * Drive the conversation. The loop never blocks on a turn: it reads input,
+     * cancels on "/stop", and otherwise queues the message — starting a new turn
+     * (with everything queued) whenever no turn is running. Ends when the chat
+     * closes; the last turn is awaited so it finishes cleanly.
+     */
     public function run(): void
     {
         // Resume a prior conversation: the stored history becomes the starting
@@ -101,23 +107,29 @@ final class Session
             $this->persisted = \count($this->history);
         }
 
-        $deferredMessages = [];
-        $currentTurn = null;
-
         while (($message = $this->conversation->receive()) !== null) {
-            $deferredMessages[] = $message;
+            // "/stop" cancels the running turn rather than being queued.
+            if ($message === '/stop') {
+                $this->currentTurn?->cancel();
 
-            if ($currentTurn === null || $currentTurn->isCompleted()) {
-                $currentTurn = spawn($this->startTurn(...), $deferredMessages);
-                $deferredMessages = [];
+                continue;
+            }
+
+            $this->deferredMessages[] = $message;
+
+            // One turn at a time. Messages typed while a turn runs pile up and are
+            // delivered together when the next turn starts.
+            if ($this->currentTurn === null || $this->currentTurn->isCompleted()) {
+                $batch = $this->deferredMessages;
+                $this->deferredMessages = [];
+                $this->currentTurn = spawn(fn () => $this->startTurn($batch));
             }
         }
-    }
 
-    /** Cancel the in-flight turn, if any (invoked when the user sends "/stop"). */
-    private function requestStop(): void
-    {
-        $this->currentTurn?->cancel();
+        // The chat closed: let the last turn finish before returning.
+        if ($this->currentTurn !== null && !$this->currentTurn->isCompleted()) {
+            await($this->currentTurn);
+        }
     }
 
     private function quotaMessage(QuotaExceededException $e): string
@@ -138,19 +150,21 @@ final class Session
         return 'Rate limit reached. Please try again later.';
     }
 
-    private function startTurn(string|array $text): void
+    /**
+     * Run one turn: append the queued user messages, then loop the agent to a
+     * final answer. A failure ends this turn, not the conversation.
+     *
+     * @param list<string> $messages
+     */
+    private function startTurn(array $messages): void
     {
-        if (is_array($text)) {
-            foreach ($text as $line) {
-                $this->history[] = Message::userText($line);
-            }
-        } else {
-            $this->history[] = Message::userText($text);
-        }
-
-        // The turn runs in its own coroutine so a "/stop" can cancel it
-        // mid-flight. A failure ends this task, not the conversation.
+        // Checkpoint before adding the user turns, so a "/stop" can fully discard
+        // this turn and leave the history valid (no dangling tool_use).
         $checkpoint = \count($this->history);
+
+        foreach ($messages as $line) {
+            $this->history[] = Message::userText($line);
+        }
 
         try {
             $this->turnLoop();
@@ -165,15 +179,15 @@ final class Session
             $this->conversation->send('Configuration error: ' . $e->getMessage());
         } catch (AgentException $e) {
             $this->conversation->send('Error: ' . $e->getMessage());
-        } catch (\Cancellation $e) {
+        } catch (AsyncCancellation) {
             // "/stop": discard the abandoned turn so the history stays valid
             // (no dangling tool_use), then acknowledge.
             $this->history = \array_slice($this->history, 0, $checkpoint);
-            $this->conversation->send('Stopped: '.$e->getMessage());
+            $this->conversation->send('Stopped.');
         }
     }
 
-    /** Process one user message to a final answer (the ReAct loop). */
+    /** Process the accumulated history to a final answer (the ReAct loop). */
     private function turnLoop(): void
     {
         $totalInput  = 0;

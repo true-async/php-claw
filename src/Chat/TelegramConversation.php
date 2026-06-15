@@ -17,9 +17,6 @@ final class TelegramConversation implements ConversationInterface
     /** @var list<string> Inbound messages awaiting consumption. */
     private array $inbox = [];
 
-    /** @var (callable(): void)|null Invoked when the user sends "/stop". */
-    private $onInterrupt = null;
-
     public function __construct(
         private readonly int $chatId,
         private readonly TelegramClient $client,
@@ -31,23 +28,10 @@ final class TelegramConversation implements ConversationInterface
         return (string) $this->chatId;
     }
 
-    /** Queue an inbound message (called by the gateway), or fire the interrupt on "/stop". */
+    /** Queue an inbound message (called by the gateway). */
     public function deliver(string $text): void
     {
-        if ($text === '/stop') {
-            if ($this->onInterrupt !== null) {
-                ($this->onInterrupt)();
-            }
-
-            return;
-        }
-
         $this->inbox[] = $text;
-    }
-
-    public function onInterrupt(callable $handler): void
-    {
-        $this->onInterrupt = $handler;
     }
 
     // Return type stays ?string to match ConversationInterface (other channels

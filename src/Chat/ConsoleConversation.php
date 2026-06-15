@@ -23,9 +23,6 @@ final class ConsoleConversation implements ConversationInterface
 
     private bool $hasStatus = false;
 
-    /** @var (callable(): void)|null Invoked when the user types "/stop". */
-    private $onInterrupt = null;
-
     /**
      * @param resource $input
      * @param resource $output
@@ -39,11 +36,6 @@ final class ConsoleConversation implements ConversationInterface
     public function id(): string
     {
         return 'console';
-    }
-
-    public function onInterrupt(callable $handler): void
-    {
-        $this->onInterrupt = $handler;
     }
 
     public function receive(): ?string
@@ -64,15 +56,6 @@ final class ConsoleConversation implements ConversationInterface
             }
 
             $line = trim($line);
-
-            if ($line === '/stop') {
-                if ($this->onInterrupt !== null) {
-                    ($this->onInterrupt)();
-                }
-
-                continue;
-            }
-
             if ($line !== '') {
                 return $line;
             }
