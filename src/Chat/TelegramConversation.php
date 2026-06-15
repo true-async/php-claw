@@ -51,10 +51,7 @@ final class TelegramConversation implements ConversationInterface
         $this->client->sendMessage($this->chatId, $text);
     }
 
-    /**
-     * @param list<string> $messages
-     */
-    public function showDeferred(array $messages): void
+    public function showDeferred(string $message): void
     {
         // No local UI on Telegram; queued messages need no separate display.
     }

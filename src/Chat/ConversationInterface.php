@@ -20,12 +20,11 @@ interface ConversationInterface
     public function send(string $text): void;
 
     /**
-     * Reflect the queued-but-not-yet-sent user messages in the UI (e.g. dim, below
-     * the history). Driven by the session as its deferred queue changes.
-     *
-     * @param list<string> $messages
+     * Show one queued-but-not-yet-sent user message (e.g. dim, below the history).
+     * The session calls this as it queues each message; flushDeferred() commits the
+     * set once a turn takes them.
      */
-    public function showDeferred(array $messages): void;
+    public function showDeferred(string $message): void;
 
     /** Promote the currently-deferred messages to committed history — a turn took them. */
     public function flushDeferred(): void;

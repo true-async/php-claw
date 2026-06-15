@@ -68,10 +68,7 @@ final class ConsoleConversation implements ConversationInterface
         fwrite($this->output, 'Claw: ' . $text . "\n");
     }
 
-    /**
-     * @param list<string> $messages
-     */
-    public function showDeferred(array $messages): void
+    public function showDeferred(string $message): void
     {
         // The terminal echoes input in cooked mode; nothing extra to render.
     }

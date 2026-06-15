@@ -8,9 +8,10 @@ use Async\AsyncCancellation;
 
 use function Async\await;
 
+use Async\Channel;
+use Async\ChannelException;
 use Async\Coroutine;
 
-use function Async\delay;
 use function Async\spawn;
 
 use Claw\Agent\AgentInterface;
@@ -53,9 +54,6 @@ final class Session
     /** How many history messages are already written to the store. */
     private int $persisted = 0;
 
-    /** @var list<string> User messages received but not yet sent to a turn. */
-    private array $deferredMessages = [];
-
     /**
      * Tool specs are constant for the session — built once.
      *
@@ -66,11 +64,11 @@ final class Session
     /** Runs each tool call through the security/audit middleware chain. */
     private readonly ExecutorInterface $executor;
 
+    /** @var Channel<string> Queue of user messages from the input loop to the turns loop. */
+    private readonly Channel $inbox;
+
     /** @var Coroutine<mixed>|null The coroutine running the current turn, so "/stop" can cancel it. */
     private ?Coroutine $currentTurn = null;
-
-    /** Set when the chat closes, so the turns loop can drain the queue and exit. */
-    private bool $closed = false;
 
     public function __construct(
         private readonly ConversationInterface $conversation,
@@ -97,6 +95,9 @@ final class Session
         }
 
         $this->executor = new ChainExecutor($middlewares, $this->runTool(...));
+
+        // Buffered so the input loop can keep queuing while a turn runs without blocking.
+        $this->inbox = new Channel(1024);
     }
 
     /**
@@ -126,12 +127,12 @@ final class Session
                 continue;
             }
 
-            $this->deferredMessages[] = $message;
-            $this->conversation->showDeferred($this->deferredMessages);   // reflect the queue in the UI
+            $this->inbox->send($message);                 // hand it to the turns loop
+            $this->conversation->showDeferred($message);  // show it queued (dim) until a turn takes it
         }
 
-        // Chat closed: let the turns loop drain the queue, then exit.
-        $this->closed = true;
+        // Chat closed: closing the channel lets the turns loop drain and exit.
+        $this->inbox->close();
         await($turns);
     }
 
@@ -143,17 +144,18 @@ final class Session
     private function turnsLoop(): void
     {
         for (;;) {
-            while ($this->deferredMessages === [] && !$this->closed) {
-                delay(20);
+            try {
+                $batch = [$this->inbox->recv()];   // blocks until a message — no polling
+            } catch (ChannelException) {
+                return;   // channel closed and drained: the chat is over
             }
 
-            if ($this->deferredMessages === []) {
-                return;   // closed and nothing left to do
+            // Take everything else already queued, so one turn handles the burst.
+            while (!$this->inbox->isEmpty()) {
+                $batch[] = $this->inbox->recv();
             }
 
-            $this->conversation->flushDeferred();   // the queue is now committed (sent)
-            $batch = $this->deferredMessages;
-            $this->deferredMessages = [];
+            $this->conversation->flushDeferred();   // the queued lines are now committed (sent)
 
             $turn = spawn(fn () => $this->startTurn($batch));
             $this->currentTurn = $turn;
