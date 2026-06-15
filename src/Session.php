@@ -36,9 +36,14 @@ use Claw\Exec\PermissionMiddleware;
 use Claw\Exec\TimeoutMiddleware;
 use Claw\Permission\Policy;
 use Claw\Store\SessionStore;
+use Claw\Tool\DefineWorkflowTool;
 use Claw\Tool\Registry;
+use Claw\Tool\RunWorkflowTool;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
+use Claw\Workflow\WorkflowRunner;
+use Claw\Workflow\WorkflowStore;
+use Claw\Workflow\WorkflowValidator;
 
 /**
  * One conversation. The main loop reads user input continuously and never blocks
@@ -80,9 +85,8 @@ final class Session
         private readonly Policy $policy = new Policy(),
         private readonly ?SessionStore $store = null,
         private readonly int $toolTimeoutMs = 0,
+        ?string $workflowDir = null,
     ) {
-        $this->specs = $this->buildSpecs();
-
         // Tool execution funnels through one chain: audit logs every call (even
         // denials), permission gates it, an optional timeout bounds the run, and
         // the terminal stage runs the tool.
@@ -95,6 +99,18 @@ final class Session
         }
 
         $this->executor = new ChainExecutor($middlewares, $this->runTool(...));
+
+        // Compiled workflows: define/run reusable skills as their own tools. The
+        // runner reuses this executor, so a workflow's steps pass the same
+        // permission/audit/timeout layer as any other tool call.
+        if ($workflowDir !== null) {
+            $workflowStore = new WorkflowStore($workflowDir, $this->conversation->id());
+            $this->tools->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
+            $this->tools->add(new RunWorkflowTool(new WorkflowRunner($workflowStore, $this->executor)));
+        }
+
+        // Built last, so the workflow tools registered above are advertised too.
+        $this->specs = $this->buildSpecs();
 
         // Buffered so the input loop can keep queuing while a turn runs without blocking.
         $this->inbox = new Channel(16);

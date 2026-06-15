@@ -106,6 +106,7 @@ $runSession = static function (ConversationInterface $conversation) use ($agent,
         $config->maxHistory,
         store: $store,
         toolTimeoutMs: $config->turnTimeoutMs,   // cap each tool run (kills a hung bash)
+        workflowDir: $workspaceDir . '/workflows',   // enables define_workflow / run_workflow
     )->run();
 };
 
