@@ -27,6 +27,7 @@ use Claw\Tool\ToolInterface;
 use Testo\Assert;
 use Testo\Test;
 use Tests\Support\FakeConversation;
+use Tests\Support\QueuedConversation;
 use Tests\Support\ScriptedAgent;
 
 final class SessionTest
@@ -175,12 +176,19 @@ final class SessionTest
                 throw new AgentException('boom api');
             }
         };
-        $conversation = new FakeConversation('first', 'second');
-
+        $conversation = new QueuedConversation();
         $session = new Session($conversation, $agent, new Registry(), 's', 'm');
-        $session->run();
 
-        // each turn failed gracefully; the loop survived both messages
+        // Deliver one message per turn, letting each turn finish before the next —
+        // so the error in one doesn't take down the loop.
+        $run = \Async\spawn(static fn () => $session->run());
+        $conversation->deliver('first');
+        \Async\delay(60);
+        $conversation->deliver('second');
+        \Async\delay(60);
+        $conversation->close();
+        \Async\await($run);
+
         Assert::same($conversation->sent, ['Error: boom api', 'Error: boom api']);
         Assert::same($agent->calls, 2);
     }
@@ -299,11 +307,18 @@ final class SessionTest
                 return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done');
             }
         };
-        // The turn starts on "hello" (and parks on the slow send); "/stop" arrives
-        // while it runs and the main loop cancels it.
-        $conversation = new FakeConversation('hello', '/stop');
+        $conversation = new QueuedConversation();
+        $session = new Session($conversation, $agent, new Registry(), 's', 'm');
 
-        (new Session($conversation, $agent, new Registry(), 's', 'm'))->run();
+        // "hello" starts a turn that parks on the slow send; once it's running,
+        // "/stop" arrives and the loop cancels it.
+        $run = \Async\spawn(static fn () => $session->run());
+        $conversation->deliver('hello');
+        \Async\delay(80);
+        $conversation->deliver('/stop');
+        \Async\delay(80);
+        $conversation->close();
+        \Async\await($run);
 
         Assert::true(\in_array('Stopped.', $conversation->sent, true));
         Assert::false(\in_array('done', $conversation->sent, true));   // the answer never arrived

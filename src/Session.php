@@ -10,6 +10,7 @@ use function Async\await;
 
 use Async\Coroutine;
 
+use function Async\delay;
 use function Async\spawn;
 
 use Claw\Agent\AgentInterface;
@@ -68,6 +69,9 @@ final class Session
     /** @var Coroutine<mixed>|null The coroutine running the current turn, so "/stop" can cancel it. */
     private ?Coroutine $currentTurn = null;
 
+    /** Set when the chat closes, so the turns loop can drain the queue and exit. */
+    private bool $closed = false;
+
     public function __construct(
         private readonly ConversationInterface $conversation,
         private readonly AgentInterface $agent,
@@ -110,8 +114,12 @@ final class Session
             $this->persisted = \count($this->history);
         }
 
+        // Turns run in their own coroutine so they chain back-to-back: the moment
+        // one finishes, the next starts on whatever queued while it ran. This loop
+        // only collects input (and cancels on "/stop") — it never blocks on a turn.
+        $turns = spawn($this->turnsLoop(...));
+
         while (($message = $this->conversation->receive()) !== null) {
-            // "/stop" cancels the running turn rather than being queued.
             if ($message === '/stop') {
                 $this->currentTurn?->cancel();
 
@@ -120,20 +128,37 @@ final class Session
 
             $this->deferredMessages[] = $message;
             $this->conversation->showDeferred($this->deferredMessages);   // reflect the queue in the UI
-
-            // One turn at a time. Messages typed while a turn runs pile up and are
-            // delivered together when the next turn starts.
-            if ($this->currentTurn === null || $this->currentTurn->isCompleted()) {
-                $this->conversation->flushDeferred();   // the queue is now committed (sent)
-                $batch = $this->deferredMessages;
-                $this->deferredMessages = [];
-                $this->currentTurn = spawn(fn () => $this->startTurn($batch));
-            }
         }
 
-        // The chat closed: let the last turn finish before returning.
-        if ($this->currentTurn !== null && !$this->currentTurn->isCompleted()) {
-            await($this->currentTurn);
+        // Chat closed: let the turns loop drain the queue, then exit.
+        $this->closed = true;
+        await($turns);
+    }
+
+    /**
+     * Run queued turns one at a time, back-to-back. Each turn is its own coroutine
+     * (so "/stop" cancels just that turn); when it finishes we immediately pick up
+     * whatever queued while it ran. Exits once the chat is closed and drained.
+     */
+    private function turnsLoop(): void
+    {
+        for (;;) {
+            while ($this->deferredMessages === [] && !$this->closed) {
+                delay(20);
+            }
+
+            if ($this->deferredMessages === []) {
+                return;   // closed and nothing left to do
+            }
+
+            $this->conversation->flushDeferred();   // the queue is now committed (sent)
+            $batch = $this->deferredMessages;
+            $this->deferredMessages = [];
+
+            $turn = spawn(fn () => $this->startTurn($batch));
+            $this->currentTurn = $turn;
+            await($turn);
+            $this->currentTurn = null;
         }
     }
 
