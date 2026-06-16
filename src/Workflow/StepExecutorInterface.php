@@ -10,7 +10,7 @@ namespace Claw\Workflow;
  * it can be a fake. Kept abstract so the engine's control logic (evaluate, decide,
  * retry) can be exercised without an LLM.
  */
-interface StepExecutor
+interface StepExecutorInterface
 {
     public function execute(Step $step): void;
 }

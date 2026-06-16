@@ -11,7 +11,7 @@ use Claw\Agent\AgentInterface;
  * "an agent can be chosen by another agent" is modelled: a router selects a
  * subagent (or tool-agent) suited to the step.
  */
-interface AgentRouter
+interface AgentRouterInterface
 {
     public function pick(StepSpec $spec, ContextNode $node): AgentInterface;
 }

@@ -6,11 +6,12 @@ namespace Claw\Workflow;
 
 /**
  * A unit of work inside a step. Tasks may run in parallel (as coroutines). A task
- * is a prompt to an agent, a tool call, or a subworkflow. Required tasks form the
+ * is a prompt to an agent, a tool call, a subworkflow, or plain deterministic PHP.
+ * Required tasks form the
  * step's completion barrier; optional ones are best-effort and their failure
  * degrades the step rather than failing it.
  */
-interface Task
+interface TaskInterface
 {
     public function kind(): TaskKind;
 

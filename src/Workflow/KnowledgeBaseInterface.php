@@ -14,8 +14,12 @@ namespace Claw\Workflow;
  * cite its provenance: which workflow and which moment in history caused it.
  * Scopes: shared, session, and a project's own base. search() is the semantic/RAG
  * entry point, needed later as the base grows.
+ *
+ * The reference implementation stores articles as Obsidian-compatible Markdown
+ * (frontmatter for tags/weights/provenance, [[wikilinks]] for links, folders for
+ * scope) kept in the repository; sqlite-vec indexes them for search().
  */
-interface KnowledgeBase
+interface KnowledgeBaseInterface
 {
     public function get(string $id): ?KbArticle;
 

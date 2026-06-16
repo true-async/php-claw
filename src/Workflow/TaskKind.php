@@ -10,4 +10,5 @@ enum TaskKind
     case Prompt;       // a prompt to an agent (LLM)
     case Tool;         // a tool call
     case Subworkflow;  // a call into another workflow
+    case Code;         // plain deterministic PHP, no LLM
 }

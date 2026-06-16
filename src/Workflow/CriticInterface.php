@@ -9,7 +9,7 @@ namespace Claw\Workflow;
  * critic runs on which step is set by the workflow or the context, and critics
  * may differ per step. The workflow's policy turns the score into a StepOutcome.
  */
-interface Critic
+interface CriticInterface
 {
     public function evaluate(Step $step): Score;
 }

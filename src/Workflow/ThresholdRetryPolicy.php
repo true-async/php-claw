@@ -5,13 +5,11 @@ declare(strict_types=1);
 namespace Claw\Workflow;
 
 /**
- * Turns a critic's soft Score into a hard StepOutcome. This is the deterministic
- * policy that lives in workflow code: the critic only judges, the policy decides.
- *
- * Defaults: pass at score >= 3; otherwise retry, and after maxAttempts escalate to
- * a human. An explicit "advise human" from the critic short-circuits to AwaitHuman.
+ * Default RetryPolicy: pass at score >= passThreshold; otherwise retry, and after
+ * maxAttempts escalate to a human. An explicit "advise human" from the critic
+ * short-circuits to AwaitHuman.
  */
-final readonly class RetryPolicy
+final readonly class ThresholdRetryPolicy implements RetryPolicyInterface
 {
     public function __construct(
         public int $passThreshold = 3,

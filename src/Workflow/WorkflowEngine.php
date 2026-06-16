@@ -15,9 +15,9 @@ namespace Claw\Workflow;
 final class WorkflowEngine
 {
     public function __construct(
-        private readonly StepExecutor $executor,
-        private readonly Critic $critic,
-        private readonly RetryPolicy $policy = new RetryPolicy(),
+        private readonly StepExecutorInterface $executor,
+        private readonly CriticInterface $critic,
+        private readonly RetryPolicyInterface $policy = new ThresholdRetryPolicy(),
     ) {
     }
 
