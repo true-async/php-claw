@@ -2,16 +2,15 @@
 
 declare(strict_types=1);
 
-namespace Claw\Workflow;
+namespace Claw\Tool;
 
 use Claw\Agent\ToolSpec;
-use Claw\Tool\Registry;
 
 /**
- * The slice of the tool palette a given agent/step is allowed to see. Different
- * agents get different sets, and the workflow decides which set goes where. This
- * is the "availability" layer (least privilege), distinct from the permission
- * layer (risk-based confirm/deny) that gates each actual call.
+ * A named slice of the tool palette: the subset of tools a given agent/step is
+ * allowed to see. Different agents get different sets. This is the "availability"
+ * layer (least privilege), distinct from the permission layer (risk-based
+ * confirm/deny) that gates each actual call.
  */
 final readonly class ToolSet
 {

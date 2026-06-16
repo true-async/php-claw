@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace Claw\Workflow;
+namespace Claw\Knowledge;
 
 /**
  * Why a knowledge-base entry exists: which workflow created it and at which moment
  * in history, plus a short reason. Lets the base be traced back to its origin.
  */
-final readonly class KbProvenance
+final readonly class Provenance
 {
     public function __construct(
         public ?string $workflow = null,    // workflow that created the entry

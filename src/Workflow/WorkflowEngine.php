@@ -25,7 +25,7 @@ final class WorkflowEngine
     {
         $attempt = 0;
 
-        for (;;) {
+        while (true) {
             ++$attempt;
 
             if ($budget !== null && $budget->isExhausted()) {

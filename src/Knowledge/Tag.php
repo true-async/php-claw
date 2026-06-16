@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace Claw\Workflow;
+namespace Claw\Knowledge;
 
 /**
  * A tag (aspect) on a knowledge-base article. Tags are how articles are organised
  * and linked. An agent may add tags freely. Weights let the agent rank relevance.
  */
-final readonly class KbTag
+final readonly class Tag
 {
     public function __construct(
         public string $name,

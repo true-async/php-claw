@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Tool\ToolSet;
+
 /**
  * The fixed skeleton of a step: structure and capabilities, set by the workflow.
  * The description (what to do) may be a parameter or filled in by an agent, but

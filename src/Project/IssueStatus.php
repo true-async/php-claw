@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Claw\Workflow;
+namespace Claw\Project;
 
 /** Lifecycle of an issue: tracked above the level of a single workflow run. */
 enum IssueStatus

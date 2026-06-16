@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Claw\Workflow;
+namespace Claw\Project;
 
 /**
  * A unit of work inside a project: a stated task or problem, like a tracker ticket.

@@ -354,8 +354,8 @@ SQLite). При старте процесса:
 
 Все интерфейсы по конвенции проекта несут суффикс `Interface`.
 
-- **Контейнеры:** `Project` (объединяет workflow, проектную KB и issue),
-  `Issue` (единица работы под проектом), `IssueStatus`.
+- **Контейнеры** (пакет `Claw\Project`): `Project` (объединяет workflow, проектную KB
+  и issue), `Issue` (единица работы под проектом), `IssueStatus`.
 - **Перечисления:** `StepOutcome` (Proceed / Abort / AwaitHuman / Retry),
   `StepStatus`, `WorkflowStatus`, `TaskKind` (Prompt / Tool / Subworkflow / Code),
   `TaskStatus`.
@@ -368,8 +368,9 @@ SQLite). При старте процесса:
 - **Исполнение:** интерфейс `StepExecutorInterface` (работа шага),
   `WorkflowEngine` (петля шаг → критик → политика → повтор/эскалация).
 - **Способности:** `ToolSet` (подмножество палитры на агента), `Budget` (лимиты).
-- **Память:** `ContextNode` (узел дерева, навигация parent/root), интерфейс
-  `KnowledgeBaseInterface` со статьями `KbArticle`, `KbTag`, `KbProvenance`.
+- **Память:** `ContextNode` (узел дерева, навигация parent/root); база знаний вынесена
+  в пакет `Claw\Knowledge`: интерфейс `KnowledgeBaseInterface` и статьи `Article`,
+  `Tag`, `Provenance`.
 - **Агенты:** интерфейс `AgentRouterInterface` (выбор исполнителя шага).
 - **Durable:** `WorkflowState` (план + позиция + итерация + статус + бюджет + дедлайн).
 
