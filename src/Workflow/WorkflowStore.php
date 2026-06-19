@@ -52,12 +52,20 @@ final class WorkflowStore
             throw new WorkflowException("cannot create workflow directory: {$dir}");
         }
 
-        $path = $dir . '/' . $name . '.php';
+        $path = $this->path($name, $shared);
         if (file_put_contents($path, $code) === false) {
             throw new WorkflowException("cannot write workflow: {$path}");
         }
 
         return $path;
+    }
+
+    /** Where a workflow's file lives (or would live), given its scope. */
+    public function path(string $name, bool $shared = false): string
+    {
+        $this->assertValidName($name);
+
+        return ($shared ? $this->commonDir() : $this->sessionDir()) . '/' . $name . '.php';
     }
 
     /** The fully-qualified class name a workflow must declare, given its scope. */

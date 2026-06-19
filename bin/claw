@@ -16,10 +16,13 @@ use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Http\HttpClientInterface;
+use Claw\Project\IssueStatus;
+use Claw\Project\ProjectStore;
 use Claw\Session;
 use Claw\Store\SessionStore;
 use Claw\Tool\BashTool;
 use Claw\Tool\DateTool;
+use Claw\Tool\DefineWorkflowTool;
 use Claw\Tool\ListFilesTool;
 use Claw\Tool\PhpEvalTool;
 use Claw\Tool\ReadFileTool;
@@ -27,11 +30,34 @@ use Claw\Tool\Registry;
 use Claw\Tool\ScheduleTool;
 use Claw\Tool\Workspace;
 use Claw\Tool\WriteFileTool;
+use Claw\Workflow\Environment;
+use Claw\Workflow\EnvKey;
+use Claw\Workflow\GenerateIssueWorkflow;
+use Claw\Workflow\InMemoryStateStore;
+use Claw\Workflow\WorkflowAbstract;
+use Claw\Workflow\WorkflowStore;
+use Claw\Workflow\WorkflowValidator;
 
 require __DIR__ . '/../vendor/autoload.php';
 
 const DEFAULT_SYSTEM = 'You are Claw, a helpful coding assistant. Be concise. '
     . 'Use the tools to inspect and change files and run commands in the workspace.';
+
+// Setup commands, not a chat: they only touch the app's own state and need no
+// agent/API key, so they run before the full Config::load (which requires one) and exit.
+//   claw -c [folder]   register a project (a state db in the app home)
+//   claw -i "<title>"  open an issue in the current project
+$argv = array_values(array_map(strval(...), $_SERVER['argv'] ?? []));
+$args = \array_slice($argv, 1);
+if (\in_array('-c', $args, true) || \in_array('--create', $args, true)) {
+    exit(createProject($args));
+}
+if (\in_array('-i', $args, true) || \in_array('--issue', $args, true)) {
+    exit(createIssue($args));
+}
+if (($args[0] ?? null) === 'run') {
+    exit(runIssue(\array_slice($args, 1)));
+}
 
 try {
     $config = Config::load(__DIR__ . '/../.env');
@@ -133,4 +159,231 @@ function makeAgent(Config $config, HttpClientInterface $http): ?AgentInterface
         ),
         default => null,
     };
+}
+
+/**
+ * Handle `claw -c [folder]`: initialize a project's state db under the app home.
+ * The target is the first non-flag argument, defaulting to the current directory.
+ *
+ * @param list<string> $args
+ */
+function createProject(array $args): int
+{
+    $appHome = appHome();
+    $target = firstPositional($args) ?? getcwd();
+    if ($target === false) {
+        fwrite(STDERR, "claw -c: cannot determine the project folder\n");
+
+        return 1;
+    }
+
+    try {
+        $project = (new ProjectStore($appHome . '/projects'))->init($target);
+    } catch (ClawException $e) {
+        fwrite(STDERR, 'claw -c: ' . $e->getMessage() . "\n");
+
+        return 1;
+    }
+
+    fwrite(STDOUT, "Project '{$project->name}' initialized.\n");
+    fwrite(STDOUT, "  folder: {$project->path}\n");
+    fwrite(STDOUT, '  state:  ' . $appHome . '/projects/' . $project->id . ".db\n");
+
+    return 0;
+}
+
+/**
+ * Handle `claw -i "<title>"`: open an issue in the project rooted at the current
+ * directory. The title is the first non-flag argument.
+ *
+ * @param list<string> $args
+ */
+function createIssue(array $args): int
+{
+    $title = firstPositional($args);
+    if ($title === null) {
+        fwrite(STDERR, "claw -i: an issue title is required (usage: claw -i \"title\")\n");
+
+        return 1;
+    }
+
+    $cwd = getcwd();
+    if ($cwd === false) {
+        fwrite(STDERR, "claw -i: cannot determine the project folder\n");
+
+        return 1;
+    }
+
+    try {
+        $issue = (new ProjectStore(appHome() . '/projects'))->addIssue($cwd, $title);
+    } catch (ClawException $e) {
+        fwrite(STDERR, 'claw -i: ' . $e->getMessage() . "\n");
+
+        return 1;
+    }
+
+    fwrite(STDOUT, "Issue #{$issue->id} opened: {$issue->title}\n");
+    fwrite(STDOUT, '  project: ' . $issue->project . "\n");
+    fwrite(STDOUT, '  status:  ' . $issue->status->name . "\n");
+
+    return 0;
+}
+
+/**
+ * The application's home folder: where it keeps its own state. Anchored to the install,
+ * not the cwd, since setup commands are usually run from an external project folder.
+ */
+function appHome(): string
+{
+    $home = getenv('CLAW_WORKSPACE');
+
+    return ($home === false || $home === '') ? \dirname(__DIR__) . '/workspace' : $home;
+}
+
+/**
+ * The first argument that is not an option flag, or null if there is none.
+ *
+ * @param list<string> $args
+ */
+function firstPositional(array $args): ?string
+{
+    foreach ($args as $arg) {
+        if ($arg !== '' && $arg[0] !== '-') {
+            return $arg;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Handle `claw run <id>`: start working on an issue. The default workflow does not solve
+ * the issue directly — it GENERATES a solver workflow tailored to it (the project's
+ * procedural memory), the human approves the generated code, and then the solver runs in
+ * the project's real folder. A solver already generated for the issue is reused.
+ *
+ * Unlike the setup commands this needs a model, so it loads the full config here.
+ *
+ * @param list<string> $args
+ */
+function runIssue(array $args): int
+{
+    $issueId = firstPositional($args);
+    if ($issueId === null) {
+        fwrite(STDERR, "claw run: an issue id is required (usage: claw run <id>)\n");
+
+        return 1;
+    }
+
+    $cwd = getcwd();
+    if ($cwd === false) {
+        fwrite(STDERR, "claw run: cannot determine the project folder\n");
+
+        return 1;
+    }
+
+    $appHome = appHome();
+    $store = new ProjectStore($appHome . '/projects');
+
+    try {
+        $project = $store->load($cwd);
+        $issue = $store->loadIssue($cwd, $issueId);
+        $config = Config::load(__DIR__ . '/../.env');
+    } catch (ClawException $e) {
+        fwrite(STDERR, 'claw run: ' . $e->getMessage() . "\n");
+
+        return 1;
+    }
+
+    $agent = makeAgent($config, new CurlHttpClient());
+    if ($agent === null) {
+        fwrite(STDERR, "claw run: agent '{$config->agent}' is not wired yet.\n");
+
+        return 1;
+    }
+
+    // The palette acts on the REAL project folder: this run works on the user's repo.
+    $workspace = new Workspace($project->path);
+    $workflowStore = new WorkflowStore($appHome . '/projects/' . $project->id . '-workflows', $project->id);
+
+    $registry = new Registry();
+    $registry->add(new BashTool($project->path));
+    $registry->add(new ReadFileTool($workspace));
+    $registry->add(new WriteFileTool($workspace));
+    $registry->add(new ListFilesTool($workspace));
+    $registry->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
+
+    $env = (new Environment())
+        ->set(EnvKey::Worker, $agent)
+        ->set(EnvKey::Registry, $registry)
+        ->set(EnvKey::ModelId, $config->model)
+        ->set(EnvKey::SystemPrompt, DEFAULT_SYSTEM)
+        ->set(EnvKey::MaxHistory, $config->maxHistory)
+        ->set(EnvKey::Store, new InMemoryStateStore());
+
+    $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
+    $solverClass = $workflowStore->classFor($solverName, true);
+    $solverPath = $workflowStore->path($solverName, true);
+    $solverNamespace = substr($solverClass, 0, (int) strrpos($solverClass, '\\'));
+
+    if (!is_file($solverPath)) {
+        fwrite(STDOUT, "Generating a solver workflow for issue #{$issue->id}…\n");
+
+        try {
+            (new GenerateIssueWorkflow($env, 'gen', [
+                'solverName' => $solverName,
+                'solverNamespace' => $solverNamespace,
+                'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
+            ], $issue, $project))->run();
+        } catch (\Throwable $e) {
+            fwrite(STDERR, 'claw run: generation failed: ' . $e->getMessage() . "\n");
+
+            return 1;
+        }
+
+        if (!is_file($solverPath)) {
+            fwrite(STDERR, "claw run: no solver workflow was produced\n");
+
+            return 1;
+        }
+
+        fwrite(STDOUT, "\n--- {$solverPath} ---\n" . (string) file_get_contents($solverPath) . "\n--- end ---\n\n");
+        if (!confirm('Run this workflow now?')) {
+            fwrite(STDOUT, "Saved. Not run — review it, then `claw run {$issue->id}` again.\n");
+
+            return 0;
+        }
+    } else {
+        fwrite(STDOUT, "Reusing solver {$solverClass}.\n");
+    }
+
+    $runId = $store->recordRun($cwd, $issue->id, $solverName);
+    $store->setIssueStatus($cwd, $issue->id, IssueStatus::InProgress);
+
+    try {
+        $solver = new $solverClass($env, $runId, [], $issue, $project);
+        if (!$solver instanceof WorkflowAbstract) {
+            throw new ClawException("{$solverClass} is not a workflow");
+        }
+        $solver->run();
+    } catch (\Throwable $e) {
+        $store->setRunStatus($cwd, $runId, 'failed');
+        fwrite(STDERR, 'claw run: run #' . $runId . ' failed: ' . $e->getMessage() . "\n");
+
+        return 1;
+    }
+
+    $store->setRunStatus($cwd, $runId, 'done');
+    fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
+
+    return 0;
+}
+
+/** Ask a yes/no question on the console; true only on an explicit yes. */
+function confirm(string $question): bool
+{
+    fwrite(STDOUT, $question . ' [y/N] ');
+    $line = fgets(STDIN);
+
+    return $line !== false && \in_array(strtolower(trim($line)), ['y', 'yes'], true);
 }
