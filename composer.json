@@ -1,0 +1,57 @@
+{
+    "name": "true-async/php-claw",
+    "description": "Minimal personal AI agent (OpenClaw / NanoClaw style) built entirely on PHP TrueAsync.",
+    "type": "project",
+    "license": "MIT",
+    "bin": [
+        "bin/claw"
+    ],
+    "authors": [
+        {
+            "name": "Edmond",
+            "email": "edmondifthen@proton.me"
+        }
+    ],
+    "require": {
+        "php": ">=8.6",
+        "ext-true_async": "*",
+        "ext-curl": "*",
+        "ext-pdo": "*",
+        "composer/ca-bundle": "^1.5"
+    },
+    "require-dev": {
+        "testo/testo": "^0.10",
+        "psr/log": "^3.0",
+        "phpstan/phpstan": "^2.2",
+        "friendsofphp/php-cs-fixer": "^3.95",
+        "true-async/ide-helper": "^0.7.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Claw\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "testo",
+        "analyse": "phpstan analyse",
+        "cs": "php-cs-fixer fix --dry-run --diff",
+        "cs-fix": "php-cs-fixer fix",
+        "qa": [
+            "@cs",
+            "@analyse",
+            "@test"
+        ]
+    },
+    "scripts-descriptions": {
+        "test": "Run the Testo test suite",
+        "analyse": "Run PHPStan static analysis",
+        "cs": "Check coding style (dry run)",
+        "cs-fix": "Fix coding style in place",
+        "qa": "Run style check, static analysis and tests"
+    }
+}

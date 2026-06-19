@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# checkout@v5 already runs on Node 24; this opts the remaining Node-20 action
+# (actions/cache@v4) into Node 24 ahead of the 2026-06-16 forced switch.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Static analysis and code style. These only parse the code, they never run
+  # it, so a stock PHP works — no TrueAsync runtime required.
+  quality:
+    name: Static analysis & code style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate composer.json
+        run: composer validate --no-check-publish
+
+      - name: Install dependencies
+        # ext-true_async only exists in a TrueAsync build, and PHP 8.6 is not
+        # released yet; the static checks don't need either, so skip the
+        # platform gate here.
+        run: composer install --no-interaction --no-progress --ignore-platform-reqs
+
+      - name: Coding style (PHP-CS-Fixer)
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff
+
+      - name: Static analysis (PHPStan)
+        run: vendor/bin/phpstan analyse --no-progress
+
+  # The test suite uses Async\delay, so it needs a real TrueAsync engine. We
+  # build a minimal one from source and cache it, keyed on the upstream SHAs.
+  tests:
+    name: Tests on TrueAsync PHP
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set build prefix
+        run: echo "TRUEASYNC_PREFIX=$HOME/trueasync-php" >> "$GITHUB_ENV"
+
+      - name: Resolve upstream revisions (cache key)
+        id: rev
+        run: |
+          echo "phpsrc=$(git ls-remote https://github.com/true-async/php-src true-async-stable | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "async=$(git ls-remote https://github.com/true-async/php-async main | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached TrueAsync PHP
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/trueasync-php
+          key: trueasync-php-noble-${{ steps.rev.outputs.phpsrc }}-${{ steps.rev.outputs.async }}-v1
+
+      - name: Ensure runtime libraries
+        # Needed both for a fresh build and for a cache hit: the built binary
+        # links against these shared libraries at run time.
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            libuv1 libonig5 libcurl4 libsqlite3-0 libxml2
+
+      - name: Build TrueAsync PHP
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/build-trueasync-php.sh
+
+      - name: Add TrueAsync PHP to PATH
+        run: echo "$TRUEASYNC_PREFIX/bin" >> "$GITHUB_PATH"
+
+      - name: Show PHP version
+        run: php -v
+
+      - name: Install Composer
+        run: curl -sS https://getcomposer.org/installer | php -- --install-dir="$TRUEASYNC_PREFIX/bin" --filename=composer
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      - name: Run tests
+        run: composer test

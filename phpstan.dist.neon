@@ -1,0 +1,25 @@
+parameters:
+    level: 8
+    paths:
+        - src
+        - bin/claw
+        - tests
+    # Official TrueAsync stubs (dev-only). Scan just the Async namespace —
+    # the package's root src/ also redeclares the global \PDO, which would
+    # clash with PHPStan's built-in PDO knowledge.
+    scanDirectories:
+        - vendor/true-async/ide-helper/src/Async
+    # Async\Cancellation (the Throwable root that AsyncCancellation extends) lives
+    # in the package root, not under src/Async. Pull in just that file so PHPStan
+    # knows the class is catchable, without scanning all of src/ (it redeclares \PDO).
+    scanFiles:
+        - vendor/true-async/ide-helper/src/Cancellation.php
+    ignoreErrors:
+        # ide-helper's spawn(callable $task, mixed ...$args) stub can't express that
+        # ...$args are forwarded to $task, so PHPStan assumes $task may be called with
+        # no args and rejects passing a callable that has a required parameter. The
+        # runtime forwards the args fine — a stub/type-system limitation, not a bug.
+        -
+            identifier: argument.type
+            message: '#^Parameter \#1 \$task of function Async\\spawn expects callable#'
+            path: src/Session.php

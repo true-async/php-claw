@@ -1,0 +1,120 @@
+@startuml class-diagram
+skinparam packageStyle rectangle
+skinparam classAttributeIconSize 0
+hide empty members
+
+package "Agent" #E8F4E8 {
+    interface AgentInterface {
+        +send(request: AgentRequest): AgentResponse
+    }
+
+    class AgentRequest {
+        +model: string
+        +messages: Message[]
+        +system: string
+        +tools: ToolSpec[]
+    }
+
+    class AgentResponse {
+        +content: ContentBlockInterface[]
+        +toolCalls: ToolCall[]
+        +text: ?string
+        +isCompleted(): bool
+    }
+}
+
+package "Tool" #FFF3E0 {
+    interface ToolInterface {
+        +execute(call: ToolCall): ToolResult
+        +getSpec(): ToolSpec
+    }
+
+    class ToolSpec {
+        +name: string
+        +description: string
+        +inputSchema: array
+    }
+}
+
+package "Chat" #E8EAF6 {
+    interface ChatInterface {
+        +send(text: string): void
+        +onConversation(callback: callable): void
+    }
+
+    class Conversation {
+        +receive(): Message
+        +send(text: string): void
+    }
+
+    class Message {
+        +role: string
+        +content: ContentBlockInterface[]
+        +createdAt: DateTime
+    }
+}
+
+package "DTO" #FCE4EC {
+    interface ContentBlockInterface {
+        +getType(): string
+    }
+
+    class TextContent {
+        +text: string
+        +getType(): string
+    }
+
+    class ToolCall {
+        +id: string
+        +name: string
+        +input: array
+        +getType(): string
+    }
+
+    class ToolResult {
+        +toolCallId: string
+        +content: string
+        +getType(): string
+    }
+}
+
+class Session {
+    -agent: AgentInterface
+    -chat: ChatInterface
+    -tools: ToolInterface[]
+    -history: Message[]
+    -model: string
+    -system: string
+    -specs: ToolSpec[]
+    +run(): void
+    -execute(call: ToolCall): ToolResult
+}
+
+' ContentBlock implementations
+TextContent  ..|> ContentBlockInterface
+ToolCall     ..|> ContentBlockInterface
+ToolResult   ..|> ContentBlockInterface
+
+' Message holds content blocks
+Message "1" o-- "1..*" ContentBlockInterface
+
+' Chat manages conversations
+ChatInterface "1" --> "0..*" Conversation : manages
+
+' AgentRequest / AgentResponse composition
+AgentRequest  o-- "1..*" Message    : messages
+AgentRequest  o-- "0..*" ToolSpec   : tools
+AgentResponse o-- "1..*" ContentBlockInterface : content
+AgentResponse o-- "0..*" ToolCall   : toolCalls
+
+' ToolInterface uses/produces DTO
+ToolInterface ..> ToolCall   : accepts
+ToolInterface ..> ToolResult : returns
+ToolInterface ..> ToolSpec   : provides
+
+' Session wires everything
+Session --> AgentInterface  : uses
+Session --> ChatInterface   : uses
+Session "1" o-- "1..*" ToolInterface : tools
+
+@enduml

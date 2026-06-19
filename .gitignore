@@ -1,0 +1,20 @@
+# Secrets — never commit
+/.env
+
+# Composer
+/vendor/
+
+# Tooling caches
+/.php-cs-fixer.cache
+/.phpstan.cache
+
+# Runtime data
+/data/
+/workspace/
+*.log
+
+# IDE
+/.idea/
+
+# Agent tooling (Serena MCP — auto-generated config + cache)
+/.serena/

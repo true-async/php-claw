@@ -1,0 +1,52 @@
+@startuml flow-diagram
+skinparam ActivityBackgroundColor #FAFAFA
+skinparam ActivityBorderColor #555555
+skinparam ArrowColor #333333
+skinparam NoteBackgroundColor #FFFDE7
+
+title Agentic Loop — php-claw
+
+start
+
+partition "**Внешний цикл** (ожидание пользователя)" {
+    :Ожидать сообщение от пользователя;
+    note right
+        **chat.receive()**
+        Telegram / другой мессенджер
+    end note
+
+    :Сохранить сообщение в **history**;
+}
+
+partition "**Внутренний цикл** (agentic loop)" {
+    repeat
+
+        :Отправить запрос агенту\n**agent.send(AgentRequest)**;
+        note right
+            Передаётся **вся** история +
+            список доступных **Tools**
+        end note
+
+        :Сохранить ответ агента в **history**;
+
+        if (**response.isCompleted()**?) then (да)
+            :Отправить текст пользователю\n**chat.send(response.text)**;
+            break
+        else (нет — нужны инструменты)
+            :Перебрать **toolCalls**\nв ответе агента;
+
+            while (есть ещё ToolCall?) is (да)
+                :Найти подходящий **ToolInterface**;
+                :Выполнить инструмент\n**tool.execute(call)**;
+                :Сохранить **ToolResult**\nв history;
+            endwhile (нет)
+        endif
+
+    repeat while (агент не завершил ответ)
+}
+
+:Вернуться к ожиданию следующего сообщения;
+
+stop
+
+@enduml

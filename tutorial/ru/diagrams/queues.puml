@@ -1,0 +1,14 @@
+@startuml
+
+actor "User" as User
+queue "Message Queue" as MessageQueue
+queue "Task Queue" as TaskQueue
+
+rectangle "Agent" as Agent
+
+User --> MessageQueue
+MessageQueue --> Agent
+Agent --> TaskQueue
+TaskQueue --> MessageQueue
+
+@enduml
