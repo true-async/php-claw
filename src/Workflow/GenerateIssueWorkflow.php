@@ -131,6 +131,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (default), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
             - the ONLY way to touch files or the shell is through `\$this->tool(\$name, \$params)`; use EXACTLY these tool names and input keys (do not invent keys):
             {$toolDocs}
+            - file paths are relative to the project root, EXACTLY as list_files shows them (e.g. 'src/Calculator.php', NOT 'Calculator.php'); when unsure of a path, call list_files at run time inside a step rather than hardcoding a guess
+            - `\$this->tool(...)` returns the tool's raw output as a STRING and `\$this->ai(...)` returns the model's text as a STRING — never index them like arrays (no `\$result['content']`); parse the string if you need to
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
 
             Return ONLY the PHP source — no prose, no markdown fences.
