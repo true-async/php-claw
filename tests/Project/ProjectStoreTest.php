@@ -152,6 +152,28 @@ final class ProjectStoreTest
         }
     }
 
+    #[Test]
+    public function resumableRunFindsOnlyAnInterruptedRun(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+        $store = new ProjectStore($projectsDir);
+
+        try {
+            $store->init($folder);
+            $runId = $store->recordRun($folder, '1', 'Issue1Solver');   // status 'running'
+
+            Assert::same($store->resumableRun($folder, '1', 'Issue1Solver'), $runId);
+            Assert::null($store->resumableRun($folder, '1', 'OtherSolver'));   // different workflow
+
+            $store->setRunStatus($folder, $runId, 'done');
+            Assert::null($store->resumableRun($folder, '1', 'Issue1Solver'));   // finished -> not resumable
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
     private static function tempDir(): string
     {
         $dir = sys_get_temp_dir() . '/claw-project-' . uniqid('', true);

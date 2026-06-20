@@ -181,6 +181,23 @@ final class ProjectStore
         $stmt->execute(['status' => $status, 'id' => $runId]);
     }
 
+    /**
+     * The id of an interrupted run (still 'running') for this issue's workflow, newest first, or
+     * null — a run only stays 'running' if the process was killed before it finished or failed, so
+     * this is exactly what a re-run should resume. @throws ClawException
+     */
+    public function resumableRun(string $projectPath, string $issueId, string $workflow): ?string
+    {
+        [$pdo] = $this->connect($projectPath);
+        $stmt = $pdo->prepare(
+            "SELECT id FROM runs WHERE issue_id = :issue AND workflow = :workflow AND status = 'running' ORDER BY id DESC LIMIT 1",
+        );
+        $stmt->execute(['issue' => $issueId, 'workflow' => $workflow]);
+        $id = $stmt->fetchColumn();
+
+        return $id === false ? null : (string) $id;
+    }
+
     /** @throws ClawException */
     public function setIssueStatus(string $projectPath, string $issueId, IssueStatus $status): void
     {

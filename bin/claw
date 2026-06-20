@@ -37,7 +37,7 @@ use Claw\Trace\TraceStore;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\GenerateIssueWorkflow;
-use Claw\Workflow\InMemoryStateStore;
+use Claw\Workflow\SqliteStateStore;
 use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStore;
 use Claw\Workflow\WorkflowValidator;
@@ -312,6 +312,7 @@ function runIssue(array $args): int
     // The palette acts on the REAL project folder: this run works on the user's repo.
     $workspace = new Workspace($project->path);
     $workflowStore = new WorkflowStore($appHome . '/projects/' . $project->id . '-workflows', $project->id);
+    $projectDb = new PDO('sqlite:' . $store->dbPath($project->id));   // shared by the state store + trace
 
     $registry = new Registry();
     $registry->add(new BashTool($project->path));
@@ -326,31 +327,35 @@ function runIssue(array $args): int
         ->set(EnvKey::ModelId, $config->model)
         ->set(EnvKey::SystemPrompt, DEFAULT_SYSTEM)
         ->set(EnvKey::MaxHistory, $config->maxHistory)
-        ->set(EnvKey::Store, new InMemoryStateStore())
-        ->set(EnvKey::Agents, $config->agents);   // named roles share this access, override only the model
+        ->set(EnvKey::Store, new SqliteStateStore($projectDb))   // durable: a killed run resumes here
+        ->set(EnvKey::Agents, $config->agents);                  // named roles share this access, override only the model
 
     $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
     $solverClass = $workflowStore->classFor($solverName, true);
     $solverPath = $workflowStore->path($solverName, true);
     $solverNamespace = substr($solverClass, 0, (int) strrpos($solverClass, '\\'));
 
-    // One run per invocation: its id ties the ledger row and the whole trace together. The trace
-    // (steps, prompts, turns, tools) is persisted into the project db and shown live on stderr.
-    $runId = $store->recordRun($cwd, $issue->id, $solverName);
+    // Resume an interrupted run (status still 'running') for this issue's solver, else start a new
+    // one. The run id ties the ledger row, the trace, and the durable state snapshot together — so
+    // resuming reuses it: the solver restores its saved state and re-runs only the unfinished tail.
+    $runId = $store->resumableRun($cwd, $issue->id, $solverName);
+    $resuming = $runId !== null;
+    if ($runId === null) {
+        $runId = $store->recordRun($cwd, $issue->id, $solverName);
+    }
     $store->setIssueStatus($cwd, $issue->id, IssueStatus::InProgress);
-    $tracer = new Tracer(
-        $runId,
-        new TraceStore(new PDO('sqlite:' . $store->dbPath($project->id))),
-        new ConsoleTraceSink(STDERR),
-    );
+    $tracer = new Tracer($runId, new TraceStore($projectDb), new ConsoleTraceSink(STDERR));
     $env->set(EnvKey::Tracer, $tracer);
+    if ($resuming) {
+        fwrite(STDOUT, "Resuming run #{$runId} for issue #{$issue->id}…\n");
+    }
 
     if (!is_file($solverPath)) {
         fwrite(STDOUT, "Generating a solver workflow for issue #{$issue->id}…\n");
 
         $gen = $tracer->enterWorkflow('generate-issue-workflow');
         try {
-            (new GenerateIssueWorkflow($env, 'gen', [
+            (new GenerateIssueWorkflow($env, $runId . '-gen', [
                 'solverName' => $solverName,
                 'solverNamespace' => $solverNamespace,
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
