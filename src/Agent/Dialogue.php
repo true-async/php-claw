@@ -49,14 +49,8 @@ final class Dialogue
             }
         };
 
-        // Extra args are passed via use() in a 0-arg closure, not forwarded through spawn(): the
-        // ide-helper stub types spawn's $task so PHPStan rejects callables with required params.
-        $a = spawn(static function () use ($pump, $opener, $toOpener, $toOther, $maxTurns): void {
-            $pump($opener, $toOpener, $toOther, intdiv($maxTurns + 1, 2));   // opener gets the extra turn
-        });
-        $b = spawn(static function () use ($pump, $other, $toOther, $toOpener, $maxTurns): void {
-            $pump($other, $toOther, $toOpener, intdiv($maxTurns, 2));
-        });
+        $a = spawn($pump, $opener, $toOpener, $toOther, intdiv($maxTurns + 1, 2));   // opener gets the extra turn
+        $b = spawn($pump, $other, $toOther, $toOpener, intdiv($maxTurns, 2));
 
         $toOpener->send($opening);   // kick off the opener
 

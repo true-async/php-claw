@@ -24,7 +24,7 @@
         "psr/log": "^3.0",
         "phpstan/phpstan": "^2.2",
         "friendsofphp/php-cs-fixer": "^3.95",
-        "true-async/ide-helper": "^0.7.1"
+        "true-async/ide-helper": "^0.7.2"
     },
     "autoload": {
         "psr-4": {
