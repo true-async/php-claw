@@ -30,6 +30,9 @@ use Claw\Tool\Registry;
 use Claw\Tool\ScheduleTool;
 use Claw\Tool\Workspace;
 use Claw\Tool\WriteFileTool;
+use Claw\Trace\ConsoleTraceSink;
+use Claw\Trace\Tracer;
+use Claw\Trace\TraceStore;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\GenerateIssueWorkflow;
@@ -327,9 +330,21 @@ function runIssue(array $args): int
     $solverPath = $workflowStore->path($solverName, true);
     $solverNamespace = substr($solverClass, 0, (int) strrpos($solverClass, '\\'));
 
+    // One run per invocation: its id ties the ledger row and the whole trace together. The trace
+    // (steps, prompts, turns, tools) is persisted into the project db and shown live on stderr.
+    $runId = $store->recordRun($cwd, $issue->id, $solverName);
+    $store->setIssueStatus($cwd, $issue->id, IssueStatus::InProgress);
+    $tracer = new Tracer(
+        $runId,
+        new TraceStore(new PDO('sqlite:' . $store->dbPath($project->id))),
+        new ConsoleTraceSink(STDERR),
+    );
+    $env->set(EnvKey::Tracer, $tracer);
+
     if (!is_file($solverPath)) {
         fwrite(STDOUT, "Generating a solver workflow for issue #{$issue->id}…\n");
 
+        $gen = $tracer->enterWorkflow('generate-issue-workflow');
         try {
             (new GenerateIssueWorkflow($env, 'gen', [
                 'solverName' => $solverName,
@@ -337,12 +352,16 @@ function runIssue(array $args): int
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
             ], $issue, $project))->run();
         } catch (\Throwable $e) {
+            $tracer->exit($gen);
+            $store->setRunStatus($cwd, $runId, 'failed');
             fwrite(STDERR, 'claw run: generation failed: ' . $e->getMessage() . "\n");
 
             return 1;
         }
+        $tracer->exit($gen);
 
         if (!is_file($solverPath)) {
+            $store->setRunStatus($cwd, $runId, 'failed');
             fwrite(STDERR, "claw run: no solver workflow was produced\n");
 
             return 1;
@@ -350,6 +369,7 @@ function runIssue(array $args): int
 
         fwrite(STDOUT, "\n--- {$solverPath} ---\n" . (string) file_get_contents($solverPath) . "\n--- end ---\n\n");
         if (!confirm('Run this workflow now?')) {
+            $store->setRunStatus($cwd, $runId, 'generated');
             fwrite(STDOUT, "Saved. Not run — review it, then `claw run {$issue->id}` again.\n");
 
             return 0;
@@ -358,9 +378,7 @@ function runIssue(array $args): int
         fwrite(STDOUT, "Reusing solver {$solverClass}.\n");
     }
 
-    $runId = $store->recordRun($cwd, $issue->id, $solverName);
-    $store->setIssueStatus($cwd, $issue->id, IssueStatus::InProgress);
-
+    $solverSpan = $tracer->enterWorkflow($solverName);
     try {
         $solver = new $solverClass($env, $runId, [], $issue, $project);
         if (!$solver instanceof WorkflowAbstract) {
@@ -368,11 +386,13 @@ function runIssue(array $args): int
         }
         $solver->run();
     } catch (\Throwable $e) {
+        $tracer->exit($solverSpan);
         $store->setRunStatus($cwd, $runId, 'failed');
         fwrite(STDERR, 'claw run: run #' . $runId . ' failed: ' . $e->getMessage() . "\n");
 
         return 1;
     }
+    $tracer->exit($solverSpan);
 
     $store->setRunStatus($cwd, $runId, 'done');
     fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");

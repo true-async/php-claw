@@ -10,13 +10,15 @@ use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
 use Claw\Agent\Usage;
 use Claw\Exceptions\WorkflowException;
-use Claw\Journal\JournalInterface;
-use Claw\Journal\JournalScope;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
+use Claw\Trace\ArrayTraceSink;
+use Claw\Trace\Event\Noted;
+use Claw\Trace\Event\StepStarted;
+use Claw\Trace\Tracer;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\InMemoryStateStore;
@@ -26,7 +28,6 @@ use Claw\Workflow\WorkflowStateStore;
 use Testo\Assert;
 use Testo\Test;
 use Tests\Support\ProbeWorkflow;
-use Tests\Support\RecordingJournal;
 use Tests\Support\ScriptedAgent;
 
 final class WorkflowAbstractTest
@@ -34,13 +35,13 @@ final class WorkflowAbstractTest
     #[Test]
     public function runDrivesStepMethodsInDeclarationOrder(): void
     {
-        $journal = new RecordingJournal();
-        $wf = new ProbeWorkflow($this->config(journal: $journal), 'r1');
+        $sink = new ArrayTraceSink();
+        $wf = new ProbeWorkflow($this->config(tracer: new Tracer('r1', $sink)), 'r1');
 
         $wf->run();
 
-        Assert::same($wf->trail, 'ab');                                 // alpha then beta
-        Assert::same($this->stepNames($journal), ['alpha', 'beta']);    // both journaled, in order
+        Assert::same($wf->trail, 'ab');                              // alpha then beta
+        Assert::same($this->stepNames($sink), ['alpha', 'beta']);    // both traced, in order
     }
 
     #[Test]
@@ -66,12 +67,12 @@ final class WorkflowAbstractTest
         $first->callStep('alpha');
 
         // A fresh instance for the same run resumes: state restored, alpha skipped, beta runs.
-        $journal = new RecordingJournal();
-        $resumed = new ProbeWorkflow($this->config(store: $store, journal: $journal), 'r1');
+        $sink = new ArrayTraceSink();
+        $resumed = new ProbeWorkflow($this->config(store: $store, tracer: new Tracer('r1', $sink)), 'r1');
         $resumed->run();
 
-        Assert::same($resumed->trail, 'ab');                  // restored 'a' (alpha not re-run) + 'b'
-        Assert::same($this->stepNames($journal), ['beta']);   // only beta executed; alpha was skipped
+        Assert::same($resumed->trail, 'ab');               // restored 'a' (alpha not re-run) + 'b'
+        Assert::same($this->stepNames($sink), ['beta']);   // only beta executed; alpha was skipped
     }
 
     #[Test]
@@ -138,8 +139,8 @@ final class WorkflowAbstractTest
     #[Test]
     public function aCustomRunCanOrchestrateStepsByHand(): void
     {
-        $journal = new RecordingJournal();
-        $wf = new class ($this->config(journal: $journal), 'r1') extends WorkflowAbstract {
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
             public string $trail = '';
 
             public function name(): string
@@ -169,25 +170,27 @@ final class WorkflowAbstractTest
         $wf->run();
 
         Assert::same($wf->trail, 'b');
-        Assert::same($this->stepNames($journal), ['b']);
+        Assert::same($this->stepNames($sink), ['b']);
     }
 
     #[Test]
-    public function logJournalsAtTaskScope(): void
+    public function logTracesANote(): void
     {
-        $journal = new RecordingJournal();
-        $wf = new ProbeWorkflow($this->config(journal: $journal), 'r1');
+        $sink = new ArrayTraceSink();
+        $wf = new ProbeWorkflow($this->config(tracer: new Tracer('r1', $sink)), 'r1');
 
         $wf->callLog('did-thing', 'the details');
 
-        $tasks = array_values(array_filter(
-            $journal->recorded,
-            static fn ($entry): bool => $entry->scope === JournalScope::Task,
-        ));
-        Assert::count($tasks, 1);
-        Assert::same($tasks[0]->action, 'did-thing');
-        Assert::same($tasks[0]->message, 'the details');
-        Assert::same($tasks[0]->workflow, 'r1');
+        $notes = [];
+        foreach ($sink->records as $record) {
+            $event = $record->event();
+            if ($event instanceof Noted) {
+                $notes[] = $event;
+            }
+        }
+        Assert::count($notes, 1);
+        Assert::same($notes[0]->action, 'did-thing');
+        Assert::same($notes[0]->message, 'the details');
     }
 
     #[Test]
@@ -208,7 +211,7 @@ final class WorkflowAbstractTest
         ?AgentInterface $worker = null,
         ?Registry $registry = null,
         ?WorkflowStateStore $store = null,
-        ?JournalInterface $journal = null,
+        ?Tracer $tracer = null,
         string $systemPrompt = '',
     ): Environment {
         $env = (new Environment())
@@ -218,24 +221,25 @@ final class WorkflowAbstractTest
             ->set(EnvKey::SystemPrompt, $systemPrompt)
             ->set(EnvKey::Store, $store ?? new InMemoryStateStore());
 
-        if ($journal !== null) {
-            $env->set(EnvKey::Journal, $journal);
+        if ($tracer !== null) {
+            $env->set(EnvKey::Tracer, $tracer);
         }
 
         return $env;
     }
 
     /**
-     * The step names journaled at {@see JournalScope::Step}, in record order.
+     * The names of the steps that opened a span, in order.
      *
      * @return list<string>
      */
-    private function stepNames(RecordingJournal $journal): array
+    private function stepNames(ArrayTraceSink $sink): array
     {
         $names = [];
-        foreach ($journal->recorded as $entry) {
-            if ($entry->scope === JournalScope::Step) {
-                $names[] = $entry->message;
+        foreach ($sink->records as $record) {
+            $event = $record->event();
+            if ($event instanceof StepStarted) {
+                $names[] = $event->name;
             }
         }
 

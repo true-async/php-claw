@@ -7,6 +7,7 @@ namespace Claw\Agent;
 use Claw\Exceptions\ContextLengthException;
 use Claw\Exec\ExecutorInterface;
 use Claw\Tool\ToolCall;
+use Claw\Trace\Tracer;
 
 /**
  * The default ReAct turn loop: call the model with the full history, run any
@@ -16,7 +17,7 @@ use Claw\Tool\ToolCall;
  * This is a headless component — it owns no UI and no conversation. It takes a
  * history and gives back a {@see TurnResult} (final answer, the updated history,
  * accumulated token usage). Progress, cancellation, and human-facing messaging are
- * the caller's concern: a workflow step journals around it, and cancellation simply
+ * the caller's concern: a workflow step traces around it, and cancellation simply
  * propagates as an exception (TrueAsync structured concurrency unwinds the loop).
  *
  * Configuration (model, system prompt, tool specs, executor) is fixed for the loop's
@@ -37,6 +38,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         private readonly string $system,
         private readonly array $specs = [],
         private readonly int $maxHistory = 0,
+        private readonly ?Tracer $tracer = null,
     ) {
     }
 
@@ -44,6 +46,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
     {
         $totalInput  = 0;
         $totalOutput = 0;
+        $turnNo      = 0;
 
         // Loops until the model returns a final answer (no tool_use). The bound is
         // memory: the model's context window (the API rejects an oversized history ->
@@ -56,6 +59,8 @@ final class DefaultTurnLoop implements TurnLoopInterface
             // The model is stateless: every call carries the FULL history (system +
             // all messages + tool results). The repeated prefix is cheap via prompt
             // caching; trimming/summarization is a later layer.
+            $turn = $this->tracer?->enterTurn(++$turnNo, $this->model);
+
             $response = $this->agent->send(new AgentRequest(
                 model: $this->model,
                 messages: $history,
@@ -66,6 +71,13 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $totalInput  += $response->usage->inputTokens;
             $totalOutput += $response->usage->outputTokens;
 
+            $this->tracer?->reply(
+                $response->text ?? '',
+                array_map(static fn (ToolUseBlock $c): array => ['name' => $c->name, 'input' => $c->input], $response->toolCalls),
+                $response->usage->inputTokens,
+                $response->usage->outputTokens,
+            );
+
             $history[] = new Message(Role::Assistant, $response->content);
 
             // Terminate on the dispatchable subset, not the advertised intent. A
@@ -75,15 +87,21 @@ final class DefaultTurnLoop implements TurnLoopInterface
             // text is present instead of looping forever on an empty tool batch
             // (which would append empty user messages and burn round-trips).
             if ($response->toolCalls === []) {
+                $this->tracer?->exit($turn);
+
                 return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput));
             }
 
             $results = [];
             foreach ($response->toolCalls as $call) {
-                $results[] = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
+                $this->tracer?->toolCall($call->name, $call->input);
+                $result = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
+                $this->tracer?->toolResult($call->name, $result->content, $result->isError);
+                $results[] = $result;
             }
 
             $history[] = new Message(Role::User, $results);
+            $this->tracer?->exit($turn);
         }
     }
 }

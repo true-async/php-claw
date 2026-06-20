@@ -10,7 +10,6 @@ use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Exec\ChainExecutor;
 use Claw\Exec\ExecutorInterface;
-use Claw\Journal\JournalInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 
@@ -135,13 +134,5 @@ final class Environment
         $max = $this->find(EnvKey::MaxHistory);
 
         return \is_int($max) ? $max : 0;
-    }
-
-    /** The run's journal, or null when none is configured — null = nothing is journaled. */
-    public function findJournal(): ?JournalInterface
-    {
-        $journal = $this->find(EnvKey::Journal);
-
-        return $journal instanceof JournalInterface ? $journal : null;
     }
 }

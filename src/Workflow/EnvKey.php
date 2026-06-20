@@ -19,6 +19,6 @@ enum EnvKey: string
     case SystemPrompt = 'systemPrompt';      // string — the worker's system prompt
     case MaxHistory = 'maxHistory';          // int — soft cap on an ai() call's turn history
     case Store = 'store';                    // WorkflowStateStore — state snapshot for resume + leaf-call ids
-    case Journal = 'journal';                // JournalInterface — history per level; unset = nothing journaled
     case Agents = 'agents';                  // array<string,string> — named agent roles -> model id; ai(agent:) routes by name
+    case Tracer = 'tracer';                  // Tracer — hierarchical run trace (step/prompt/turn/tool); unset = no tracing
 }

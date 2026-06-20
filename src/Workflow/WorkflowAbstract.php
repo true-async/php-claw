@@ -7,11 +7,10 @@ namespace Claw\Workflow;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Exceptions\WorkflowException;
-use Claw\Journal\JournalEntry;
-use Claw\Journal\JournalScope;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\ToolCall;
+use Claw\Trace\Tracer;
 
 /**
  * The base every workflow extends — a HELPER, not an engine. The workflow itself is a class with
@@ -91,11 +90,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
-        $this->{$name}();
+        $tracer = $this->tracer();
+        $span = $tracer?->enterStep($name);
+        try {
+            $this->{$name}();
+        } finally {
+            $tracer?->exit($span);
+        }
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
-        $this->journal(JournalScope::Step, 'step', $name);
     }
 
     /** Read a value from the run's environment — this scope, then the parent project settings. */
@@ -150,6 +154,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $scope->set(EnvKey::ModelId, $model);   // route this call to the role's model
         }
 
+        $tracer = $this->tracer();
+        $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
+        $tracer?->prompt($prompt, $tools);
+
         $loop = new DefaultTurnLoop(
             $scope->findWorker(),
             $scope->executor(),
@@ -157,9 +165,22 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $scope->findSystemPrompt(),
             $scope->findRegistry()->specs(),
             $scope->findMaxHistory(),
+            $tracer,
         );
 
-        return $loop->run([Message::userText($prompt)])->text ?? '';
+        try {
+            return $loop->run([Message::userText($prompt)])->text ?? '';
+        } finally {
+            $tracer?->exit($span);
+        }
+    }
+
+    /** The run's hierarchical tracer, if one is configured — else null (no tracing). */
+    private function tracer(): ?Tracer
+    {
+        $tracer = $this->env->find(EnvKey::Tracer);
+
+        return $tracer instanceof Tracer ? $tracer : null;
     }
 
     /** The model id configured for a named agent role, or null to keep the scope's default. */
@@ -182,7 +203,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     protected function tool(string $name, array $params): string
     {
+        $tracer = $this->tracer();
+        $tracer?->toolCall($name, $params);
+
         $result = $this->env->executor()->call(new ToolCall($this->env->findStore()->nextId(), $name, $params));
+
+        $tracer?->toolResult($name, $result->content, $result->isError);
         if ($result->isError) {
             throw new WorkflowException("tool '{$name}' failed: " . $result->content);
         }
@@ -191,33 +217,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Record a journal entry from the workflow's own code (a "task"). There is no Task class; the
-     * AI writes its task methods and logs their specifics here at {@see JournalScope::Task}. The
-     * run's lineage (project/issue/workflow) is filled in.
+     * Note something the workflow's own code did (a "task"). There is no Task class; the AI writes
+     * its task methods and logs their specifics here — it lands under the current span in the trace.
      *
      * @param array<string, mixed> $context
      */
     protected function log(string $action, string $message = '', array $context = []): void
     {
-        $this->journal(JournalScope::Task, $action, $message, $context);
-    }
-
-    /**
-     * Record one entry to the run's journal (if any), stamping the run's lineage.
-     *
-     * @param array<string, mixed> $context
-     */
-    private function journal(JournalScope $scope, string $action, string $message, array $context = []): void
-    {
-        $this->env->findJournal()?->record(new JournalEntry(
-            $scope,
-            $action,
-            $message,
-            $context,
-            project: $this->project !== null ? $this->project->id : $this->issue?->project,
-            issue: $this->issue?->id,
-            workflow: $this->runId,
-        ));
+        $this->tracer()?->log($action, $message, $context);
     }
 
     /**
