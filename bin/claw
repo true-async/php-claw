@@ -319,7 +319,8 @@ function runIssue(array $args): int
         ->set(EnvKey::ModelId, $config->model)
         ->set(EnvKey::SystemPrompt, DEFAULT_SYSTEM)
         ->set(EnvKey::MaxHistory, $config->maxHistory)
-        ->set(EnvKey::Store, new InMemoryStateStore());
+        ->set(EnvKey::Store, new InMemoryStateStore())
+        ->set(EnvKey::Agents, $config->agents);   // named roles share this access, override only the model
 
     $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
     $solverClass = $workflowStore->classFor($solverName, true);

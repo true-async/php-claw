@@ -101,6 +101,22 @@ final class ConfigTest
         );
     }
 
+    #[Test]
+    public function parsesNamedAgentRoles(): void
+    {
+        $config = $this->load(implode("\n", [
+            'CLAW_AGENT=claude',
+            'ANTHROPIC_API_KEY=k',
+            'CLAW_MODEL=default-model',
+            'CLAW_AGENT_REVIEWER=review-model',
+            'CLAW_AGENT_Planner=plan-model',   // role name is lower-cased
+        ]));
+
+        Assert::same($config->agents['reviewer'] ?? null, 'review-model');
+        Assert::same($config->agents['planner'] ?? null, 'plan-model');
+        Assert::false(isset($config->agents['agent']));   // the default CLAW_AGENT is not a role
+    }
+
     private function load(string $envBody): Config
     {
         $this->clearEnv();

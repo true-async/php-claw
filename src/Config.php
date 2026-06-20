@@ -37,7 +37,9 @@ final class Config
     private const DEFAULT_TURN_TIMEOUT_MS = 300_000;
 
     /**
-     * @param list<int> $allowedChats telegram-only authorization allowlist (empty in console mode)
+     * @param list<int>             $allowedChats telegram-only authorization allowlist (empty in console mode)
+     * @param array<string, string> $agents       named agent roles -> model id (CLAW_AGENT_<ROLE>); all share
+     *                                            the default access, overriding only the model for that role
      */
     private function __construct(
         public readonly string $channel,
@@ -50,6 +52,7 @@ final class Config
         public readonly string $workspace,
         public readonly int $maxHistory,
         public readonly int $turnTimeoutMs,
+        public readonly array $agents = [],
     ) {
     }
 
@@ -127,7 +130,41 @@ final class Config
             workspace: $get('CLAW_WORKSPACE') ?? self::DEFAULT_WORKSPACE,
             maxHistory: (int) ($get('CLAW_MAX_HISTORY') ?? self::DEFAULT_MAX_HISTORY),
             turnTimeoutMs: (int) ($get('CLAW_TURN_TIMEOUT_MS') ?? self::DEFAULT_TURN_TIMEOUT_MS),
+            agents: self::parseAgents($file),
         );
+    }
+
+    /**
+     * Parse named agent roles from `CLAW_AGENT_<ROLE>=<model>` keys (file + real env, env winning)
+     * into a lower-cased role -> model map. The default access/key is shared; only the model varies
+     * per role, so a workflow can route a step with `ai(..., agent: 'reviewer')`.
+     *
+     * @param array<string, string> $file
+     *
+     * @return array<string, string>
+     */
+    private static function parseAgents(array $file): array
+    {
+        $prefix = 'CLAW_AGENT_';
+        $merged = $file;                       // file is the base; real env overrides it
+        foreach (getenv() as $key => $value) {
+            $merged[$key] = $value;
+        }
+
+        $agents = [];
+        foreach ($merged as $key => $value) {
+            if (!str_starts_with($key, $prefix)) {
+                continue;
+            }
+
+            $role = strtolower(substr($key, \strlen($prefix)));
+            $model = trim($value);
+            if ($role !== '' && $model !== '') {
+                $agents[$role] = $model;
+            }
+        }
+
+        return $agents;
     }
 
     public function isChatAllowed(int $chatId): bool

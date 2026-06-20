@@ -127,7 +127,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - implement `public function name(): string`
             - keep state in plain typed properties
             - write each step as a method marked `#[Step]`; the default run() drives them in declaration order
-            - reach the model with `\$this->ai(string \$prompt, array \$tools)` and tools with `\$this->tool(string \$name, array \$params)`
+            - reach the model with `\$this->ai(string \$prompt, array \$tools, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
+            - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (default), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
             - the ONLY way to touch files or the shell is through `\$this->tool(...)`; available tools: {$toolList}
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
 

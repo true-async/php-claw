@@ -190,6 +190,20 @@ final class WorkflowAbstractTest
         Assert::same($tasks[0]->workflow, 'r1');
     }
 
+    #[Test]
+    public function aiRoutesToANamedAgentRolesModel(): void
+    {
+        $worker = new ScriptedAgent($this->answer('ok'), $this->answer('ok'));
+        $env = $this->config(worker: $worker)->set(EnvKey::Agents, ['reviewer' => 'model-x']);
+        $wf = new ProbeWorkflow($env, 'r1');
+
+        $wf->callAi('hi', [], 'reviewer');
+        Assert::same($worker->requests[0]->model, 'model-x');   // routed to the role's model
+
+        $wf->callAi('hi', [], 'unknown');
+        Assert::same($worker->requests[1]->model, 'm');         // unknown role -> scope default
+    }
+
     private function config(
         ?AgentInterface $worker = null,
         ?Registry $registry = null,

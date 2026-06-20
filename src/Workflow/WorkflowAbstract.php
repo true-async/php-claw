@@ -133,13 +133,22 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * turn loop that drives it (tool round-trips and all) is an internal detail. The tools are a
      * least-privilege palette — the model is shown, and can run, only these.
      *
+     * Pass $agent to route the call to a named agent role (worker/reviewer/supervisor/planner, set
+     * up in the run's {@see EnvKey::Agents} map): the role's model is used for just this call, on
+     * the same access. An unknown role falls back to the scope's default model.
+     *
      * @param list<string> $tools tool names to expose to the model for this call
      */
-    protected function ai(string $prompt, array $tools = []): string
+    protected function ai(string $prompt, array $tools = [], ?string $agent = null): string
     {
         // The palette is a child scope holding a registry narrowed to exactly these tools, so what
         // the model is shown (specs) and what the executor can resolve (get) are one set.
         $scope = $this->env->child()->set(EnvKey::Registry, $this->env->findRegistry()->only($tools));
+
+        $model = $agent !== null ? $this->agentModel($agent) : null;
+        if ($model !== null) {
+            $scope->set(EnvKey::ModelId, $model);   // route this call to the role's model
+        }
 
         $loop = new DefaultTurnLoop(
             $scope->findWorker(),
@@ -151,6 +160,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
         );
 
         return $loop->run([Message::userText($prompt)])->text ?? '';
+    }
+
+    /** The model id configured for a named agent role, or null to keep the scope's default. */
+    private function agentModel(string $agent): ?string
+    {
+        $agents = $this->env->find(EnvKey::Agents);
+        if (\is_array($agents) && isset($agents[$agent]) && \is_string($agents[$agent]) && $agents[$agent] !== '') {
+            return $agents[$agent];
+        }
+
+        return null;
     }
 
     /**

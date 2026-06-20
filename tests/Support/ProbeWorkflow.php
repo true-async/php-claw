@@ -37,9 +37,9 @@ final class ProbeWorkflow extends WorkflowAbstract
     }
 
     /** @param list<string> $tools */
-    public function callAi(string $prompt, array $tools = []): string
+    public function callAi(string $prompt, array $tools = [], ?string $agent = null): string
     {
-        return $this->ai($prompt, $tools);
+        return $this->ai($prompt, $tools, $agent);
     }
 
     /** @param array<string, mixed> $params */
