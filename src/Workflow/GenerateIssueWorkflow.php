@@ -19,6 +19,33 @@ use Claw\Exceptions\WorkflowException;
  */
 final class GenerateIssueWorkflow extends WorkflowAbstract
 {
+    /**
+     * The canonical issue-solver recipe — the phases every generated solver must carry out.
+     * This is the single source of truth for the structure; {@see draftPrompt()} hands it to
+     * the model. Where a phase needs runtime the framework does not have yet (a mid-run human
+     * pause, parallel sub-workflows, automated CI/merge), the solver does the best the bash
+     * tool allows; the phase ordering still shapes the generated code.
+     */
+    private const string RECIPE = <<<'RECIPE'
+        1. Validate — read the issue and the relevant code; decide whether it is real and complete.
+           Bug: reproduce it FIRST — add a failing test that captures it before any fix.
+           Feature: build the map of use-cases and check it is complete, error cases included.
+           If the issue is incomplete, do NOT invent scope — surface the missing cases for the
+           human to add. Pin explicit acceptance criteria (the done-conditions step 5 verifies).
+        2. Design — decide how to solve it and which classes/changes are needed; map the
+           components, reuse what already exists, check how the change fits.
+        3. Review the design against SOLID — responsibilities and dependency direction; keep any
+           violation minimal and deliberate. If the decision is foundational AND non-obvious (an
+           early or immature project, or it sets the base), STOP and get human approval of the
+           design before implementing; if it is obvious in a mature codebase, proceed.
+        4. Implement — make the change, component by component.
+        5. Test & accept — add a test for EACH acceptance criterion from step 1; run the full
+           quality gate via the bash tool (e.g. `composer qa`) and make it green; watch for
+           regressions. If a review finding or a test fails, loop back to step 4 (or 2) until green.
+        6. Changelog — record what changed (docs / changelog).
+        7. Deliver — commit on a branch and open it for review (bash tool: git).
+        RECIPE;
+
     private string $plan = '';
     private string $code = '';
 
@@ -37,8 +64,10 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
 
         $this->plan = $this->ai(
             'You are planning how to solve a task by writing a workflow. Inspect the project if it '
-            . 'helps (read_file, list_files), then outline, in a few concrete sentences, the steps a '
-            . "workflow should take to solve this task:\n\n" . $task,
+            . 'helps (read_file, list_files), then, in a few concrete sentences: outline the steps a '
+            . 'workflow should take to solve this task, AND assess whether the project is mature with '
+            . 'an established architecture and whether the change is foundational — this decides '
+            . "whether a human must approve the design before it is implemented:\n\n" . $task,
             ['read_file', 'list_files'],
         );
     }
@@ -77,12 +106,18 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $class = (string) $this->param('solverName');
         $tools = $this->param('solverTools');
         $toolList = \is_array($tools) ? implode(', ', array_map(strval(...), $tools)) : 'read_file, write_file, list_files, bash';
+        $recipe = self::RECIPE;
 
         return <<<PROMPT
-            Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract.
+            Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract,
+            following the standard solver recipe.
 
             Plan:
             {$this->plan}
+
+            Recipe — the phases the solver must carry out, each as one or more #[Step] methods (use
+            plain if/while in run() where a phase loops or branches):
+            {$recipe}
 
             Hard requirements (the code is validated before it is saved, and rejected if any are missed):
             - the file must begin with the opening tag `<?php` followed by `declare(strict_types=1);`
