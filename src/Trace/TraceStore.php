@@ -15,6 +15,12 @@ final class TraceStore implements TraceSinkInterface
     public function __construct(private readonly \PDO $pdo)
     {
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        self::ensureTable($pdo);
+    }
+
+    /** Create the trace table if missing — the single source of its schema (shared with the reader). */
+    public static function ensureTable(\PDO $pdo): void
+    {
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS trace (
                 seq        INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -32,6 +32,7 @@ use Claw\Tool\Workspace;
 use Claw\Tool\WriteFileTool;
 use Claw\Trace\ConsoleTraceSink;
 use Claw\Trace\Tracer;
+use Claw\Trace\TraceReader;
 use Claw\Trace\TraceStore;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
@@ -60,6 +61,9 @@ if (\in_array('-i', $args, true) || \in_array('--issue', $args, true)) {
 }
 if (($args[0] ?? null) === 'run') {
     exit(runIssue(\array_slice($args, 1)));
+}
+if (($args[0] ?? null) === 'log') {
+    exit(showHistory(\array_slice($args, 1)));
 }
 
 try {
@@ -396,6 +400,61 @@ function runIssue(array $args): int
 
     $store->setRunStatus($cwd, $runId, 'done');
     fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
+
+    return 0;
+}
+
+/**
+ * Handle `claw log [runId]`: print a run's recorded trace tree from the project db. Reads only —
+ * no model, no API key. Defaults to the most recent run; lists recent runs for picking another.
+ *
+ * @param list<string> $args
+ */
+function showHistory(array $args): int
+{
+    $cwd = getcwd();
+    if ($cwd === false) {
+        fwrite(STDERR, "claw log: cannot determine the project folder\n");
+
+        return 1;
+    }
+
+    $store = new ProjectStore(appHome() . '/projects');
+
+    try {
+        $project = $store->load($cwd);
+    } catch (ClawException $e) {
+        fwrite(STDERR, 'claw log: ' . $e->getMessage() . "\n");
+
+        return 1;
+    }
+
+    $reader = new TraceReader(new PDO('sqlite:' . $store->dbPath($project->id)));
+
+    $runs = $reader->runs();
+    if ($runs === []) {
+        fwrite(STDOUT, "No runs yet for this project.\n");
+
+        return 0;
+    }
+
+    $runId = firstPositional($args) ?? $reader->latestRunId() ?? $runs[0]['id'];
+
+    fwrite(STDOUT, "Runs:\n");
+    $header = null;
+    foreach ($runs as $run) {
+        if ($run['id'] === $runId) {
+            $header = $run;
+        }
+        $mark = $run['id'] === $runId ? '→' : ' ';
+        fwrite(STDOUT, "  {$mark} #{$run['id']}  [{$run['status']}]  issue #{$run['issue']}  {$run['workflow']}\n");
+    }
+
+    $title = $header !== null
+        ? "run #{$runId}  (issue #{$header['issue']}, {$header['workflow']}, {$header['status']})"
+        : "run #{$runId}";
+    $tree = $reader->render($runId);
+    fwrite(STDOUT, "\nTrace of {$title}:\n" . ($tree === '' ? '  (no trace recorded)' : $tree) . "\n");
 
     return 0;
 }
