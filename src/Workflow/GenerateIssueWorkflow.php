@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw\Workflow;
 
 use Claw\Exceptions\WorkflowException;
+use Claw\Tool\Registry;
 
 /**
  * The default workflow `claw run <id>` starts for an issue. It does NOT solve the issue
@@ -104,8 +105,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     {
         $namespace = (string) $this->param('solverNamespace');
         $class = (string) $this->param('solverName');
-        $tools = $this->param('solverTools');
-        $toolList = \is_array($tools) ? implode(', ', array_map(strval(...), $tools)) : 'read_file, write_file, list_files, bash';
+        $toolDocs = $this->availableTools();
         $recipe = self::RECIPE;
 
         return <<<PROMPT
@@ -129,11 +129,40 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - write each step as a method marked `#[Step]`; the default run() drives them in declaration order
             - reach the model with `\$this->ai(string \$prompt, array \$tools, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
             - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (default), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
-            - the ONLY way to touch files or the shell is through `\$this->tool(...)`; available tools: {$toolList}
+            - the ONLY way to touch files or the shell is through `\$this->tool(\$name, \$params)`; use EXACTLY these tool names and input keys (do not invent keys):
+            {$toolDocs}
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
 
             Return ONLY the PHP source — no prose, no markdown fences.
             PROMPT;
+    }
+
+    /**
+     * The solver's tools, each with its REAL input schema pulled from the registry — so the model
+     * uses the exact param keys (e.g. read_file needs `path`, not `file`) instead of guessing.
+     */
+    private function availableTools(): string
+    {
+        $tools = $this->param('solverTools');
+        $names = \is_array($tools) ? array_map(strval(...), $tools) : ['read_file', 'write_file', 'list_files', 'bash'];
+
+        $registry = $this->find(EnvKey::Registry);
+        if (!$registry instanceof Registry) {
+            return implode(', ', $names);
+        }
+
+        $docs = [];
+        foreach ($names as $name) {
+            if (!$registry->has($name)) {
+                continue;
+            }
+
+            $tool = $registry->get($name);
+            $schema = json_encode($tool->inputSchema(), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+            $docs[] = "  - {$tool->name()}: {$tool->description()}\n    input: {$schema}";
+        }
+
+        return $docs === [] ? implode(', ', $names) : implode("\n", $docs);
     }
 
     /** Strip a ``` ... ``` fence if the model wrapped the code in one. */
