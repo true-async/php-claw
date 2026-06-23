@@ -237,7 +237,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function stepMethods(): array
     {
         $names = [];
-        foreach ((new \ReflectionClass($this))->getMethods() as $method) {
+        foreach (new \ReflectionClass($this)->getMethods() as $method) {
             if ($method->getAttributes(Step::class) !== []) {
                 $names[] = $method->getName();
             }
