@@ -355,11 +355,11 @@ function runIssue(array $args): int
 
         $gen = $tracer->enterWorkflow('generate-issue-workflow');
         try {
-            (new GenerateIssueWorkflow($env, $runId . '-gen', [
+            new GenerateIssueWorkflow($env, $runId . '-gen', [
                 'solverName' => $solverName,
                 'solverNamespace' => $solverNamespace,
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
-            ], $issue, $project))->run();
+            ], $issue, $project)->run();
         } catch (\Throwable $e) {
             $tracer->exit($gen);
             $store->setRunStatus($cwd, $runId, 'failed');
