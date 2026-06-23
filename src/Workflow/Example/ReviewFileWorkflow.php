@@ -47,6 +47,7 @@ final class ReviewFileWorkflow extends WorkflowAbstract
         // A critic as a sub-step: judge the proposal with another ai() call and, if it is weak,
         // redo it once. Plain PHP — the author decides when to judge; nothing is baked into step().
         $verdict = $this->ai("Reply only 'ok' or 'weak' — is this proposal solid?\n\n" . $this->proposal);
+
         if (str_contains(strtolower($verdict), 'weak')) {
             $this->proposal = $this->ai("Make this proposal stronger and more concrete:\n\n" . $this->proposal);
         }

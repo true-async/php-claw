@@ -92,6 +92,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $tracer = $this->tracer();
         $span = $tracer?->enterStep($name);
+
         try {
             $this->{$name}();
         } finally {

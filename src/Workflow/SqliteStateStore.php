@@ -13,9 +13,9 @@ namespace Claw\Workflow;
  * One row per run keyed by run id (state + completed steps as JSON). Leaf-call ids come from a
  * monotonic table so they stay unique across restarts, not just within a process.
  */
-final class SqliteStateStore implements WorkflowStateStore
+final readonly class SqliteStateStore implements WorkflowStateStore
 {
-    public function __construct(private readonly \PDO $pdo)
+    public function __construct(private \PDO $pdo)
     {
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
         $pdo->exec(
@@ -26,6 +26,7 @@ final class SqliteStateStore implements WorkflowStateStore
                 updated_at INTEGER NOT NULL
             )',
         );
+
         $pdo->exec('CREATE TABLE IF NOT EXISTS state_seq (id INTEGER PRIMARY KEY AUTOINCREMENT)');
     }
 
@@ -35,6 +36,7 @@ final class SqliteStateStore implements WorkflowStateStore
             'INSERT OR REPLACE INTO workflow_state (run_id, state, done, updated_at)
              VALUES (:run, :state, :done, :at)',
         );
+
         $stmt->execute([
             'run' => $runId,
             'state' => json_encode($state, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
