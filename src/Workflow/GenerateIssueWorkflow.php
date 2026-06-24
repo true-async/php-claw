@@ -31,14 +31,14 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         1. Validate — read the issue and the relevant code; decide whether it is real and complete.
            Bug: reproduce it FIRST — add a failing test that captures it before any fix.
            Feature: build the map of use-cases and check it is complete, error cases included.
-           If the issue is incomplete, do NOT invent scope — surface the missing cases for the
-           human to add. Pin explicit acceptance criteria (the done-conditions step 5 verifies).
+           If the issue is incomplete, do NOT invent scope — ASK the human for the missing cases
+           with $this->ask('...'). Pin explicit acceptance criteria (the done-conditions step 5 verifies).
         2. Design — decide how to solve it and which classes/changes are needed; map the
            components, reuse what already exists, check how the change fits.
         3. Review the design against SOLID — responsibilities and dependency direction; keep any
            violation minimal and deliberate. If the decision is foundational AND non-obvious (an
-           early or immature project, or it sets the base), STOP and get human approval of the
-           design before implementing; if it is obvious in a mature codebase, proceed.
+           early or immature project, or it sets the base), get human approval of the design with
+           $this->ask('...') before implementing; if it is obvious in a mature codebase, proceed.
         4. Implement — make the change, component by component.
         5. Test & accept — add a test for EACH acceptance criterion from step 1; run the full
            quality gate via the bash tool (e.g. `composer qa`) and make it green; watch for
@@ -129,6 +129,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - write each step as a method marked `#[Step]`; the default run() drives them in declaration order
             - reach the model with `\$this->ai(string \$prompt, array \$tools, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
             - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (default), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
+            - when you NEED a missing detail or a decision from a person (an incomplete issue, a foundational design choice), do NOT guess: call `\$this->ask(string \$question): string` and use the returned answer — behind it may be a human or a supervisor agent
+            - the run is budget-limited (tokens and time); work in focused steps and do not loop or re-read pointlessly, an exhausted budget stops the run
             - the ONLY way to touch files or the shell is through `\$this->tool(\$name, \$params)`; use EXACTLY these tool names and input keys (do not invent keys):
             {$toolDocs}
             - file paths are relative to the project root, EXACTLY as list_files shows them (e.g. 'src/Calculator.php', NOT 'Calculator.php'); when unsure of a path, call list_files at run time inside a step rather than hardcoding a guess
