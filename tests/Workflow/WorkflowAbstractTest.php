@@ -335,6 +335,92 @@ final class WorkflowAbstractTest
         Assert::true($threw);
     }
 
+    #[Test]
+    public function aStepWhoseCriticPassesRunsOnce(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),   // the step's ai()
+            $this->answer('OK'),         // the critic (reviewer) approves
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public string $work = '';
+            public int $runs = 0;
+
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            #[Step(critic: 'must be good')]
+            public function make(): string
+            {
+                $this->runs++;
+                $this->work = $this->ai('do it');
+
+                return $this->work;
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($wf->work, 'the work');
+        Assert::same($wf->runs, 1);   // critic happy first time -> no re-run
+    }
+
+    #[Test]
+    public function aRejectedStepIsGuidedByTheSupervisorAndReruns(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('v1'),           // make() #1
+            $this->answer('needs a test'), // critic #1 -> not OK
+            $this->answer('v2'),           // make() #2 (re-run with the guidance)
+            $this->answer('OK'),           // critic #2 -> approves
+        );
+        $supervisor = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'add the missing test';   // guidance, not accept/stop
+            }
+        };
+        $env = $this->config(worker: $worker)->set(EnvKey::Ask, $supervisor);
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public string $work = '';
+            public int $runs = 0;
+            public ?string $sawCritique = null;
+
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            #[Step(critic: 'must be tested')]
+            public function make(): string
+            {
+                $this->runs++;
+                $this->sawCritique = $this->critique();
+                $this->work = $this->ai('do it');
+
+                return $this->work;
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($wf->work, 'v2');                          // the re-run's result, which the critic passed
+        Assert::same($wf->runs, 2);                             // one re-run
+        Assert::same($wf->sawCritique, 'add the missing test'); // the re-run saw the supervisor's guidance
+        Assert::true($supervisor->heard !== null);              // the supervisor was consulted on the rejection
+    }
+
     private function config(
         ?AgentInterface $worker = null,
         ?Registry $registry = null,

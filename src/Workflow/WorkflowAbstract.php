@@ -30,13 +30,17 @@ use Claw\Trace\Tracer;
  *  - {@see run()} is just the entry point — by default it drives the step methods in order, but
  *    the author may override it and orchestrate by hand (plain if/while), calling step() as needed.
  *
- * Anything richer — a critic, a supervisor — is a SUB-STEP the author calls inside a step (just
- * another ai() call), not machinery baked in here.
+ * A critic, though, IS machinery here: a step can declare {@see Step::$critic}, and the driver judges
+ * the step's RESULT (the method's return value) against it on the reviewer role; while it falls short,
+ * the supervisor (the ask channel) guides a re-run — a declarative aspect, not a hand-written sub-step.
  */
 abstract class WorkflowAbstract implements WorkflowInterface
 {
     /** @var list<string> step methods already completed (restored from the store) — skipped on re-run */
     private array $done;
+
+    /** The critic/supervisor's latest guidance for the running step, exposed via {@see critique()}; transient. */
+    private ?string $critique = null;
 
     /** This run's own environment scope — a child of the injected (project) env, so init() overrides locally. */
     private readonly Environment $env;
@@ -99,8 +103,34 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterStep($name);
 
         try {
-            $this->{$name}();
+            $rubric = $this->stepCritic($name);
+            $this->critique = null;
+
+            // Run the step; if it declares a critic, judge its RESULT (the method's return value) and,
+            // while the critic is unhappy, let the supervisor guide a re-run — until the critic passes,
+            // the supervisor accepts/stops, or the budget runs out (the hard, deterministic backstop).
+            while (true) {
+                $raw = $this->{$name}();
+                $result = \is_string($raw) ? $raw : '';
+                if ($rubric === null) {
+                    break;
+                }
+
+                $findings = $this->critic($result, $rubric);
+                if ($findings === null) {
+                    break;   // the critic is satisfied
+                }
+
+                $guidance = $this->superviseStep($name, $result, $findings);
+                if ($guidance === null) {
+                    break;   // the supervisor accepted the work as-is
+                }
+
+                $this->critique = $guidance;   // the re-run reads this via critique()
+                $this->enforceBudget();        // the round spent tokens; stop here if the budget is gone
+            }
         } finally {
+            $this->critique = null;
             $tracer?->exit($span);
         }
 
@@ -124,6 +154,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function param(string $name): mixed
     {
         return $this->params[$name] ?? null;
+    }
+
+    /**
+     * The critic/supervisor's latest guidance for the running step, or null. A step with a critic
+     * reads this and folds it into its work, so a re-run actually addresses the findings.
+     */
+    protected function critique(): ?string
+    {
+        return $this->critique;
     }
 
     /** The issue this run was started under, if any — climb to it for wider context. */
@@ -291,6 +330,69 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $value = $this->env->find($key);
 
         return \is_numeric($value) ? (float) $value : 0.0;
+    }
+
+    /** The rubric a step's result is judged against, from its {@see Step} attribute — null if none. */
+    private function stepCritic(string $name): ?string
+    {
+        $attributes = new \ReflectionMethod($this, $name)->getAttributes(Step::class);
+        if ($attributes === []) {
+            return null;
+        }
+
+        $critic = $attributes[0]->newInstance()->critic;
+
+        return ($critic === null || $critic === '') ? null : $critic;
+    }
+
+    /** Judge a step's result against its rubric on the reviewer role: null = it passes, else the findings. */
+    private function critic(string $result, string $rubric): ?string
+    {
+        $verdict = trim($this->ai(
+            "You are a strict reviewer. Judge the work below ONLY against this rubric:\n{$rubric}\n\n"
+            . "Work:\n{$result}\n\n"
+            . "If it fully satisfies the rubric, reply with exactly: OK\n"
+            . 'Otherwise reply with the concrete problems that must be fixed.',
+            [],
+            'reviewer',
+        ));
+
+        return strtoupper($verdict) === 'OK' ? null : $verdict;
+    }
+
+    /**
+     * The critic rejected the step — consult the supervisor (the ask channel; behind it a supervisor
+     * agent, then a human). Returns guidance for a re-run, or null to accept the work as-is. With no
+     * channel the run self-corrects on the critic's own findings.
+     *
+     * @throws WorkflowException when the supervisor says to stop
+     */
+    private function superviseStep(string $name, string $result, string $findings): ?string
+    {
+        $channel = $this->env->find(EnvKey::Ask);
+        if (!$channel instanceof SpeakerInterface) {
+            return $findings;   // no supervisor/human -> self-correct using the critic's findings
+        }
+
+        $reply = $channel->reply(
+            "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
+            . "The work:\n{$result}\n\n"
+            . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.",
+        );
+        if ($reply === null) {
+            return $findings;   // the chain passed all the way up with no answer -> self-correct
+        }
+
+        $answer = trim($reply);
+        $lower = strtolower($answer);
+        if ($answer === '' || str_starts_with($lower, 'accept')) {
+            return null;   // accept the work as-is
+        }
+        if (str_starts_with($lower, 'stop')) {
+            throw new WorkflowException("run stopped at step '{$name}' by the supervisor");
+        }
+
+        return $answer;   // guidance for the re-run
     }
 
     /**
