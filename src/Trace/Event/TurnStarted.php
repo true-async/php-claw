@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Trace\Event;
 
+use Claw\Trace\Level;
 use Claw\Trace\TraceEventInterface;
 
 /** One iteration of the ReAct turn loop began. */
@@ -18,6 +19,11 @@ final readonly class TurnStarted implements TraceEventInterface
     public function type(): string
     {
         return 'turn';
+    }
+
+    public function level(): Level
+    {
+        return Level::Debug;
     }
 
     public function toArray(): array

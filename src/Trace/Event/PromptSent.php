@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Trace\Event;
 
+use Claw\Trace\Level;
 use Claw\Trace\TraceEventInterface;
 
 /** The prompt an ai() call built, with the tool palette it was given. */
@@ -19,6 +20,11 @@ final readonly class PromptSent implements TraceEventInterface
     public function type(): string
     {
         return 'prompt';
+    }
+
+    public function level(): Level
+    {
+        return Level::Debug;
     }
 
     public function toArray(): array

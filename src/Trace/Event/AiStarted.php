@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Trace\Event;
 
+use Claw\Trace\Level;
 use Claw\Trace\TraceEventInterface;
 
 /** An ai() call began, against a named agent role and a concrete model. */
@@ -18,6 +19,11 @@ final readonly class AiStarted implements TraceEventInterface
     public function type(): string
     {
         return 'ai';
+    }
+
+    public function level(): Level
+    {
+        return Level::Debug;
     }
 
     public function toArray(): array

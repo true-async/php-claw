@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Trace\Event;
 
+use Claw\Trace\Level;
 use Claw\Trace\TraceEventInterface;
 
 /** A tool was called, with its input. */
@@ -19,6 +20,11 @@ final readonly class ToolInvoked implements TraceEventInterface
     public function type(): string
     {
         return 'tool';
+    }
+
+    public function level(): Level
+    {
+        return Level::Info;
     }
 
     public function toArray(): array

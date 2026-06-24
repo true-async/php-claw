@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Trace\Event;
 
+use Claw\Trace\Level;
 use Claw\Trace\TraceEventInterface;
 
 /** A model reply: its text, the tool calls it requested, and the tokens it cost. */
@@ -21,6 +22,11 @@ final readonly class ReplyReceived implements TraceEventInterface
     public function type(): string
     {
         return 'reply';
+    }
+
+    public function level(): Level
+    {
+        return Level::Debug;
     }
 
     public function toArray(): array

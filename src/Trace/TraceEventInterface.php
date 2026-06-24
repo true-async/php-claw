@@ -17,6 +17,9 @@ interface TraceEventInterface
     /** Stable kind discriminator, also the `type` column (e.g. 'step', 'ai', 'prompt', 'reply'). */
     public function type(): string;
 
+    /** How important this event is — the level a sink filters on to set output density. */
+    public function level(): Level;
+
     /**
      * The event's typed fields flattened for persistence (stored as JSON).
      *

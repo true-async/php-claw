@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Trace;
 
 use Claw\Trace\ArrayTraceSink;
+use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceStore;
 use Testo\Assert;
@@ -50,6 +51,24 @@ final class TracerTest
         Assert::same($r[3]->depth(), 1);
         Assert::same($r[4]->phase(), 'exit');
         Assert::same($r[4]->depth(), 0);
+    }
+
+    #[Test]
+    public function eventsCarryLevelsAndAnExitInheritsItsOpenLevel(): void
+    {
+        $sink = new ArrayTraceSink();
+        $tracer = new Tracer('r1', $sink);
+
+        $wf = $tracer->enterWorkflow('demo');   // Notice
+        $ai = $tracer->enterAi('worker', 'm');  // Debug
+        $tracer->exit($ai);                     // close inherits the ai's Debug
+        $tracer->exit($wf);                     // close inherits the workflow's Notice
+
+        $r = $sink->records;
+        Assert::same($r[0]->event()->level(), Level::Notice);   // workflow enter
+        Assert::same($r[1]->event()->level(), Level::Debug);    // ai enter
+        Assert::same($r[2]->event()->level(), Level::Debug);    // ai exit inherited
+        Assert::same($r[3]->event()->level(), Level::Notice);   // workflow exit inherited
     }
 
     #[Test]

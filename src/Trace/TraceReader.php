@@ -50,11 +50,17 @@ final class TraceReader
         return $runs;
     }
 
-    /** The run's trace as an indented tree: ▶ opens a span, ◀ closes it, · is a point event. */
-    public function render(string $runId): string
+    /**
+     * The run's trace as an indented tree: ▶ opens a span, ◀ closes it, · is a point event. Rows
+     * below $threshold are dropped, so the same density knob as the live console applies to history;
+     * the default shows everything that was recorded.
+     */
+    public function render(string $runId, Level $threshold = Level::Debug): string
     {
-        $stmt = $this->pdo->prepare('SELECT depth, phase, type, data FROM trace WHERE run_id = :r ORDER BY seq');
-        $stmt->execute(['r' => $runId]);
+        $stmt = $this->pdo->prepare('SELECT depth, phase, type, data FROM trace WHERE run_id = :r AND level >= :lvl ORDER BY seq');
+        $stmt->bindValue('r', $runId);
+        $stmt->bindValue('lvl', $threshold->value, \PDO::PARAM_INT);
+        $stmt->execute();
 
         $lines = [];
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {

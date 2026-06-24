@@ -7,17 +7,27 @@ namespace Claw\Trace;
 /**
  * The live view: each record as one line, indented by depth, so the hierarchy is visible as the run
  * happens — ▶ opens a span, ◀ closes it, · is a point event, followed by the event's own summary.
+ *
+ * Density is a threshold, not a type-switch: the sink prints an event only when its {@see Level} is
+ * at least $threshold (default {@see Level::Info}). The importance lives on each event, so adding a
+ * kind never touches this filter.
  */
 final class ConsoleTraceSink implements TraceSinkInterface
 {
     /** @param resource $stream */
-    public function __construct(private $stream)
-    {
+    public function __construct(
+        private $stream,
+        private readonly Level $threshold = Level::Info,
+    ) {
     }
 
     public function write(TraceRecordInterface $record): void
     {
         if (!\is_resource($this->stream)) {
+            return;
+        }
+
+        if (!$record->event()->level()->passes($this->threshold)) {
             return;
         }
 

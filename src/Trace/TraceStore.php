@@ -30,17 +30,38 @@ final class TraceStore implements TraceSinkInterface
                 depth      INTEGER NOT NULL,
                 phase      TEXT NOT NULL,
                 type       TEXT NOT NULL,
+                level      INTEGER NOT NULL DEFAULT 20,
                 data       TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             )',
         );
+
+        // Tables created before the level column existed get it added in place (default = Info).
+        self::ensureColumn($pdo, 'level', 'INTEGER NOT NULL DEFAULT 20');
+    }
+
+    /** Add a column to the trace table if it is not already there — a tiny forward migration. */
+    private static function ensureColumn(\PDO $pdo, string $column, string $decl): void
+    {
+        $info = $pdo->query('PRAGMA table_info(trace)');
+        if ($info === false) {
+            return;
+        }
+
+        foreach ($info->fetchAll(\PDO::FETCH_ASSOC) as $col) {
+            if (($col['name'] ?? null) === $column) {
+                return;
+            }
+        }
+
+        $pdo->exec("ALTER TABLE trace ADD COLUMN {$column} {$decl}");
     }
 
     public function write(TraceRecordInterface $record): void
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO trace (run_id, span_id, parent_id, depth, phase, type, data, created_at)
-             VALUES (:run, :span, :parent, :depth, :phase, :type, :data, :at)',
+            'INSERT INTO trace (run_id, span_id, parent_id, depth, phase, type, level, data, created_at)
+             VALUES (:run, :span, :parent, :depth, :phase, :type, :level, :data, :at)',
         );
         $stmt->execute([
             'run' => $record->runId(),
@@ -49,6 +70,7 @@ final class TraceStore implements TraceSinkInterface
             'depth' => $record->depth(),
             'phase' => $record->phase(),
             'type' => $record->event()->type(),
+            'level' => $record->event()->level()->value,
             'data' => json_encode($record->event()->toArray(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
             'at' => $record->at(),
         ]);

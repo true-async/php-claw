@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Trace\Event;
 
+use Claw\Trace\Level;
 use Claw\Trace\TraceEventInterface;
 
 /** A tool call returned its result (or an error). */
@@ -19,6 +20,12 @@ final readonly class ToolReturned implements TraceEventInterface
     public function type(): string
     {
         return 'tool-result';
+    }
+
+    /** An error is a milestone worth seeing even when quiet; a normal result is routine progress. */
+    public function level(): Level
+    {
+        return $this->isError ? Level::Notice : Level::Info;
     }
 
     public function toArray(): array

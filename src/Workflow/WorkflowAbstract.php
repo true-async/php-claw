@@ -10,6 +10,7 @@ use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\ToolCall;
+use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
 /**
@@ -220,12 +221,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /**
      * Note something the workflow's own code did (a "task"). There is no Task class; the AI writes
      * its task methods and logs their specifics here — it lands under the current span in the trace.
+     * Pass a higher $level (e.g. {@see Level::Notice}) for a note that should show even when quiet.
      *
      * @param array<string, mixed> $context
      */
-    protected function log(string $action, string $message = '', array $context = []): void
+    protected function log(string $action, string $message = '', array $context = [], Level $level = Level::Info): void
     {
-        $this->tracer()?->log($action, $message, $context);
+        $this->tracer()?->log($action, $message, $context, $level);
     }
 
     /**

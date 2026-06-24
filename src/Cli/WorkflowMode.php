@@ -17,6 +17,7 @@ use Claw\Tool\Registry;
 use Claw\Tool\Workspace;
 use Claw\Tool\WriteFileTool;
 use Claw\Trace\ConsoleTraceSink;
+use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceStore;
@@ -57,9 +58,10 @@ final class WorkflowMode
      */
     public function run(array $args): int
     {
-        // Pull `--project <dir>` out first so it may sit anywhere without shadowing the
-        // command word or the issue id.
+        // Pull `--project <dir>` and the density flags out first so they may sit anywhere without
+        // shadowing the command word or the issue id.
         [$args, $projectDir] = $this->extractProjectOption($args);
+        [$args, $verbosity] = $this->extractVerbosity($args);
 
         if (\in_array('-c', $args, true) || \in_array('--create', $args, true)) {
             return $this->createProject($args);
@@ -69,8 +71,8 @@ final class WorkflowMode
         }
 
         return match ($args[0] ?? null) {
-            'run' => $this->runIssue(\array_slice($args, 1), $projectDir),
-            'log' => $this->showHistory(\array_slice($args, 1), $projectDir),
+            'run' => $this->runIssue(\array_slice($args, 1), $projectDir, $verbosity),
+            'log' => $this->showHistory(\array_slice($args, 1), $projectDir, $verbosity),
             default => $this->usage(),
         };
     }
@@ -146,7 +148,7 @@ final class WorkflowMode
      *
      * @param list<string> $args
      */
-    private function runIssue(array $args, ?string $projectDir): int
+    private function runIssue(array $args, ?string $projectDir, ?Level $verbosity): int
     {
         $issueId = Cli::firstPositional($args);
         if ($issueId === null) {
@@ -208,7 +210,7 @@ final class WorkflowMode
             $runId = $store->recordRun($issue->id, $solverName);
         }
         $store->setIssueStatus($issue->id, IssueStatus::InProgress);
-        $tracer = new Tracer($runId, new TraceStore($projectDb), new ConsoleTraceSink(STDERR));
+        $tracer = new Tracer($runId, new TraceStore($projectDb), new ConsoleTraceSink(STDERR, $verbosity ?? Level::Info));
         $env->set(EnvKey::Tracer, $tracer);
         if ($resuming) {
             fwrite(STDOUT, "Resuming run #{$runId} for issue #{$issue->id}…\n");
@@ -279,7 +281,7 @@ final class WorkflowMode
      *
      * @param list<string> $args
      */
-    private function showHistory(array $args, ?string $projectDir): int
+    private function showHistory(array $args, ?string $projectDir, ?Level $verbosity): int
     {
         try {
             $store = $this->resolve($projectDir);
@@ -313,7 +315,7 @@ final class WorkflowMode
         $title = $header !== null
             ? "run #{$runId}  (issue #{$header['issue']}, {$header['workflow']}, {$header['status']})"
             : "run #{$runId}";
-        $tree = $reader->render($runId);
+        $tree = $reader->render($runId, $verbosity ?? Level::Debug);
         fwrite(STDOUT, "\nTrace of {$title}:\n" . ($tree === '' ? '  (no trace recorded)' : $tree) . "\n");
 
         return 0;
@@ -334,6 +336,8 @@ final class WorkflowMode
             'Options:',
             '  --project <dir>      act on the project at <dir> (default: walk up from cwd;',
             '                       CLAW_PROJECT sets it too)',
+            '  -q, --quiet          console shows only milestones and errors',
+            '  -v, --verbose        console shows every model turn, prompt and reply',
             '  --session            start the interactive chat instead (the old mode)',
             '',
         ]) . "\n");
@@ -389,6 +393,32 @@ final class WorkflowMode
         }
 
         return [$rest, ($dir === null || $dir === '') ? null : $dir];
+    }
+
+    /**
+     * Split the density flags (`-q`/`--quiet`, `-v`/`--verbose`) out of the args, returning the rest
+     * and the console threshold they pick — null when none is given, so each command keeps its own
+     * default. Last flag wins.
+     *
+     * @param list<string> $args
+     *
+     * @return array{0: list<string>, 1: ?Level}
+     */
+    private function extractVerbosity(array $args): array
+    {
+        $rest = [];
+        $level = null;
+        foreach ($args as $arg) {
+            if ($arg === '-q' || $arg === '--quiet') {
+                $level = Level::Notice;
+            } elseif ($arg === '-v' || $arg === '--verbose') {
+                $level = Level::Debug;
+            } else {
+                $rest[] = $arg;
+            }
+        }
+
+        return [$rest, $level];
     }
 
     /** Where the app keeps every project's state db. Anchored to the install, not the cwd. */

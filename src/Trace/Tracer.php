@@ -31,6 +31,9 @@ final class Tracer
     /** @var list<int> ids of the currently-open spans; the last is the current parent. */
     private array $stack = [];
 
+    /** @var array<int, Level> each open span's level, so its close ({@see SpanEnded}) inherits it. */
+    private array $spanLevel = [];
+
     /** @var list<TraceSinkInterface> */
     private readonly array $sinks;
 
@@ -75,7 +78,9 @@ final class Tracer
             array_pop($this->stack);
         }
 
-        $this->emit('exit', $id, new SpanEnded());
+        $level = $this->spanLevel[$id] ?? Level::Info;
+        unset($this->spanLevel[$id]);
+        $this->emit('exit', $id, new SpanEnded($level));
     }
 
     /** @param list<string> $tools */
@@ -102,15 +107,16 @@ final class Tracer
     }
 
     /** @param array<string, mixed> $context */
-    public function log(string $action, string $message = '', array $context = []): void
+    public function log(string $action, string $message = '', array $context = [], Level $level = Level::Info): void
     {
-        $this->event(new Noted($action, $message, $context));
+        $this->event(new Noted($action, $message, $context, $level));
     }
 
     private function open(TraceEventInterface $event): int
     {
         $id = ++$this->seq;
-        $this->emit('enter', $id, $event);   // parent/depth from the current stack, before the push
+        $this->spanLevel[$id] = $event->level();   // remembered so the matching exit inherits it
+        $this->emit('enter', $id, $event);         // parent/depth from the current stack, before the push
         $this->stack[] = $id;
 
         return $id;

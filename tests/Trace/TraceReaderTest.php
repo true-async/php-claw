@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Trace;
 
+use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceStore;
@@ -32,6 +33,30 @@ final class TraceReaderTest
         Assert::true(str_contains($tree, '  ▶ step validate'));
         Assert::true(str_contains($tree, '    · tool read_file'));   // depth 2 under the step
         Assert::true(str_contains($tree, '◀ end'));
+    }
+
+    #[Test]
+    public function renderFiltersByThreshold(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $tracer = new Tracer('7', new TraceStore($pdo));
+
+        $wf = $tracer->enterWorkflow('demo');     // Notice
+        $step = $tracer->enterStep('validate');   // Info
+        $tracer->prompt('secret reasoning');      // Debug
+        $tracer->exit($step);
+        $tracer->exit($wf);
+
+        $reader = new TraceReader($pdo);
+
+        $quiet = $reader->render('7', Level::Notice);
+        Assert::true(str_contains($quiet, 'workflow demo'));
+        Assert::true(!str_contains($quiet, 'step validate'));
+        Assert::true(!str_contains($quiet, 'prompt'));
+
+        $all = $reader->render('7', Level::Debug);
+        Assert::true(str_contains($all, 'step validate'));
+        Assert::true(str_contains($all, 'prompt'));
     }
 
     #[Test]
