@@ -6,6 +6,8 @@ namespace Tests\Workflow;
 
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentResponse;
+use Claw\Agent\SpeakerInterface;
+use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
 use Claw\Agent\Usage;
@@ -202,6 +204,40 @@ final class WorkflowAbstractTest
 
         $wf->callAi('hi', [], 'unknown');
         Assert::same($worker->requests[1]->model, 'm');         // unknown role -> scope default
+    }
+
+    #[Test]
+    public function askRoutesToTheChannelAndReturnsItsAnswer(): void
+    {
+        $channel = new class () implements SpeakerInterface {
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Human;
+            }
+
+            public function reply(string $incoming): string
+            {
+                return 'echo:' . $incoming;
+            }
+        };
+        $wf = new ProbeWorkflow($this->config()->set(EnvKey::Ask, $channel), 'r1');
+
+        Assert::same($wf->callAsk('how many?'), 'echo:how many?');
+    }
+
+    #[Test]
+    public function askThrowsWhenNoChannelIsConfigured(): void
+    {
+        $wf = new ProbeWorkflow($this->config(), 'r1');   // no EnvKey::Ask set
+
+        $threw = false;
+        try {
+            $wf->callAsk('anyone?');
+        } catch (WorkflowException) {
+            $threw = true;
+        }
+
+        Assert::true($threw);
     }
 
     private function config(

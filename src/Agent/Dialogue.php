@@ -44,7 +44,7 @@ final class Dialogue
         $pump = static function (SpeakerInterface $speaker, Channel $in, Channel $out, int $turns) use (&$transcript): void {
             for ($i = 0; $i < $turns; $i++) {
                 $reply = $speaker->reply((string) $in->recv());
-                $transcript[] = ['from' => $speaker->name(), 'text' => $reply];
+                $transcript[] = ['from' => $speaker->name()->value, 'text' => $reply];
                 $out->send($reply);
             }
         };

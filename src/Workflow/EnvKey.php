@@ -21,4 +21,5 @@ enum EnvKey: string
     case Store = 'store';                    // WorkflowStateStore — state snapshot for resume + leaf-call ids
     case Agents = 'agents';                  // array<string,string> — named agent roles -> model id; ai(agent:) routes by name
     case Tracer = 'tracer';                  // Tracer — hierarchical run trace (step/prompt/turn/tool); unset = no tracing
+    case Ask = 'ask';                        // SpeakerInterface — who an ask() question goes to (human/agent); unset = no channel
 }

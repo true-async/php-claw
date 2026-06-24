@@ -6,6 +6,7 @@ namespace Claw\Workflow;
 
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
+use Claw\Agent\SpeakerInterface;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
@@ -216,6 +217,28 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         return $result->content;
+    }
+
+    /**
+     * Ask a question of whoever sits on the run's ask channel — a person at the console, or an agent
+     * (any {@see SpeakerInterface} placed in {@see EnvKey::Ask}) — and return their answer. The
+     * exchange is two-way, so it runs OFF the trace; the question and answer are noted at
+     * {@see Level::Notice}, so they surface even in a quiet run.
+     *
+     * @throws WorkflowException when no ask channel is configured (an autonomous run with no one to ask)
+     */
+    protected function ask(string $question): string
+    {
+        $channel = $this->env->find(EnvKey::Ask);
+        if (!$channel instanceof SpeakerInterface) {
+            throw new WorkflowException('the workflow asked for input but no ask channel is configured');
+        }
+
+        $this->tracer()?->log('ask', $question, [], Level::Notice);
+        $answer = $channel->reply($question);
+        $this->tracer()?->log('answer', $answer, ['from' => $channel->name()->value], Level::Notice);
+
+        return $answer;
     }
 
     /**

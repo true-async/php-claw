@@ -12,8 +12,8 @@ namespace Claw\Agent;
  */
 interface SpeakerInterface
 {
-    /** A short label for the transcript (e.g. 'worker', 'supervisor', 'human'). */
-    public function name(): string;
+    /** Which participant this is — a typed role, not a free string (e.g. {@see SpeakerRole::Human}). */
+    public function name(): SpeakerRole;
 
     /** React to one incoming message and return this speaker's reply. */
     public function reply(string $incoming): string;

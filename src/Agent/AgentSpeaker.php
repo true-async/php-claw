@@ -17,14 +17,14 @@ final class AgentSpeaker implements SpeakerInterface
 
     /** @param list<Message> $history optional seed context (e.g. a brief) */
     public function __construct(
-        private readonly string $name,
+        private readonly SpeakerRole $name,
         private readonly TurnLoopInterface $loop,
         array $history = [],
     ) {
         $this->history = $history;
     }
 
-    public function name(): string
+    public function name(): SpeakerRole
     {
         return $this->name;
     }

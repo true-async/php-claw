@@ -63,6 +63,11 @@ final class ProbeWorkflow extends WorkflowAbstract
         $this->log($action, $message);
     }
 
+    public function callAsk(string $question): string
+    {
+        return $this->ask($question);
+    }
+
     public function callIssue(): ?Issue
     {
         return $this->issue();

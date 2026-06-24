@@ -9,6 +9,7 @@ use Claw\Agent\Dialogue;
 use Claw\Agent\Message;
 use Claw\Agent\Role;
 use Claw\Agent\SpeakerInterface;
+use Claw\Agent\SpeakerRole;
 use Claw\Agent\TextBlock;
 use Claw\Agent\TurnLoopInterface;
 use Claw\Agent\TurnResult;
@@ -21,8 +22,8 @@ final class DialogueTest
     #[Test]
     public function alternatesCarryingEachReplyToTheOther(): void
     {
-        $worker = new ScriptedSpeaker('worker', ['w1', 'w2']);
-        $super = new ScriptedSpeaker('supervisor', ['s1', 's2']);
+        $worker = new ScriptedSpeaker(SpeakerRole::Worker, ['w1', 'w2']);
+        $super = new ScriptedSpeaker(SpeakerRole::Supervisor, ['s1', 's2']);
 
         $transcript = Dialogue::between($worker, $super, 'help', 4);
 
@@ -37,12 +38,12 @@ final class DialogueTest
     #[Test]
     public function splitsAnOddBudgetGivingTheOpenerTheExtraTurn(): void
     {
-        $a = new ScriptedSpeaker('a', ['a1', 'a2']);
-        $b = new ScriptedSpeaker('b', ['b1']);
+        $a = new ScriptedSpeaker(SpeakerRole::Worker, ['a1', 'a2']);
+        $b = new ScriptedSpeaker(SpeakerRole::Supervisor, ['b1']);
 
         $transcript = Dialogue::between($a, $b, 'go', 3);
 
-        Assert::same(array_map(static fn (array $t): string => $t['from'], $transcript), ['a', 'b', 'a']);
+        Assert::same(array_map(static fn (array $t): string => $t['from'], $transcript), ['worker', 'supervisor', 'worker']);
     }
 
     #[Test]
@@ -58,7 +59,7 @@ final class DialogueTest
                 return new TurnResult([...$history, new Message(Role::Assistant, [new TextBlock('ack')])], 'ack', new Usage());
             }
         };
-        $speaker = new AgentSpeaker('worker', $loop);
+        $speaker = new AgentSpeaker(SpeakerRole::Worker, $loop);
 
         Assert::same($speaker->reply('hello'), 'ack');
         Assert::same($loop->lastHistoryLen, 1);   // just the incoming user message
@@ -77,12 +78,12 @@ final class ScriptedSpeaker implements SpeakerInterface
 
     /** @param list<string> $replies canned replies, returned in order */
     public function __construct(
-        private readonly string $name,
+        private readonly SpeakerRole $name,
         private readonly array $replies,
     ) {
     }
 
-    public function name(): string
+    public function name(): SpeakerRole
     {
         return $this->name;
     }

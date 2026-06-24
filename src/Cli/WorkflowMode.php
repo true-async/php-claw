@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Cli;
 
+use Claw\Agent\ConsoleSpeaker;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
@@ -194,7 +195,8 @@ final class WorkflowMode
             ->set(EnvKey::SystemPrompt, Cli::DEFAULT_SYSTEM)
             ->set(EnvKey::MaxHistory, $config->maxHistory)
             ->set(EnvKey::Store, new SqliteStateStore($projectDb))   // durable: a killed run resumes here
-            ->set(EnvKey::Agents, $config->agents);                  // named roles share this access, override only the model
+            ->set(EnvKey::Agents, $config->agents)                   // named roles share this access, override only the model
+            ->set(EnvKey::Ask, new ConsoleSpeaker(STDIN, STDOUT));   // ask() reaches the human at the console (Request>)
 
         $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
         $solverClass = $workflowStore->classFor($solverName, true);
