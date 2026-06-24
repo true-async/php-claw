@@ -7,53 +7,55 @@ namespace Claw\Project;
 use Claw\Exceptions\ClawException;
 
 /**
- * The application's registry of projects, kept inside the app's own home folder.
+ * One opened project's state. A "project" is an EXTERNAL working tree (a folder, possibly a
+ * git repository) that lives elsewhere on disk; the application never creates or touches that
+ * folder. What it owns is the application-side state for it: one SQLite file = one project,
+ * kept inside the app's own home and keyed by the folder's absolute path (the way `.claude`
+ * keys its per-project data by path).
  *
- * A "project" is an EXTERNAL working tree (a folder, possibly a git repository) that
- * lives somewhere else on disk; this store never creates or touches that folder. What
- * it owns is the application-side state for it: one SQLite file = one project, the
- * same convention {@see \Claw\Store\SessionStore} uses for conversations — one writer,
- * no lock contention.
- *
- * The database is keyed by the project folder's absolute path, so the same folder
- * always maps back to the same file (the way `.claude` keys its per-project data by
- * path). That state db is the project's home for its metadata now, and for its issues
- * and durable workflow-run snapshots later.
+ * An instance is a HANDLE to one already-resolved project: it holds the open \PDO and the
+ * project's metadata, so a whole command runs against a single connection. The path is
+ * resolved and the db opened exactly ONCE — by {@see discover()} or {@see init()} — not on
+ * every operation; that same connection ({@see pdo()}) also backs the durable workflow-run
+ * state store and the trace store, so a run never reopens its own db.
  */
 final class ProjectStore
 {
-    public function __construct(private readonly string $projectsDir)
-    {
+    private function __construct(
+        private readonly \PDO $pdo,
+        private readonly Project $project,
+    ) {
     }
 
     /**
-     * Initialize the application's state database for an existing project folder. The
-     * folder must already exist — it is the external working tree, not ours to make.
-     * Returns the new Project; throws if it is already initialized.
+     * Register an existing project folder: create its state db under $projectsDir and return
+     * the project. The folder must already exist — it is the external working tree, not ours
+     * to make. Throws if it is already initialized. This is the registry's only write; it
+     * returns metadata rather than a handle because `claw -c` just records the project.
      *
      * @throws ClawException
      */
-    public function init(string $projectPath): Project
+    public static function init(string $projectsDir, string $projectPath): Project
     {
         $abs = realpath($projectPath);
         if ($abs === false || !is_dir($abs)) {
             throw new ClawException("project folder does not exist: {$projectPath}");
         }
 
-        if (!is_dir($this->projectsDir) && !mkdir($this->projectsDir, 0o775, true) && !is_dir($this->projectsDir)) {
-            throw new ClawException("cannot create projects directory: {$this->projectsDir}");
+        if (!is_dir($projectsDir) && !mkdir($projectsDir, 0o775, true) && !is_dir($projectsDir)) {
+            throw new ClawException("cannot create projects directory: {$projectsDir}");
         }
 
         $id = self::keyFor($abs);
-        $dbPath = $this->dbPath($id);
+        $dbPath = self::dbPath($projectsDir, $id);
         if (is_file($dbPath)) {
             throw new ClawException("project already initialized: {$abs} ({$dbPath})");
         }
 
         $name = basename($abs);
         try {
-            $pdo = $this->open($dbPath);
-            $this->ensureSchema($pdo);
+            $pdo = self::open($dbPath);
+            self::ensureSchema($pdo);
             $stmt = $pdo->prepare(
                 'INSERT INTO project (id, name, path, description, created_at)
                  VALUES (:id, :name, :path, :description, :created_at)',
@@ -76,34 +78,60 @@ final class ProjectStore
     }
 
     /**
-     * Open a new issue in an already-initialized project and return it. The issue
-     * lives in that project's own state db; its id is assigned by the store (the db
+     * Resolve the project that $startDir belongs to by walking up its parent directories to
+     * the nearest registered one (the way git finds the repo root from any subdirectory), and
+     * open a handle to it. Returns null when no ancestor is a registered project — the caller
+     * must treat that as "not inside a project" and never fall back to a default.
+     *
+     * @throws ClawException on a corrupt/unreadable state db
+     */
+    public static function discover(string $projectsDir, string $startDir): ?self
+    {
+        $dir = realpath($startDir);
+        if ($dir === false) {
+            return null;
+        }
+
+        while (true) {
+            $dbPath = self::dbPath($projectsDir, self::keyFor($dir));
+            if (is_file($dbPath)) {
+                return self::openHandle($dbPath);
+            }
+            $parent = \dirname($dir);
+            if ($parent === $dir) {   // reached the filesystem root without a match
+                return null;
+            }
+            $dir = $parent;
+        }
+    }
+
+    /** This project's metadata (id, name, the external folder path, description). */
+    public function project(): Project
+    {
+        return $this->project;
+    }
+
+    /** The single open connection, shared with the run-state store and the tracer. */
+    public function pdo(): \PDO
+    {
+        return $this->pdo;
+    }
+
+    /**
+     * Open a new issue in this project and return it. Its id is assigned by the store (the db
      * owns identity), so the caller never fabricates one.
      *
      * @throws ClawException
      */
-    public function addIssue(string $projectPath, string $title, string $description = ''): Issue
+    public function addIssue(string $title, string $description = ''): Issue
     {
         $title = trim($title);
         if ($title === '') {
             throw new ClawException('issue title must not be empty');
         }
 
-        $abs = realpath($projectPath);
-        if ($abs === false || !is_dir($abs)) {
-            throw new ClawException("project folder does not exist: {$projectPath}");
-        }
-
-        $projectId = self::keyFor($abs);
-        $dbPath = $this->dbPath($projectId);
-        if (!is_file($dbPath)) {
-            throw new ClawException("project not initialized: {$abs} (run: claw -c)");
-        }
-
         try {
-            $pdo = $this->open($dbPath);
-            $this->ensureSchema($pdo);   // older project dbs may predate the issues table
-            $stmt = $pdo->prepare(
+            $stmt = $this->pdo->prepare(
                 'INSERT INTO issues (title, description, status, created_at)
                  VALUES (:title, :description, :status, :created_at)',
             );
@@ -113,46 +141,31 @@ final class ProjectStore
                 'status' => IssueStatus::Open->name,
                 'created_at' => time(),
             ]);
-            $issueId = (string) $pdo->lastInsertId();
+            $issueId = (string) $this->pdo->lastInsertId();
         } catch (\PDOException $e) {
-            throw new ClawException("ProjectStore: cannot add issue to {$dbPath}: " . $e->getMessage(), 0, $e);
+            throw new ClawException('ProjectStore: cannot add issue: ' . $e->getMessage(), 0, $e);
         }
 
-        return new Issue($issueId, $projectId, $title, $description);
-    }
-
-    /** Load a project's metadata from its state db. @throws ClawException */
-    public function load(string $projectPath): Project
-    {
-        [$pdo, $id] = $this->connect($projectPath);
-        $stmt = $pdo->prepare('SELECT id, name, path, description FROM project LIMIT 1');
-        $stmt->execute();
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-        if (!\is_array($row)) {
-            throw new ClawException("project has no metadata: {$id}");
-        }
-
-        return new Project((string) $row['id'], (string) $row['name'], (string) $row['path'], (string) $row['description']);
+        return new Issue($issueId, $this->project->id, $title, $description);
     }
 
     /** Load one issue (with the ids of the runs spawned for it). @throws ClawException */
-    public function loadIssue(string $projectPath, string $issueId): Issue
+    public function loadIssue(string $issueId): Issue
     {
-        [$pdo, $projectId] = $this->connect($projectPath);
-        $stmt = $pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
+        $stmt = $this->pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
         $stmt->execute(['id' => $issueId]);
         $row = $stmt->fetch(\PDO::FETCH_ASSOC);
         if (!\is_array($row)) {
-            throw new ClawException("issue #{$issueId} not found in project {$projectId}");
+            throw new ClawException("issue #{$issueId} not found in project {$this->project->id}");
         }
 
-        $rs = $pdo->prepare('SELECT id FROM runs WHERE issue_id = :id ORDER BY id');
+        $rs = $this->pdo->prepare('SELECT id FROM runs WHERE issue_id = :id ORDER BY id');
         $rs->execute(['id' => $issueId]);
         $runs = array_values(array_map(static fn (mixed $r): string => (string) $r, $rs->fetchAll(\PDO::FETCH_COLUMN)));
 
         return new Issue(
-            (string) $issueId,
-            $projectId,
+            $issueId,
+            $this->project->id,
             (string) $row['title'],
             (string) $row['description'],
             IssueStatus::fromName((string) $row['status']),
@@ -160,36 +173,32 @@ final class ProjectStore
         );
     }
 
-    /** Record a run spawned for an issue and return its store-assigned id. @throws ClawException */
-    public function recordRun(string $projectPath, string $issueId, string $workflow, string $status = 'running'): string
+    /** Record a run spawned for an issue and return its store-assigned id. */
+    public function recordRun(string $issueId, string $workflow, string $status = 'running'): string
     {
-        [$pdo] = $this->connect($projectPath);
-        $stmt = $pdo->prepare(
+        $stmt = $this->pdo->prepare(
             'INSERT INTO runs (issue_id, workflow, status, created_at)
              VALUES (:issue, :workflow, :status, :created_at)',
         );
         $stmt->execute(['issue' => $issueId, 'workflow' => $workflow, 'status' => $status, 'created_at' => time()]);
 
-        return (string) $pdo->lastInsertId();
+        return (string) $this->pdo->lastInsertId();
     }
 
-    /** @throws ClawException */
-    public function setRunStatus(string $projectPath, string $runId, string $status): void
+    public function setRunStatus(string $runId, string $status): void
     {
-        [$pdo] = $this->connect($projectPath);
-        $stmt = $pdo->prepare('UPDATE runs SET status = :status WHERE id = :id');
+        $stmt = $this->pdo->prepare('UPDATE runs SET status = :status WHERE id = :id');
         $stmt->execute(['status' => $status, 'id' => $runId]);
     }
 
     /**
      * The id of an interrupted run (still 'running') for this issue's workflow, newest first, or
      * null — a run only stays 'running' if the process was killed before it finished or failed, so
-     * this is exactly what a re-run should resume. @throws ClawException
+     * this is exactly what a re-run should resume.
      */
-    public function resumableRun(string $projectPath, string $issueId, string $workflow): ?string
+    public function resumableRun(string $issueId, string $workflow): ?string
     {
-        [$pdo] = $this->connect($projectPath);
-        $stmt = $pdo->prepare(
+        $stmt = $this->pdo->prepare(
             "SELECT id FROM runs WHERE issue_id = :issue AND workflow = :workflow AND status = 'running' ORDER BY id DESC LIMIT 1",
         );
         $stmt->execute(['issue' => $issueId, 'workflow' => $workflow]);
@@ -198,18 +207,10 @@ final class ProjectStore
         return $id === false ? null : (string) $id;
     }
 
-    /** @throws ClawException */
-    public function setIssueStatus(string $projectPath, string $issueId, IssueStatus $status): void
+    public function setIssueStatus(string $issueId, IssueStatus $status): void
     {
-        [$pdo] = $this->connect($projectPath);
-        $stmt = $pdo->prepare('UPDATE issues SET status = :status WHERE id = :id');
+        $stmt = $this->pdo->prepare('UPDATE issues SET status = :status WHERE id = :id');
         $stmt->execute(['status' => $status->name, 'id' => $issueId]);
-    }
-
-    /** The state-db path for a project id, whether or not it exists yet. */
-    public function dbPath(string $id): string
-    {
-        return $this->projectsDir . '/' . $id . '.db';
     }
 
     /** A filesystem-safe, stable key derived from a folder's absolute path. */
@@ -218,33 +219,33 @@ final class ProjectStore
         return trim((string) preg_replace('/[^A-Za-z0-9]+/', '-', $absolutePath), '-');
     }
 
-    /**
-     * Open an already-initialized project's db and return it with the project id.
-     *
-     * @return array{0: \PDO, 1: string}
-     *
-     * @throws ClawException
-     */
-    private function connect(string $projectPath): array
+    /** Open a registered project's db (schema ensured) and load its metadata into a handle. */
+    private static function openHandle(string $dbPath): self
     {
-        $abs = realpath($projectPath);
-        if ($abs === false || !is_dir($abs)) {
-            throw new ClawException("project folder does not exist: {$projectPath}");
+        $pdo = self::open($dbPath);
+        self::ensureSchema($pdo);
+
+        $stmt = $pdo->query('SELECT id, name, path, description FROM project LIMIT 1');
+        $row = $stmt === false ? false : $stmt->fetch(\PDO::FETCH_ASSOC);
+        if (!\is_array($row)) {
+            throw new ClawException("project has no metadata: {$dbPath}");
         }
 
-        $id = self::keyFor($abs);
-        $dbPath = $this->dbPath($id);
-        if (!is_file($dbPath)) {
-            throw new ClawException("project not initialized: {$abs} (run: claw -c)");
-        }
-
-        $pdo = $this->open($dbPath);
-        $this->ensureSchema($pdo);
-
-        return [$pdo, $id];
+        return new self($pdo, new Project(
+            (string) $row['id'],
+            (string) $row['name'],
+            (string) $row['path'],
+            (string) $row['description'],
+        ));
     }
 
-    private function open(string $dbPath): \PDO
+    /** The state-db path for a project id under a projects directory. */
+    private static function dbPath(string $projectsDir, string $id): string
+    {
+        return $projectsDir . '/' . $id . '.db';
+    }
+
+    private static function open(string $dbPath): \PDO
     {
         $pdo = new \PDO('sqlite:' . $dbPath);
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
@@ -253,7 +254,7 @@ final class ProjectStore
     }
 
     /** The project db's tables, created on demand. Idempotent ({@see addIssue}). */
-    private function ensureSchema(\PDO $pdo): void
+    private static function ensureSchema(\PDO $pdo): void
     {
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS project (

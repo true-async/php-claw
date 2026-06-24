@@ -19,7 +19,7 @@ final class ProjectStoreTest
         $folder = self::tempDir();
 
         try {
-            $project = (new ProjectStore($projectsDir))->init($folder);
+            $project = ProjectStore::init($projectsDir, $folder);
 
             Assert::same($project->path, realpath($folder));
             Assert::same($project->name, basename($folder));
@@ -36,14 +36,13 @@ final class ProjectStoreTest
     {
         $projectsDir = self::tempDir();
         $folder = self::tempDir();
-        $store = new ProjectStore($projectsDir);
 
         try {
-            $store->init($folder);
+            ProjectStore::init($projectsDir, $folder);
 
             $threw = false;
             try {
-                $store->init($folder);
+                ProjectStore::init($projectsDir, $folder);
             } catch (ClawException $e) {
                 $threw = str_contains($e->getMessage(), 'already initialized');
             }
@@ -63,7 +62,7 @@ final class ProjectStoreTest
         try {
             $threw = false;
             try {
-                (new ProjectStore($projectsDir))->init($projectsDir . '/does-not-exist');
+                ProjectStore::init($projectsDir, $projectsDir . '/does-not-exist');
             } catch (ClawException $e) {
                 $threw = str_contains($e->getMessage(), 'does not exist');
             }
@@ -75,23 +74,61 @@ final class ProjectStoreTest
     }
 
     #[Test]
+    public function discoverWalksUpToTheNearestProjectRoot(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $project = ProjectStore::init($projectsDir, $folder);
+
+            $sub = $folder . '/a/b/c';
+            mkdir($sub, 0o775, true);
+
+            $store = ProjectStore::discover($projectsDir, $sub);   // started deep inside the tree
+            if (!$store instanceof ProjectStore) {
+                throw new \RuntimeException('discover() returned null for a subdirectory of a project');
+            }
+
+            Assert::same($store->project()->id, $project->id);
+            Assert::same($store->project()->path, realpath($folder));
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function discoverReturnsNullOutsideAnyProject(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();   // never initialized
+
+        try {
+            Assert::null(ProjectStore::discover($projectsDir, $folder));
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
     public function addIssueOpensAnIssueInTheProjectDb(): void
     {
         $projectsDir = self::tempDir();
         $folder = self::tempDir();
-        $store = new ProjectStore($projectsDir);
 
         try {
-            $project = $store->init($folder);
+            $store = self::openProject($projectsDir, $folder);
 
-            $issue = $store->addIssue($folder, '  Fix the login bug  ', 'steps to repro');
+            $issue = $store->addIssue('  Fix the login bug  ', 'steps to repro');
 
             Assert::same($issue->title, 'Fix the login bug');   // trimmed
-            Assert::same($issue->project, $project->id);
+            Assert::same($issue->project, $store->project()->id);
             Assert::same($issue->status, IssueStatus::Open);
             Assert::same($issue->id, '1');   // store-assigned id
 
-            $pdo = new \PDO('sqlite:' . $projectsDir . '/' . $project->id . '.db');
+            $pdo = new \PDO('sqlite:' . $projectsDir . '/' . $store->project()->id . '.db');
             $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
             $stmt = $pdo->query('SELECT title, description, status FROM issues WHERE id = 1');
             if ($stmt === false) {
@@ -108,39 +145,17 @@ final class ProjectStoreTest
     }
 
     #[Test]
-    public function addIssueRejectsAnUninitializedProject(): void
-    {
-        $projectsDir = self::tempDir();
-        $folder = self::tempDir();
-
-        try {
-            $threw = false;
-            try {
-                (new ProjectStore($projectsDir))->addIssue($folder, 'orphan issue');
-            } catch (ClawException $e) {
-                $threw = str_contains($e->getMessage(), 'not initialized');
-            }
-
-            Assert::true($threw);
-        } finally {
-            self::rmrf($projectsDir);
-            self::rmrf($folder);
-        }
-    }
-
-    #[Test]
     public function addIssueRejectsAnEmptyTitle(): void
     {
         $projectsDir = self::tempDir();
         $folder = self::tempDir();
-        $store = new ProjectStore($projectsDir);
 
         try {
-            $store->init($folder);
+            $store = self::openProject($projectsDir, $folder);
 
             $threw = false;
             try {
-                $store->addIssue($folder, '   ');
+                $store->addIssue('   ');
             } catch (ClawException $e) {
                 $threw = str_contains($e->getMessage(), 'title must not be empty');
             }
@@ -157,21 +172,32 @@ final class ProjectStoreTest
     {
         $projectsDir = self::tempDir();
         $folder = self::tempDir();
-        $store = new ProjectStore($projectsDir);
 
         try {
-            $store->init($folder);
-            $runId = $store->recordRun($folder, '1', 'Issue1Solver');   // status 'running'
+            $store = self::openProject($projectsDir, $folder);
+            $runId = $store->recordRun('1', 'Issue1Solver');   // status 'running'
 
-            Assert::same($store->resumableRun($folder, '1', 'Issue1Solver'), $runId);
-            Assert::null($store->resumableRun($folder, '1', 'OtherSolver'));   // different workflow
+            Assert::same($store->resumableRun('1', 'Issue1Solver'), $runId);
+            Assert::null($store->resumableRun('1', 'OtherSolver'));   // different workflow
 
-            $store->setRunStatus($folder, $runId, 'done');
-            Assert::null($store->resumableRun($folder, '1', 'Issue1Solver'));   // finished -> not resumable
+            $store->setRunStatus($runId, 'done');
+            Assert::null($store->resumableRun('1', 'Issue1Solver'));   // finished -> not resumable
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($folder);
         }
+    }
+
+    /** Register a project and return an open handle to it (init + discover). */
+    private static function openProject(string $projectsDir, string $folder): ProjectStore
+    {
+        ProjectStore::init($projectsDir, $folder);
+        $store = ProjectStore::discover($projectsDir, $folder);
+        if (!$store instanceof ProjectStore) {
+            throw new \RuntimeException('discover() returned null for a just-initialized project');
+        }
+
+        return $store;
     }
 
     private static function tempDir(): string

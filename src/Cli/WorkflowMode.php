@@ -37,6 +37,11 @@ use Claw\Workflow\WorkflowValidator;
  *   claw run <id>      generate/run the solver workflow for an issue
  *   claw log [runId]   print a run's recorded trace
  *
+ * Every command but `-c` runs IN a project. The project is resolved once per invocation
+ * ({@see resolve()}): an explicit `--project <dir>` / `CLAW_PROJECT`, else the current
+ * directory — walking up to the nearest registered project, like git finding the repo
+ * root. No project resolves -> a hard error, never a silent default.
+ *
  * The setup/read commands (`-c`, `-i`, `log`) touch only the app's own state and need
  * no agent/API key, so they never load the full {@see Config}; `run` does.
  */
@@ -52,29 +57,33 @@ final class WorkflowMode
      */
     public function run(array $args): int
     {
+        // Pull `--project <dir>` out first so it may sit anywhere without shadowing the
+        // command word or the issue id.
+        [$args, $projectDir] = $this->extractProjectOption($args);
+
         if (\in_array('-c', $args, true) || \in_array('--create', $args, true)) {
             return $this->createProject($args);
         }
         if (\in_array('-i', $args, true) || \in_array('--issue', $args, true)) {
-            return $this->createIssue($args);
+            return $this->createIssue($args, $projectDir);
         }
 
         return match ($args[0] ?? null) {
-            'run' => $this->runIssue(\array_slice($args, 1)),
-            'log' => $this->showHistory(\array_slice($args, 1)),
+            'run' => $this->runIssue(\array_slice($args, 1), $projectDir),
+            'log' => $this->showHistory(\array_slice($args, 1), $projectDir),
             default => $this->usage(),
         };
     }
 
     /**
-     * Handle `claw -c [folder]`: initialize a project's state db under the app home.
-     * The target is the first non-flag argument, defaulting to the current directory.
+     * Handle `claw -c [folder]`: register a project's state db under the app home. The target is
+     * the first non-flag argument, defaulting to the current directory. This is the one command
+     * that does not resolve an existing project — it creates one.
      *
      * @param list<string> $args
      */
     private function createProject(array $args): int
     {
-        $appHome = $this->appHome();
         $target = Cli::firstPositional($args) ?? getcwd();
         if ($target === false) {
             fwrite(STDERR, "claw -c: cannot determine the project folder\n");
@@ -83,7 +92,7 @@ final class WorkflowMode
         }
 
         try {
-            $project = (new ProjectStore($appHome . '/projects'))->init($target);
+            $project = ProjectStore::init($this->projectsDir(), $target);
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw -c: ' . $e->getMessage() . "\n");
 
@@ -92,18 +101,18 @@ final class WorkflowMode
 
         fwrite(STDOUT, "Project '{$project->name}' initialized.\n");
         fwrite(STDOUT, "  folder: {$project->path}\n");
-        fwrite(STDOUT, '  state:  ' . $appHome . '/projects/' . $project->id . ".db\n");
+        fwrite(STDOUT, '  state:  ' . $this->projectsDir() . '/' . $project->id . ".db\n");
 
         return 0;
     }
 
     /**
-     * Handle `claw -i "<title>"`: open an issue in the project rooted at the current
-     * directory. The title is the first non-flag argument.
+     * Handle `claw -i "<title>"`: open an issue in the resolved project. The title is the first
+     * non-flag argument.
      *
      * @param list<string> $args
      */
-    private function createIssue(array $args): int
+    private function createIssue(array $args, ?string $projectDir): int
     {
         $title = Cli::firstPositional($args);
         if ($title === null) {
@@ -112,15 +121,8 @@ final class WorkflowMode
             return 1;
         }
 
-        $cwd = getcwd();
-        if ($cwd === false) {
-            fwrite(STDERR, "claw -i: cannot determine the project folder\n");
-
-            return 1;
-        }
-
         try {
-            $issue = (new ProjectStore($this->appHome() . '/projects'))->addIssue($cwd, $title);
+            $issue = $this->resolve($projectDir)->addIssue($title);
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw -i: ' . $e->getMessage() . "\n");
 
@@ -144,7 +146,7 @@ final class WorkflowMode
      *
      * @param list<string> $args
      */
-    private function runIssue(array $args): int
+    private function runIssue(array $args, ?string $projectDir): int
     {
         $issueId = Cli::firstPositional($args);
         if ($issueId === null) {
@@ -153,19 +155,10 @@ final class WorkflowMode
             return 1;
         }
 
-        $cwd = getcwd();
-        if ($cwd === false) {
-            fwrite(STDERR, "claw run: cannot determine the project folder\n");
-
-            return 1;
-        }
-
-        $appHome = $this->appHome();
-        $store = new ProjectStore($appHome . '/projects');
-
         try {
-            $project = $store->load($cwd);
-            $issue = $store->loadIssue($cwd, $issueId);
+            $store = $this->resolve($projectDir);
+            $project = $store->project();
+            $issue = $store->loadIssue($issueId);
             $config = Config::load($this->root . '/.env');
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw run: ' . $e->getMessage() . "\n");
@@ -182,8 +175,8 @@ final class WorkflowMode
 
         // The palette acts on the REAL project folder: this run works on the user's repo.
         $workspace = new Workspace($project->path);
-        $workflowStore = new WorkflowStore($appHome . '/projects/' . $project->id . '-workflows', $project->id);
-        $projectDb = new \PDO('sqlite:' . $store->dbPath($project->id));   // shared by the state store + trace
+        $workflowStore = new WorkflowStore($this->projectsDir() . '/' . $project->id . '-workflows', $project->id);
+        $projectDb = $store->pdo();   // the one open connection: shared by the state store + trace
 
         $registry = new Registry();
         $registry->add(new BashTool($project->path));
@@ -209,12 +202,12 @@ final class WorkflowMode
         // Resume an interrupted run (status still 'running') for this issue's solver, else start a new
         // one. The run id ties the ledger row, the trace, and the durable state snapshot together — so
         // resuming reuses it: the solver restores its saved state and re-runs only the unfinished tail.
-        $runId = $store->resumableRun($cwd, $issue->id, $solverName);
+        $runId = $store->resumableRun($issue->id, $solverName);
         $resuming = $runId !== null;
         if ($runId === null) {
-            $runId = $store->recordRun($cwd, $issue->id, $solverName);
+            $runId = $store->recordRun($issue->id, $solverName);
         }
-        $store->setIssueStatus($cwd, $issue->id, IssueStatus::InProgress);
+        $store->setIssueStatus($issue->id, IssueStatus::InProgress);
         $tracer = new Tracer($runId, new TraceStore($projectDb), new ConsoleTraceSink(STDERR));
         $env->set(EnvKey::Tracer, $tracer);
         if ($resuming) {
@@ -233,7 +226,7 @@ final class WorkflowMode
                 ], $issue, $project)->run();
             } catch (\Throwable $e) {
                 $tracer->exit($gen);
-                $store->setRunStatus($cwd, $runId, 'failed');
+                $store->setRunStatus($runId, 'failed');
                 fwrite(STDERR, 'claw run: generation failed: ' . $e->getMessage() . "\n");
 
                 return 1;
@@ -241,7 +234,7 @@ final class WorkflowMode
             $tracer->exit($gen);
 
             if (!is_file($solverPath)) {
-                $store->setRunStatus($cwd, $runId, 'failed');
+                $store->setRunStatus($runId, 'failed');
                 fwrite(STDERR, "claw run: no solver workflow was produced\n");
 
                 return 1;
@@ -249,7 +242,7 @@ final class WorkflowMode
 
             fwrite(STDOUT, "\n--- {$solverPath} ---\n" . (string) file_get_contents($solverPath) . "\n--- end ---\n\n");
             if (!$this->confirm('Run this workflow now?')) {
-                $store->setRunStatus($cwd, $runId, 'generated');
+                $store->setRunStatus($runId, 'generated');
                 fwrite(STDOUT, "Saved. Not run — review it, then `claw run {$issue->id}` again.\n");
 
                 return 0;
@@ -267,14 +260,14 @@ final class WorkflowMode
             $solver->run();
         } catch (\Throwable $e) {
             $tracer->exit($solverSpan);
-            $store->setRunStatus($cwd, $runId, 'failed');
+            $store->setRunStatus($runId, 'failed');
             fwrite(STDERR, 'claw run: run #' . $runId . ' failed: ' . $e->getMessage() . "\n");
 
             return 1;
         }
         $tracer->exit($solverSpan);
 
-        $store->setRunStatus($cwd, $runId, 'done');
+        $store->setRunStatus($runId, 'done');
         fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
 
         return 0;
@@ -286,26 +279,17 @@ final class WorkflowMode
      *
      * @param list<string> $args
      */
-    private function showHistory(array $args): int
+    private function showHistory(array $args, ?string $projectDir): int
     {
-        $cwd = getcwd();
-        if ($cwd === false) {
-            fwrite(STDERR, "claw log: cannot determine the project folder\n");
-
-            return 1;
-        }
-
-        $store = new ProjectStore($this->appHome() . '/projects');
-
         try {
-            $project = $store->load($cwd);
+            $store = $this->resolve($projectDir);
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw log: ' . $e->getMessage() . "\n");
 
             return 1;
         }
 
-        $reader = new TraceReader(new \PDO('sqlite:' . $store->dbPath($project->id)));
+        $reader = new TraceReader($store->pdo());
 
         $runs = $reader->runs();
         if ($runs === []) {
@@ -347,11 +331,70 @@ final class WorkflowMode
             '  claw run <id>        generate/run the solver workflow for an issue',
             '  claw log [runId]     print a run\'s recorded trace',
             '',
-            '  claw --session       start the interactive chat instead (the old mode)',
+            'Options:',
+            '  --project <dir>      act on the project at <dir> (default: walk up from cwd;',
+            '                       CLAW_PROJECT sets it too)',
+            '  --session            start the interactive chat instead (the old mode)',
             '',
         ]) . "\n");
 
         return 1;
+    }
+
+    /**
+     * Resolve the project to act on, once: an explicit `--project <dir>` / `CLAW_PROJECT`, else
+     * the current directory — then walk up to the nearest registered project and open one handle.
+     *
+     * @throws ClawException when the start dir is unknown or no project is found
+     */
+    private function resolve(?string $projectDir): ProjectStore
+    {
+        $start = $projectDir ?? (getenv('CLAW_PROJECT') ?: getcwd());
+        if ($start === false) {
+            throw new ClawException('cannot determine the project folder');
+        }
+
+        $store = ProjectStore::discover($this->projectsDir(), $start);
+        if ($store === null) {
+            throw new ClawException("not inside a registered project: {$start} (run: claw -c)");
+        }
+
+        return $store;
+    }
+
+    /**
+     * Split `--project <dir>` / `--project=<dir>` (alias `-C <dir>`) out of the args, returning
+     * the remaining args and the override directory (null if absent).
+     *
+     * @param list<string> $args
+     *
+     * @return array{0: list<string>, 1: ?string}
+     */
+    private function extractProjectOption(array $args): array
+    {
+        $rest = [];
+        $dir = null;
+        for ($i = 0, $n = \count($args); $i < $n; ++$i) {
+            $arg = $args[$i];
+            if ($arg === '--project' || $arg === '-C') {
+                $dir = $args[$i + 1] ?? null;   // value is the next token
+                ++$i;                            // consume it
+                continue;
+            }
+            if (str_starts_with($arg, '--project=')) {
+                $dir = substr($arg, \strlen('--project='));
+                continue;
+            }
+            $rest[] = $arg;
+        }
+
+        return [$rest, ($dir === null || $dir === '') ? null : $dir];
+    }
+
+    /** Where the app keeps every project's state db. Anchored to the install, not the cwd. */
+    private function projectsDir(): string
+    {
+        return $this->appHome() . '/projects';
     }
 
     /**
