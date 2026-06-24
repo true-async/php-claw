@@ -27,7 +27,8 @@ final class ConsoleTraceSink implements TraceSinkInterface
             return;
         }
 
-        if (!$record->event()->level()->passes($this->threshold)) {
+        $event = $record->event();
+        if (!$event->level->passes($this->threshold)) {
             return;
         }
 
@@ -37,8 +38,7 @@ final class ConsoleTraceSink implements TraceSinkInterface
             default => '·',
         };
 
-        $event = $record->event();
-        $head = trim($event->type() . ' ' . $event->summary());
+        $head = trim($event->type . ' ' . TraceFormat::summary($event->type, $event->data));
 
         fwrite($this->stream, str_repeat('  ', $record->depth()) . $glyph . ' ' . $head . "\n");
     }

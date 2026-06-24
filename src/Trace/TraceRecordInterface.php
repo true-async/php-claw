@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Claw\Trace;
 
 /**
- * The envelope every sink consumes: a typed {@see TraceEventInterface} placed in the run's tree.
- * An interface (not just the concrete {@see TraceRecord}) so other record shapes can appear later —
- * a replayed record read back from the store, a remote record — without touching the sinks.
+ * The envelope every sink consumes: a {@see TraceEvent} placed in the run's tree. An interface (not
+ * just the concrete {@see TraceRecord}) so other record shapes can appear later — a replayed record
+ * read back from the store, a remote record — without touching the sinks.
  */
 interface TraceRecordInterface
 {
@@ -27,7 +27,7 @@ interface TraceRecordInterface
     public function phase(): string;
 
     /** The typed payload. */
-    public function event(): TraceEventInterface;
+    public function event(): TraceEvent;
 
     /** Unix timestamp (seconds) when the record was produced. */
     public function at(): int;

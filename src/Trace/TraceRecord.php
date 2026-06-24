@@ -13,7 +13,7 @@ final readonly class TraceRecord implements TraceRecordInterface
         private ?int $parentId,
         private int $depth,
         private string $phase,
-        private TraceEventInterface $event,
+        private TraceEvent $event,
         private int $at,
     ) {
     }
@@ -43,7 +43,7 @@ final readonly class TraceRecord implements TraceRecordInterface
         return $this->phase;
     }
 
-    public function event(): TraceEventInterface
+    public function event(): TraceEvent
     {
         return $this->event;
     }

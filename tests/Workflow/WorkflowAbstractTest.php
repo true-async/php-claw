@@ -16,8 +16,6 @@ use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
 use Claw\Trace\ArrayTraceSink;
-use Claw\Trace\Event\Noted;
-use Claw\Trace\Event\StepStarted;
 use Claw\Trace\Tracer;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
@@ -183,14 +181,13 @@ final class WorkflowAbstractTest
 
         $notes = [];
         foreach ($sink->records as $record) {
-            $event = $record->event();
-            if ($event instanceof Noted) {
-                $notes[] = $event;
+            if ($record->event()->type === 'note') {
+                $notes[] = $record->event()->data;
             }
         }
         Assert::count($notes, 1);
-        Assert::same($notes[0]->action, 'did-thing');
-        Assert::same($notes[0]->message, 'the details');
+        Assert::same($notes[0]['action'], 'did-thing');
+        Assert::same($notes[0]['message'], 'the details');
     }
 
     #[Test]
@@ -238,8 +235,8 @@ final class WorkflowAbstractTest
         $names = [];
         foreach ($sink->records as $record) {
             $event = $record->event();
-            if ($event instanceof StepStarted) {
-                $names[] = $event->name;
+            if ($event->type === 'step') {
+                $names[] = (string) ($event->data['name'] ?? '');
             }
         }
 

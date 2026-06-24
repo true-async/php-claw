@@ -30,19 +30,19 @@ final class TracerTest
 
         // workflow span at the root
         Assert::same($r[0]->phase(), 'enter');
-        Assert::same($r[0]->event()->type(), 'workflow');
+        Assert::same($r[0]->event()->type, 'workflow');
         Assert::null($r[0]->parentId());
         Assert::same($r[0]->depth(), 0);
         Assert::same($r[0]->runId(), 'r1');
 
         // step span nested under the workflow
-        Assert::same($r[1]->event()->type(), 'step');
+        Assert::same($r[1]->event()->type, 'step');
         Assert::same($r[1]->parentId(), $r[0]->id());
         Assert::same($r[1]->depth(), 1);
 
         // prompt event nested under the step
         Assert::same($r[2]->phase(), 'event');
-        Assert::same($r[2]->event()->type(), 'prompt');
+        Assert::same($r[2]->event()->type, 'prompt');
         Assert::same($r[2]->parentId(), $r[1]->id());
         Assert::same($r[2]->depth(), 2);
 
@@ -65,10 +65,10 @@ final class TracerTest
         $tracer->exit($wf);                     // close inherits the workflow's Notice
 
         $r = $sink->records;
-        Assert::same($r[0]->event()->level(), Level::Notice);   // workflow enter
-        Assert::same($r[1]->event()->level(), Level::Debug);    // ai enter
-        Assert::same($r[2]->event()->level(), Level::Debug);    // ai exit inherited
-        Assert::same($r[3]->event()->level(), Level::Notice);   // workflow exit inherited
+        Assert::same($r[0]->event()->level, Level::Notice);   // workflow enter
+        Assert::same($r[1]->event()->level, Level::Debug);    // ai enter
+        Assert::same($r[2]->event()->level, Level::Debug);    // ai exit inherited
+        Assert::same($r[3]->event()->level, Level::Notice);   // workflow exit inherited
     }
 
     #[Test]

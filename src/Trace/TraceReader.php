@@ -75,35 +75,11 @@ final class TraceReader
                 default => '·',
             };
 
-            $lines[] = str_repeat('  ', $depth) . $glyph . ' ' . trim($type . ' ' . $this->brief($type, $data));
+            // Same one-line renderer as the live console, so history and live can never diverge.
+            $lines[] = str_repeat('  ', $depth) . $glyph . ' ' . trim($type . ' ' . TraceFormat::summary($type, $data));
         }
 
         return implode("\n", $lines);
-    }
-
-    /** @param array<string, mixed> $data */
-    private function brief(string $type, array $data): string
-    {
-        return match ($type) {
-            'workflow', 'step', 'tool', 'tool-result' => $this->str($data, 'name'),
-            'ai' => trim($this->str($data, 'role') . ' (' . $this->str($data, 'model') . ')'),
-            'turn' => '#' . $this->str($data, 'number'),
-            'prompt' => $this->clip($this->str($data, 'text')),
-            'reply' => $this->tokens($data) . $this->clip($this->str($data, 'text')),
-            'note' => trim($this->str($data, 'action') . ' ' . $this->str($data, 'message')),
-            default => '',
-        };
-    }
-
-    /** @param array<string, mixed> $data */
-    private function tokens(array $data): string
-    {
-        $usage = $data['usage'] ?? null;
-        if (!\is_array($usage)) {
-            return '';
-        }
-
-        return '[' . $this->str($usage, 'in') . '/' . $this->str($usage, 'out') . ' tok] ';
     }
 
     /** @param array<array-key, mixed> $row */
@@ -112,12 +88,5 @@ final class TraceReader
         $value = $row[$key] ?? '';
 
         return \is_scalar($value) ? (string) $value : '';
-    }
-
-    private function clip(string $text, int $width = 80): string
-    {
-        $text = trim(preg_replace('/\s+/', ' ', $text) ?? $text);
-
-        return mb_strlen($text) > $width ? mb_substr($text, 0, $width) . '…' : $text;
     }
 }

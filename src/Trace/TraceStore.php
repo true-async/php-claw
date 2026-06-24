@@ -69,9 +69,9 @@ final class TraceStore implements TraceSinkInterface
             'parent' => $record->parentId(),
             'depth' => $record->depth(),
             'phase' => $record->phase(),
-            'type' => $record->event()->type(),
-            'level' => $record->event()->level()->value,
-            'data' => json_encode($record->event()->toArray(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+            'type' => $record->event()->type,
+            'level' => $record->event()->level->value,
+            'data' => json_encode($record->event()->data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
             'at' => $record->at(),
         ]);
     }
