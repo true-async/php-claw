@@ -26,10 +26,21 @@ use Claw\Trace\Tracer;
  */
 final class DefaultTurnLoop implements TurnLoopInterface
 {
+    /** The marker a worker ends a turn with to ask the ask channel instead of finishing. */
+    private const string QUESTION_MARKER = '[question]';
+
+    /** Appended to the system prompt when an ask channel is present, teaching that marker. */
+    private const string ASK_INSTRUCTION = "\n\nIf you need input or a decision from a person to "
+        . 'proceed, do not guess: end your turn with no tool call and a line beginning "[question]" '
+        . 'followed by your question. You will receive the answer and continue.';
+
     /**
-     * @param list<ToolSpec> $specs the tools advertised to the model each round-trip
-     * @param int            $maxHistory soft cap on history length (0 = no cap); the
-     *                                   hard bound is the model's own context window
+     * @param list<ToolSpec>     $specs      the tools advertised to the model each round-trip
+     * @param int                $maxHistory soft cap on history length (0 = no cap); the
+     *                                       hard bound is the model's own context window
+     * @param ?SpeakerInterface  $ask        who the model reaches when it ends a turn with the
+     *                                        [question] marker (a person or an agent); null = the
+     *                                        loop stays headless and such a turn is just the answer
      */
     public function __construct(
         private readonly AgentInterface $agent,
@@ -39,6 +50,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         private readonly array $specs = [],
         private readonly int $maxHistory = 0,
         private readonly ?Tracer $tracer = null,
+        private readonly ?SpeakerInterface $ask = null,
     ) {
     }
 
@@ -47,6 +59,10 @@ final class DefaultTurnLoop implements TurnLoopInterface
         $totalInput  = 0;
         $totalOutput = 0;
         $turnNo      = 0;
+
+        // With an ask channel present, teach the worker the [question] marker so it can pause for
+        // input instead of finishing; without one the system prompt is untouched (headless).
+        $system = $this->ask === null ? $this->system : $this->system . self::ASK_INSTRUCTION;
 
         // Loops until the model returns a final answer (no tool_use). The bound is
         // memory: the model's context window (the API rejects an oversized history ->
@@ -64,7 +80,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $response = $this->agent->send(new AgentRequest(
                 model: $this->model,
                 messages: $history,
-                system: $this->system,
+                system: $system,
                 tools: $this->specs,
             ));
 
@@ -89,6 +105,18 @@ final class DefaultTurnLoop implements TurnLoopInterface
             if ($response->toolCalls === []) {
                 $this->tracer?->exit($turn);
 
+                // No tool_use: the model is either done, or — with an ask channel — pausing to ask.
+                // A turn carrying the [question] marker is the latter: route it to the channel, inject
+                // the answer as the next user turn, and continue the same loop (context stays whole).
+                if ($this->ask !== null) {
+                    $question = $this->extractQuestion($response->text ?? '');
+                    if ($question !== null) {
+                        $history[] = Message::userText($this->ask->reply($question));
+
+                        continue;
+                    }
+                }
+
                 return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput));
             }
 
@@ -103,5 +131,21 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
         }
+    }
+
+    /**
+     * The model's question for the ask channel when its turn carries the {@see QUESTION_MARKER},
+     * else null (a normal final answer). The marker is stripped; an empty remainder falls back to
+     * the whole text, so a bare marker still asks something.
+     */
+    private function extractQuestion(string $text): ?string
+    {
+        if (!str_contains($text, self::QUESTION_MARKER)) {
+            return null;
+        }
+
+        $question = trim(str_replace(self::QUESTION_MARKER, '', $text));
+
+        return $question === '' ? trim($text) : $question;
     }
 }

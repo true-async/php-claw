@@ -161,6 +161,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
         $tracer?->prompt($prompt, $tools);
 
+        // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
+        // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
+        $ask = $scope->find(EnvKey::Ask);
+
         $loop = new DefaultTurnLoop(
             $scope->findWorker(),
             $scope->executor(),
@@ -169,6 +173,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $scope->findRegistry()->specs(),
             $scope->findMaxHistory(),
             $tracer,
+            $ask instanceof SpeakerInterface ? $ask : null,
         );
 
         try {

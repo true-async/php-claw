@@ -8,6 +8,8 @@ use Claw\Agent\AgentResponse;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\Role;
+use Claw\Agent\SpeakerInterface;
+use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
 use Claw\Agent\ToolResultBlock;
@@ -208,6 +210,57 @@ final class DefaultTurnLoopTest
 
         Assert::same($result->text, 'ok');
         Assert::count($result->history, 2);
+    }
+
+    #[Test]
+    public function asksTheChannelOnAQuestionMarkerThenContinues(): void
+    {
+        $agent = new ScriptedAgent(
+            new AgentResponse([new TextBlock('[question] which file?')], [], StopReason::EndTurn, new Usage(), '[question] which file?'),
+            new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done'),
+        );
+        $ask = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Human;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'src/Foo.php';
+            }
+        };
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', ask: $ask);
+
+        $result = $loop->run([Message::userText('go')]);
+
+        Assert::same($result->text, 'done');                  // continued past the question to the final answer
+        Assert::same($ask->heard, 'which file?');             // the marker is stripped before asking
+        Assert::count($agent->requests, 2);                   // paused for input, then resumed
+        Assert::true(str_contains($agent->requests[0]->system, '[question]'));   // the loop taught the marker
+
+        // history: user(go), assistant([question]…), user(the answer), assistant(done)
+        Assert::count($result->history, 4);
+        Assert::same($result->history[2]->role, Role::User);
+    }
+
+    #[Test]
+    public function withoutAnAskChannelAQuestionMarkerIsJustTheFinalAnswer(): void
+    {
+        $agent = new ScriptedAgent(
+            new AgentResponse([new TextBlock('[question] hm?')], [], StopReason::EndTurn, new Usage(), '[question] hm?'),
+        );
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's');   // headless: no ask channel
+
+        $result = $loop->run([Message::userText('go')]);
+
+        Assert::same($result->text, '[question] hm?');        // a marker is inert without a channel
+        Assert::count($agent->requests, 1);                   // did not loop
+        Assert::same($agent->requests[0]->system, 's');       // system prompt left untouched
     }
 
     #[Test]
