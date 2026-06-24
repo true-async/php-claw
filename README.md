@@ -40,9 +40,14 @@ security layer), and the **Session** that glues them with the loop.
 
 ```bash
 composer install
-cp .env.example .env      # then set an API key (e.g. DeepSeek or Anthropic) and CLAW_ALLOWED_CHATS
-php bin/claw              # type a message, Ctrl+D to exit
+cp .env.example .env       # then set an API key (e.g. DeepSeek or Anthropic) and CLAW_ALLOWED_CHATS
+php bin/claw --session     # interactive chat — type a message, Ctrl+D to exit
 ```
+
+`claw` runs the **workflow** mode by default (`claw -c` to register a project, `claw -i` to
+open an issue, `claw run <id>` to solve it, `claw log` to inspect a run); run `claw` with no
+command for the full list. The interactive chat is the older **session** mode, reached with
+`--session`.
 
 `.env` configures the backend (`CLAW_AGENT` = `claude` | `openai-compatible` | `gemini`), the
 model, the API key, and the sandbox working directory. Secrets stay in memory and are never

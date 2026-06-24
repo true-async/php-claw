@@ -251,8 +251,11 @@ Plus a host-level `CLAUDE.md` persona / system prompt.
 
 ```
 php-claw/
-  bin/claw                  entrypoint: bootstrap reactor; accept() -> spawn Session
+  bin/claw                  entrypoint: autoload, then Cli->run(argv)
   src/
+    Cli/   Cli.php          arg dispatch: pick a mode + agent factory
+           WorkflowMode.php  default mode: create/issue/run/log (per-issue solver runs)
+           SessionMode.php   --session: bootstrap reactor; accept() -> spawn Session
     Config.php
     Session.php             conversation state + agentic loop (run/handle/execute)
     Chat/  ChatInterface.php (accept) ConversationInterface.php
