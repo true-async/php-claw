@@ -22,4 +22,7 @@ enum EnvKey: string
     case Agents = 'agents';                  // array<string,string> — named agent roles -> model id; ai(agent:) routes by name
     case Tracer = 'tracer';                  // Tracer — hierarchical run trace (step/prompt/turn/tool); unset = no tracing
     case Ask = 'ask';                        // SpeakerInterface — who an ask() question goes to (human/agent); unset = no channel
+    case Budget = 'budget';                  // Budget — the run's total token+time limit (parent of per-turn budgets); unset = unlimited
+    case TurnTokenLimit = 'turnTokenLimit';  // int — per-turn (one ai() exchange) token cap (0 = unlimited)
+    case TurnTimeLimit = 'turnTimeLimit';    // float — per-turn seconds cap (0 = unlimited)
 }

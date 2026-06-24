@@ -6,6 +6,7 @@ namespace Tests\Workflow;
 
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentResponse;
+use Claw\Agent\Budget;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
@@ -233,6 +234,40 @@ final class WorkflowAbstractTest
         $threw = false;
         try {
             $wf->callAsk('anyone?');
+        } catch (WorkflowException) {
+            $threw = true;
+        }
+
+        Assert::true($threw);
+    }
+
+    #[Test]
+    public function aiThrowsWhenTheRunBudgetIsSpent(): void
+    {
+        $budget = new Budget(tokenLimit: 10);
+        $budget->spend(10);   // already exhausted
+        $wf = new ProbeWorkflow($this->config()->set(EnvKey::Budget, $budget), 'r1');
+
+        $threw = false;
+        try {
+            $wf->callAi('hi');
+        } catch (WorkflowException) {
+            $threw = true;
+        }
+
+        Assert::true($threw);
+    }
+
+    #[Test]
+    public function stepThrowsWhenTheRunBudgetIsSpent(): void
+    {
+        $budget = new Budget(tokenLimit: 5);
+        $budget->spend(5);   // already exhausted
+        $wf = new ProbeWorkflow($this->config()->set(EnvKey::Budget, $budget), 'r1');
+
+        $threw = false;
+        try {
+            $wf->callStep('alpha');
         } catch (WorkflowException) {
             $threw = true;
         }

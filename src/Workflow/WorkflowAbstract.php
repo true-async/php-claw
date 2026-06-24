@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Agent\Budget;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
@@ -92,6 +93,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
+        $this->enforceBudget();   // don't begin a new step once the run's budget is spent
+
         $tracer = $this->tracer();
         $span = $tracer?->enterStep($name);
 
@@ -148,6 +151,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     protected function ai(string $prompt, array $tools = [], ?string $agent = null): string
     {
+        $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
+
         // The palette is a child scope holding a registry narrowed to exactly these tools, so what
         // the model is shown (specs) and what the executor can resolve (get) are one set.
         $scope = $this->env->child()->set(EnvKey::Registry, $this->env->findRegistry()->only($tools));
@@ -174,10 +179,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $scope->findMaxHistory(),
             $tracer,
             $ask instanceof SpeakerInterface ? $ask : null,
+            $this->turnBudget(),   // caps this one exchange; its spend bubbles up to the run total
         );
 
         try {
-            return $loop->run([Message::userText($prompt)])->text ?? '';
+            $text = $loop->run([Message::userText($prompt)])->text ?? '';
+            $this->enforceBudget();   // the loop charged the total — stop the run if that tipped it over
+
+            return $text;
         } finally {
             $tracer?->exit($span);
         }
@@ -200,6 +209,48 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         return null;
+    }
+
+    /** The run's total budget (token+time), if one is configured — else null (unlimited). */
+    private function budget(): ?Budget
+    {
+        $budget = $this->env->find(EnvKey::Budget);
+
+        return $budget instanceof Budget ? $budget : null;
+    }
+
+    /**
+     * A fresh per-turn budget for one {@see ai()} exchange — a child of the run total carrying the
+     * turn caps, so its spend bubbles up. Null when neither a run total nor a turn cap is set.
+     */
+    private function turnBudget(): ?Budget
+    {
+        $tokens = (int) $this->numEnv(EnvKey::TurnTokenLimit);
+        $seconds = $this->numEnv(EnvKey::TurnTimeLimit);
+
+        $workflow = $this->budget();
+        if ($workflow !== null) {
+            return $workflow->child($tokens, $seconds);
+        }
+
+        return ($tokens > 0 || $seconds > 0.0) ? new Budget($tokens, $seconds) : null;
+    }
+
+    /** Stop the run if its total budget is spent — a hard, resumable stop (the snapshot survives). */
+    private function enforceBudget(): void
+    {
+        $budget = $this->budget();
+        if ($budget !== null && $budget->isExhausted()) {
+            throw new WorkflowException('run stopped: ' . $budget->reason());
+        }
+    }
+
+    /** Read a numeric environment value (a budget cap), or 0.0 when unset/non-numeric. */
+    private function numEnv(EnvKey $key): float
+    {
+        $value = $this->env->find($key);
+
+        return \is_numeric($value) ? (float) $value : 0.0;
     }
 
     /**

@@ -36,6 +36,8 @@ final class Config
 
     private const DEFAULT_TURN_TIMEOUT_MS = 300_000;
 
+    private const DEFAULT_LIMIT = 0;   // 0 = no limit, for every budget cap below
+
     /**
      * @param list<int>             $allowedChats telegram-only authorization allowlist (empty in console mode)
      * @param array<string, string> $agents       named agent roles -> model id (CLAW_AGENT_<ROLE>); all share
@@ -53,6 +55,10 @@ final class Config
         public readonly int $maxHistory,
         public readonly int $turnTimeoutMs,
         public readonly array $agents = [],
+        public readonly int $budgetTokens = 0,
+        public readonly int $budgetSeconds = 0,
+        public readonly int $turnTokens = 0,
+        public readonly int $turnSeconds = 0,
     ) {
     }
 
@@ -131,6 +137,10 @@ final class Config
             maxHistory: (int) ($get('CLAW_MAX_HISTORY') ?? self::DEFAULT_MAX_HISTORY),
             turnTimeoutMs: (int) ($get('CLAW_TURN_TIMEOUT_MS') ?? self::DEFAULT_TURN_TIMEOUT_MS),
             agents: self::parseAgents($file),
+            budgetTokens: (int) ($get('CLAW_BUDGET_TOKENS') ?? self::DEFAULT_LIMIT),
+            budgetSeconds: (int) ($get('CLAW_BUDGET_SECONDS') ?? self::DEFAULT_LIMIT),
+            turnTokens: (int) ($get('CLAW_TURN_TOKENS') ?? self::DEFAULT_LIMIT),
+            turnSeconds: (int) ($get('CLAW_TURN_SECONDS') ?? self::DEFAULT_LIMIT),
         );
     }
 

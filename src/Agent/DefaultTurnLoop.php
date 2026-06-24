@@ -41,6 +41,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
      * @param ?SpeakerInterface  $ask        who the model reaches when it ends a turn with the
      *                                        [question] marker (a person or an agent); null = the
      *                                        loop stays headless and such a turn is just the answer
+     * @param ?Budget            $turnBudget caps this one exchange in tokens/time; when it (or the
+     *                                        run total it bubbles to) is spent, the loop stops and
+     *                                        returns what it has. null = no cap.
      */
     public function __construct(
         private readonly AgentInterface $agent,
@@ -51,6 +54,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         private readonly int $maxHistory = 0,
         private readonly ?Tracer $tracer = null,
         private readonly ?SpeakerInterface $ask = null,
+        private readonly ?Budget $turnBudget = null,
     ) {
     }
 
@@ -95,6 +99,17 @@ final class DefaultTurnLoop implements TurnLoopInterface
             );
 
             $history[] = new Message(Role::Assistant, $response->content);
+
+            // Charge this round-trip to the turn budget; if it — or the run total it bubbles up to —
+            // is spent, stop the exchange here and return what we have, not another round-trip.
+            if ($this->turnBudget !== null) {
+                $this->turnBudget->spend($response->usage->inputTokens + $response->usage->outputTokens);
+                if ($this->turnBudget->isExhausted()) {
+                    $this->tracer?->exit($turn);
+
+                    return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput));
+                }
+            }
 
             // Terminate on the dispatchable subset, not the advertised intent. A
             // response can carry a tool_use stop reason yet no parseable tool calls

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Agent;
 
 use Claw\Agent\AgentResponse;
+use Claw\Agent\Budget;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\Role;
@@ -286,6 +287,27 @@ final class DefaultTurnLoopTest
         Assert::same($result->text, '[question] hm?');        // a marker is inert without a channel
         Assert::count($agent->requests, 1);                   // did not loop
         Assert::same($agent->requests[0]->system, 's');       // system prompt left untouched
+    }
+
+    #[Test]
+    public function stopsTheExchangeWhenTheTurnBudgetIsSpent(): void
+    {
+        // The model would keep calling a tool forever; the turn budget stops the exchange after the
+        // first round-trip (10+5 tokens) hits the cap, before any further model call or dispatch.
+        $looping = static fn (): AgentResponse => new AgentResponse(
+            [new ToolUseBlock('t', 'echo', [])],
+            [new ToolUseBlock('t', 'echo', [])],
+            StopReason::ToolUse,
+            new Usage(10, 5),
+        );
+        $agent = new ScriptedAgent($looping(), $looping(), $looping());
+        $executor = new RecordingExecutor();
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', turnBudget: new Budget(tokenLimit: 15));
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::count($agent->requests, 1);   // stopped after one round-trip
+        Assert::count($executor->calls, 0);   // did not even dispatch the tool
     }
 
     #[Test]
