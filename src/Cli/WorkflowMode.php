@@ -23,6 +23,7 @@ use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceStore;
+use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\GenerateIssueWorkflow;
@@ -200,7 +201,8 @@ final class WorkflowMode
             ->set(EnvKey::Ask, new ConsoleSpeaker(STDIN, STDOUT))    // ask() reaches the human at the console (Request>)
             ->set(EnvKey::Budget, new Budget($config->budgetTokens, (float) $config->budgetSeconds))   // run total (0 = unlimited)
             ->set(EnvKey::TurnTokenLimit, $config->turnTokens)       // per-exchange caps (0 = unlimited)
-            ->set(EnvKey::TurnTimeLimit, (float) $config->turnSeconds);
+            ->set(EnvKey::TurnTimeLimit, (float) $config->turnSeconds)
+            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($config->budgetPolicy));   // stop | ask on the run total
 
         $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
         $solverClass = $workflowStore->classFor($solverName, true);

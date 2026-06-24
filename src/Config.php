@@ -38,6 +38,10 @@ final class Config
 
     private const DEFAULT_LIMIT = 0;   // 0 = no limit, for every budget cap below
 
+    private const DEFAULT_BUDGET_POLICY = 'stop';
+
+    private const BUDGET_POLICIES = ['stop', 'ask'];
+
     /**
      * @param list<int>             $allowedChats telegram-only authorization allowlist (empty in console mode)
      * @param array<string, string> $agents       named agent roles -> model id (CLAW_AGENT_<ROLE>); all share
@@ -59,6 +63,7 @@ final class Config
         public readonly int $budgetSeconds = 0,
         public readonly int $turnTokens = 0,
         public readonly int $turnSeconds = 0,
+        public readonly string $budgetPolicy = self::DEFAULT_BUDGET_POLICY,
     ) {
     }
 
@@ -102,6 +107,13 @@ final class Config
             );
         }
 
+        $budgetPolicy = strtolower($get('CLAW_BUDGET_POLICY') ?? self::DEFAULT_BUDGET_POLICY);
+        if (!\in_array($budgetPolicy, self::BUDGET_POLICIES, true)) {
+            throw new ConfigException(
+                "Unknown CLAW_BUDGET_POLICY '{$budgetPolicy}', expected one of: " . implode(', ', self::BUDGET_POLICIES)
+            );
+        }
+
         $keyVar = self::API_KEY_VARS[$agent];
         $apiKey = $get($keyVar) ?? $get('CLAW_API_KEY');
         if ($apiKey === null || $apiKey === '') {
@@ -141,6 +153,7 @@ final class Config
             budgetSeconds: (int) ($get('CLAW_BUDGET_SECONDS') ?? self::DEFAULT_LIMIT),
             turnTokens: (int) ($get('CLAW_TURN_TOKENS') ?? self::DEFAULT_LIMIT),
             turnSeconds: (int) ($get('CLAW_TURN_SECONDS') ?? self::DEFAULT_LIMIT),
+            budgetPolicy: $budgetPolicy,
         );
     }
 

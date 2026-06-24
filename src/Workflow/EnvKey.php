@@ -25,4 +25,5 @@ enum EnvKey: string
     case Budget = 'budget';                  // Budget — the run's total token+time limit (parent of per-turn budgets); unset = unlimited
     case TurnTokenLimit = 'turnTokenLimit';  // int — per-turn (one ai() exchange) token cap (0 = unlimited)
     case TurnTimeLimit = 'turnTimeLimit';    // float — per-turn seconds cap (0 = unlimited)
+    case BudgetPolicy = 'budgetPolicy';      // BudgetPolicy — what to do when the run total is spent; unset = Stop
 }

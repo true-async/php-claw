@@ -64,6 +64,18 @@ final class BudgetTest
     }
 
     #[Test]
+    public function raiseLiftsTheLimitSoItIsNoLongerExhausted(): void
+    {
+        $budget = new Budget(tokenLimit: 10);
+        $budget->spend(10);
+        Assert::true($budget->isExhausted());
+
+        $budget->raise(50);
+
+        Assert::false($budget->isExhausted());   // 10 spent of the new 60-token limit
+    }
+
+    #[Test]
     public function zeroLimitsNeverExhaust(): void
     {
         $budget = new Budget();   // 0 tokens, 0 seconds = unlimited

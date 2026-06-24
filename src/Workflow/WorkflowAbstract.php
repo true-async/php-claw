@@ -236,13 +236,53 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return ($tokens > 0 || $seconds > 0.0) ? new Budget($tokens, $seconds) : null;
     }
 
-    /** Stop the run if its total budget is spent — a hard, resumable stop (the snapshot survives). */
+    /**
+     * Act on the run's total budget when it is spent, per the {@see BudgetPolicy}:
+     *  - Stop (default): throw — a hard but resumable stop (the snapshot survives).
+     *  - Ask: ask the run's ask channel whether to continue; a typed token top-up raises the budget
+     *    and resumes, anything else (or no channel) falls back to the hard stop.
+     *
+     * @throws WorkflowException
+     */
     private function enforceBudget(): void
     {
         $budget = $this->budget();
-        if ($budget !== null && $budget->isExhausted()) {
-            throw new WorkflowException('run stopped: ' . $budget->reason());
+        if ($budget === null || !$budget->isExhausted()) {
+            return;
         }
+
+        if ($this->budgetPolicy() === BudgetPolicy::Ask) {
+            $channel = $this->env->find(EnvKey::Ask);
+            if ($channel instanceof SpeakerInterface) {
+                $extra = $this->parseExtraTokens($channel->reply(
+                    "Budget spent: {$budget->reason()}. Enter extra tokens to continue, or nothing to stop.",
+                ));
+                if ($extra > 0) {
+                    $budget->raise($extra);
+                    $this->tracer()?->log('budget', "raised by {$extra} tokens", [], Level::Notice);
+
+                    return;
+                }
+            }
+        }
+
+        throw new WorkflowException('run stopped: ' . $budget->reason());
+    }
+
+    /** The configured reaction to a spent run total — {@see BudgetPolicy::Stop} when unset. */
+    private function budgetPolicy(): BudgetPolicy
+    {
+        $policy = $this->env->find(EnvKey::BudgetPolicy);
+
+        return $policy instanceof BudgetPolicy ? $policy : BudgetPolicy::Stop;
+    }
+
+    /** A positive token top-up parsed from an ask answer (e.g. "+100000"), or 0 to stop. */
+    private function parseExtraTokens(?string $answer): int
+    {
+        $digits = ltrim(trim((string) $answer), '+');
+
+        return $digits !== '' && ctype_digit($digits) ? (int) $digits : 0;
     }
 
     /** Read a numeric environment value (a budget cap), or 0.0 when unset/non-numeric. */

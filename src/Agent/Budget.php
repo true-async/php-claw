@@ -21,7 +21,7 @@ final class Budget
     /** @var \Closure(): float */
     private readonly \Closure $clock;
 
-    private readonly float $startedAt;
+    private float $startedAt;
 
     private int $tokens = 0;
 
@@ -32,7 +32,7 @@ final class Budget
      * @param ?\Closure(): float $clock   time source; defaults to microtime (injected in tests)
      */
     public function __construct(
-        private readonly int $tokenLimit = 0,
+        private int $tokenLimit = 0,
         private readonly float $secondsLimit = 0.0,
         private readonly ?Budget $parent = null,
         ?\Closure $clock = null,
@@ -52,6 +52,16 @@ final class Budget
     {
         $this->tokens += $tokens;
         $this->parent?->spend($tokens);
+    }
+
+    /**
+     * Grant more token allowance and restart the time window — used when a paused run is told to
+     * continue. The fresh clock means a top-up resumes a budget that was spent on EITHER resource.
+     */
+    public function raise(int $tokens): void
+    {
+        $this->tokenLimit += $tokens;
+        $this->startedAt = ($this->clock)();
     }
 
     /** True once this scope's tokens or time are used up, or any ancestor's are. */
