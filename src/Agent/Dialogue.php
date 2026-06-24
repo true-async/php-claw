@@ -43,7 +43,7 @@ final class Dialogue
         // Take the incoming message, reply, hand the reply to the other side — $turns times.
         $pump = static function (SpeakerInterface $speaker, Channel $in, Channel $out, int $turns) use (&$transcript): void {
             for ($i = 0; $i < $turns; $i++) {
-                $reply = $speaker->reply((string) $in->recv());
+                $reply = $speaker->reply((string) $in->recv()) ?? '';   // a pass-up reads as an empty turn here
                 $transcript[] = ['from' => $speaker->name()->value, 'text' => $reply];
                 $out->send($reply);
             }

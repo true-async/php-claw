@@ -249,6 +249,31 @@ final class DefaultTurnLoopTest
     }
 
     #[Test]
+    public function aQuestionWhoseChannelPassesUpBecomesTheFinalAnswer(): void
+    {
+        $agent = new ScriptedAgent(
+            new AgentResponse([new TextBlock('[question] anyone?')], [], StopReason::EndTurn, new Usage(), '[question] anyone?'),
+        );
+        $ask = new class () implements SpeakerInterface {
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): ?string
+            {
+                return null;   // the whole chain passed up — no one answered
+            }
+        };
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', ask: $ask);
+
+        $result = $loop->run([Message::userText('go')]);
+
+        Assert::same($result->text, '[question] anyone?');   // unanswered question falls through to final
+        Assert::count($agent->requests, 1);                  // did not loop
+    }
+
+    #[Test]
     public function withoutAnAskChannelAQuestionMarkerIsJustTheFinalAnswer(): void
     {
         $agent = new ScriptedAgent(

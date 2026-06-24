@@ -111,9 +111,12 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 if ($this->ask !== null) {
                     $question = $this->extractQuestion($response->text ?? '');
                     if ($question !== null) {
-                        $history[] = Message::userText($this->ask->reply($question));
+                        $answer = $this->ask->reply($question);
+                        if ($answer !== null) {                       // null = the chain passed up, no one answered
+                            $history[] = Message::userText($answer);
 
-                        continue;
+                            continue;
+                        }
                     }
                 }
 

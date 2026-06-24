@@ -240,7 +240,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         $this->tracer()?->log('ask', $question, [], Level::Notice);
-        $answer = $channel->reply($question);
+        $answer = $channel->reply($question) ?? '';   // a fully-escalated chain with no answer reads as empty
         $this->tracer()?->log('answer', $answer, ['from' => $channel->name()->value], Level::Notice);
 
         return $answer;
