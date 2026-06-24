@@ -92,9 +92,12 @@ Workflow **параметризирован**: принимает входные
 Это и есть «единственная дверь» — генерируемый подкласс трогает мир только через эти
 методы:
 
-- **`ai(string $prompt, array $tools = []): string`** — один обмен с моделью; турн-луп
-  внутри (ReAct: round-trip'ы с инструментами) — внутренняя деталь. `$tools` — палитра
-  наименьших привилегий: модель **видит и может запустить** только их.
+- **`ai(string $prompt, array $tools = [], ?string $agent = null): string`** — один обмен
+  с моделью; турн-луп внутри (ReAct: round-trip'ы с инструментами) — внутренняя деталь.
+  `$tools` — палитра наименьших привилегий: модель **видит и может запустить** только их.
+  `$agent` — имя роли (`worker`/`reviewer`/`supervisor`/`planner`): на этот вызов берётся
+  модель роли (тот же доступ, меняется только model-id); неизвестная роль — мягкий откат на
+  модель scope.
 - **`tool(string $name, array $params): string`** — один вызов инструмента через
   executor прогона; бросает при ошибке инструмента.
 - **`param(string $name): mixed`** — вход прогона.
@@ -117,8 +120,15 @@ Workflow **параметризирован**: принимает входные
 - `step(name)` **пропускает** шаг, уже попавший в `done`. Поэтому пропущенный шаг
   ничего не теряет — его эффект уже в восстановленном состоянии.
 
-**Реализовано:** `InMemoryStateStore` (в памяти; не переживает рестарт процесса).
-**План:** durable-стор на SQLite + реестр прогонов и recovery при старте.
+**Реализовано:** `SqliteStateStore` — боевой стор: снапшот `{state, done}` в БД проекта
+(`INSERT OR REPLACE` по `runId`) + монотонный `state_seq` для leaf-id; переживает рестарт.
+`InMemoryStateStore` остаётся для тестов. Реестр прогонов — `ProjectStore` (ledger `runs`);
+`resumableRun()` находит прерванный прогон (статус всё ещё `running`), и `claw run`
+переиспользует его id — солвер восстанавливает сохранённое состояние и до-исполняет только
+незавершённый хвост.
+
+**Граница durability:** снапшот снимается на ГРАНИЦЕ ШАГА. Длинный шаг (внутренний
+ReAct-луп `ai()`) внутри не чекпоинтится — краш посреди шага повторит шаг целиком.
 
 Контракт стора: `save(runId, state, done)` / `load(runId) -> {state, done}` /
 `nextId()` (монотонный id для leaf-вызовов — стор владеет идентичностью, воркфлоу id не
@@ -130,8 +140,8 @@ Workflow **параметризирован**: принимает входные
 затем поднимается к родителю — так цепочка **project → issue → workflow →
 под-workflow** наследует значения, а ребёнок переопределяет только нужное. `EnvKey` —
 каталог известных ключей: `Worker`, `Registry`, `ModelId`, `SystemPrompt`, `MaxHistory`,
-`Store`, `Journal`. Типобезопасные finders над «mixed»-мешком; `executor()` собирается
-из реестра текущего scope.
+`Store`, `Tracer`, `Agents` (карта роль→модель). Типобезопасные finders над «mixed»-мешком;
+`executor()` собирается из реестра текущего scope.
 
 ## Инструменты и палитра (наименьшие привилегии)
 
@@ -153,12 +163,32 @@ run-path (ниже).
 разбирает вердикт обычным PHP (см. `propose()` в примере). Так же и супервизор
 (разблокировать застрявший шаг). Ничего из этого не встроено в базу.
 
-## Журнал
+**Роли агентов.** Шаг может направить вызов именованной роли
+(`$this->ai($p, $tools, agent: 'reviewer')`): канон — worker (по умолчанию) / reviewer
+(SOLID, ревью) / supervisor (разблокировка/эскалация) / planner (валидация/дизайн). v1:
+общий доступ, роли отличаются только моделью (`CLAW_AGENT_<ROLE>` → `Config::$agents` →
+`EnvKey::Agents`).
 
-`Claw\Journal`: `JournalInterface`, `JournalEntry`, `JournalScope`
-(Project / Issue / Workflow / Step / Task). `step()` пишет запись уровня `Step`,
-`log()` — уровня `Task`; обе проставляют lineage (project / issue / workflow). Аудит
-вызовов инструментов вливается в тот же журнал через `AuditMiddleware` (единый funnel).
+**Супервизор — спроектирован, ещё НЕ построен.** Над-агент, удерживающий прогон
+автономным: на застрявшем шаге пытается разблокировать ДО человека по лестнице, упорядоченной
+по цене — guide → solve → escalate (та же роль на более сильной/дорогой модели) → human.
+Примитив диалога агент↔агент готов (`Claw\Agent\Dialogue::between` — обмен по паре каналов в
+structured-concurrency TrueAsync). Главное применение по факту: на runtime-ошибке прогона
+отдать (ошибка + trace + код) роли supervisor, чтобы починить солвер и до-исполнить хвост
+через durable resume.
+
+## Наблюдаемость (`Claw\Trace`)
+
+Журнал (`Claw\Journal`) был скелетом без боевой реализации — **удалён** и заменён
+нейтральным нижним слоем `Claw\Trace` (на него опираются Agent + Workflow + bin, что
+заодно убрало течь Agent→Workflow). `Tracer` — типизированный фасад
+(`enterWorkflow/enterStep/enterAi/enterTurn/exit`, `prompt/reply/toolCall/toolResult/log`):
+держит стек родителей и id, разводит каждую запись по списку **синков** (падение синка не
+ломает прогон). Синки: `TraceStore` (таблица `trace` в БД проекта), `ConsoleTraceSink`
+(живой отступной вывод в stderr), `ArrayTraceSink` (память/тесты). В `reply` лежит расход
+токенов — **trace заодно работает cost-ledger'ом**. Читалка истории — `TraceReader` +
+`claw log [runId]` (только чтение, без ключа): печатает дерево прогона
+`workflow → step → ai(role+model) → turn → reply[tok] / tool / tool-result`.
 
 ## Модель исполнения
 
@@ -209,19 +239,63 @@ run-path (ниже).
 ## Что реализовано / что в планах
 
 **Реализовано:** `WorkflowInterface` + `WorkflowAbstract` (хелпер), атрибут `#[Step]`,
-`Environment`/`EnvKey`, `WorkflowStateStore` + `InMemoryStateStore` (снапшот),
-`Registry` с палитрой (`only`/`specs`), `ChainExecutor` + middleware,
-`DefaultTurnLoop`, `Claw\Journal`, `Claw\Project` (`Project`/`Issue`),
-`define_workflow` + `WorkflowValidator` + `WorkflowStore`, пример `ReviewFileWorkflow`.
+`Environment`/`EnvKey`, `WorkflowStateStore` + `SqliteStateStore` (боевой снапшот) +
+`InMemoryStateStore` (тесты), `Registry` с палитрой (`only`/`specs`), `ChainExecutor` +
+middleware, `DefaultTurnLoop`, наблюдаемость `Claw\Trace` (+ `claw log`), `Claw\Project`
+(`Project`/`Issue`/`ProjectStore` с ledger прогонов), `define_workflow` +
+`WorkflowValidator` + `WorkflowStore`, пример `ReviewFileWorkflow`.
 
-**В планах** (см. `workflow-roadmap.md`):
+**Run-path построен** (`Claw\Cli\WorkflowMode`): `claw -c / -i / run / log` —
+композиционный корень строит `Environment` с дефолтами проекта и гонит `WorkflowAbstract`.
+Дефолт — `GenerateIssueWorkflow` (мета-workflow: понять задачу → сгенерировать солвер через
+`define_workflow` → апрув человека → прогнать в реальной папке проекта); сгенерированный
+солвер следует каноничному 7-шаговому рецепту (validate → design → SOLID-review+гейт →
+implement → test&accept → changelog → deliver). Роли агентов проброшены; durable resume —
+через `ProjectStore::resumableRun`.
 
-- **Run-path / composition root** — главный пробел: пока **ничто не запускает** новую
-  модель в проде. Нужен корень, что строит `Environment` с дефолтами проекта
-  (worker / registry / store / journal) и путь, который инстанцирует сохранённый класс и
-  зовёт `run()`. Туда же — permission `Policy` для автономного прогона.
-- **Durable SQLite-стор** + реестр прогонов и recovery при старте.
-- **Человек в петле** (`waiting_human`: пауза, карточка, мягкий таймаут, очередь,
-  маршрутизация ответа).
-- **База знаний** (Obsidian-MD + `sqlite-vec`).
-- **Параллельные задачи** в шаге; **бюджеты**; **мутация** (workflow создаёт workflow).
+**В планах** (приоритезировано разделом «Где мы относительно исследований»):
+
+- **Ограничить петлю** — max-turns + token/time-бюджет + детектор «нет прогресса» в
+  `DefaultTurnLoop` (субстрат — токены из trace).
+- **Цикл починки / супервизор** — на runtime-ошибке прогона отдать (ошибка + trace + код)
+  роли supervisor → перегенерировать/починить солвер → resume хвоста; лестница до человека.
+- **Структурная внешняя верификация** — опереть «готово» шага на прогон тестов / `composer
+  qa`, а не на самооценку модели; гард от преждевременного «готово».
+- **Permission `Policy`** для автономного `bash` (сейчас allow-all): денлист → AI-оценка риска.
+- **Компакция контекста** на длинных прогонах; **эпизодическая память** (рефлексия между
+  прогонами).
+- **Человек в петле** (`waiting_human`: пауза, карточка, мягкий таймаут, очередь).
+- **База знаний** (Obsidian-MD + `sqlite-vec`); **параллельные задачи** в шаге; **бюджеты**.
+
+## Где мы относительно исследований по Loop-агентам
+
+Карта нашей петли на фоне литературы. Полный обзор с источниками (ReAct, Reflexion,
+Self-Refine, AlphaCodium, SWE-agent, Anthropic *Building Effective Agents* / multi-agent,
+DeepMind о само-коррекции, Context Rot, OWASP LLM06 и др.) —
+[`agentic-loops-survey.md`](agentic-loops-survey.md).
+
+По оси «**workflow** vs **agent**» (Anthropic, *Building Effective Agents*, дек. 2024) мы
+сознательно на стороне **workflow**: поток управления держит КОД (`run()` + `#[Step]`), а
+модель заполняет локальные решения. Ставка верная — и Anthropic, и Cognition сходятся, что
+для кода непрерывный единый контекст и детерминированный костяк бьют автономный
+много-агентный рой.
+
+**Где мы сильны:**
+
+- **Workflow-не-agent.** Управление — код, вывод модели — данные: инъекция в данных портит
+  максимум результат шага, не поток.
+- **Durable resume.** Снапшот `{state, done}` + ledger прогонов + до-исполнение хвоста — это
+  паттерн LangGraph-checkpointer / Temporal.
+- **Процедурная память как код.** Workflow'ы — растущая библиотека исполняемых навыков:
+  прямой аналог skill-library из Voyager.
+- **Наименьшие привилегии + валидатор + апрув человека** — сильно по OWASP LLM06 (excessive
+  agency) и least-privilege.
+- **Trace как cost-ledger** — токены в `reply` дают готовый субстрат для бюджетов.
+
+**Что мы упустили — пробелы.** Подробный разбор каждого (в чём дело, что говорят
+исследования, как у нас, что сделать) вынесен в отдельный документ:
+[`workflow-gaps.md`](workflow-gaps.md). Кратко, по приоритету: (1) петля без предела ходов и
+бюджета; (2) результат проверяет сама модель, а не внешний прогон тестов; (3) нет цикла
+починки/супервизора при сбое; (4) контекст не сжимается; (5) нет памяти, которая учится на
+прошлых прогонах; (6) у автономного `bash` нет ограничения прав; (7) нет защиты от
+преждевременного «готово».
