@@ -9,7 +9,9 @@ use Claw\Agent\ConsoleSpeaker;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
+use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
+use Claw\Project\Project;
 use Claw\Project\ProjectStore;
 use Claw\Tool\BashTool;
 use Claw\Tool\DefineWorkflowTool;
@@ -28,6 +30,7 @@ use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\GenerateIssueWorkflow;
 use Claw\Workflow\SqliteStateStore;
+use Claw\Workflow\SuperviseWorkflow;
 use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStore;
 use Claw\Workflow\WorkflowValidator;
@@ -51,6 +54,9 @@ use Claw\Workflow\WorkflowValidator;
  */
 final class WorkflowMode
 {
+    /** How many times the supervisor may repair-and-resume a crashing solver before giving up. */
+    private const int MAX_REPAIRS = 2;
+
     /** @param string $root the install root: anchors the app home (state db, generated workflows). */
     public function __construct(private readonly string $root)
     {
@@ -261,19 +267,39 @@ final class WorkflowMode
             fwrite(STDOUT, "Reusing solver {$solverClass}.\n");
         }
 
+        // Run the solver; on a runtime crash, ask the supervisor to repair it (a new class version)
+        // and resume — the same runId's snapshot skips finished steps. Bounded by MAX_REPAIRS.
         $solverSpan = $tracer->enterWorkflow($solverName);
-        try {
-            $solver = new $solverClass($env, $runId, [], $issue, $project);
-            if (!$solver instanceof WorkflowAbstract) {
-                throw new ClawException("{$solverClass} is not a workflow");
-            }
-            $solver->run();
-        } catch (\Throwable $e) {
-            $tracer->exit($solverSpan);
-            $store->setRunStatus($runId, 'failed');
-            fwrite(STDERR, 'claw run: run #' . $runId . ' failed: ' . $e->getMessage() . "\n");
+        $currentClass = $solverClass;
+        $attempt = 0;
+        while (true) {
+            try {
+                $solver = new $currentClass($env, $runId, [], $issue, $project);
+                if (!$solver instanceof WorkflowAbstract) {
+                    throw new ClawException("{$currentClass} is not a workflow");
+                }
+                $solver->run();
+                break;
+            } catch (\Throwable $e) {
+                if (++$attempt > self::MAX_REPAIRS) {
+                    $tracer->exit($solverSpan);
+                    $store->setRunStatus($runId, 'failed');
+                    fwrite(STDERR, "claw run: run #{$runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}\n");
 
-            return 1;
+                    return 1;
+                }
+
+                fwrite(STDOUT, "Run hit an error; asking the supervisor to repair (attempt {$attempt})…\n");
+                $fixed = $this->repairSolver($env, $tracer, $workflowStore, $currentClass, $solverName, $e->getMessage(), $runId, $attempt, $issue, $project);
+                if ($fixed === null) {
+                    $tracer->exit($solverSpan);
+                    $store->setRunStatus($runId, 'failed');
+                    fwrite(STDERR, "claw run: the supervisor could not repair run #{$runId}\n");
+
+                    return 1;
+                }
+                $currentClass = $fixed;   // resume with the fixed class on the next loop turn
+            }
         }
         $tracer->exit($solverSpan);
 
@@ -281,6 +307,51 @@ final class WorkflowMode
         fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
 
         return 0;
+    }
+
+    /**
+     * Repair a crashed solver: read its source, hand it and the error to {@see SuperviseWorkflow}
+     * (the supervisor role), which writes a corrected version under a new class name. Returns that
+     * fully-qualified class name, or null if the repair produced nothing.
+     */
+    private function repairSolver(
+        Environment $env,
+        Tracer $tracer,
+        WorkflowStore $workflowStore,
+        string $brokenClass,
+        string $baseName,
+        string $error,
+        string $runId,
+        int $attempt,
+        Issue $issue,
+        Project $project,
+    ): ?string {
+        $fixedName = $baseName . 'R' . $attempt;
+        $fixedClass = $workflowStore->classFor($fixedName, true);
+        $fixedNamespace = substr($fixedClass, 0, (int) strrpos($fixedClass, '\\'));
+
+        $brokenShort = substr($brokenClass, (int) strrpos($brokenClass, '\\') + 1);
+        $brokenPath = $workflowStore->path($brokenShort, true);
+        $brokenCode = is_file($brokenPath) ? (string) file_get_contents($brokenPath) : '';
+
+        $span = $tracer->enterWorkflow('supervise-run');
+        try {
+            new SuperviseWorkflow($env, $runId . '-fix' . $attempt, [
+                'brokenName' => $brokenShort,
+                'brokenCode' => $brokenCode,
+                'error' => $error,
+                'fixedName' => $fixedName,
+                'fixedNamespace' => $fixedNamespace,
+            ], $issue, $project)->run();
+        } catch (\Throwable $e) {
+            $tracer->exit($span);
+            fwrite(STDERR, 'claw run: repair failed: ' . $e->getMessage() . "\n");
+
+            return null;
+        }
+        $tracer->exit($span);
+
+        return is_file($workflowStore->path($fixedName, true)) ? $fixedClass : null;
     }
 
     /**
