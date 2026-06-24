@@ -39,10 +39,10 @@ final class Cli
         $args = \array_slice($argv, 1);
 
         if (\in_array('--session', $args, true) || \in_array('-s', $args, true)) {
-            return (new SessionMode($this->root))->run();
+            return new SessionMode($this->root)->run();
         }
 
-        return (new WorkflowMode($this->root))->run($args);
+        return new WorkflowMode($this->root)->run($args);
     }
 
     /**

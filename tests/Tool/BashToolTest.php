@@ -56,7 +56,7 @@ final class BashToolTest
     {
         $threw = false;
         try {
-            (new BashTool(sys_get_temp_dir()))->handle([]);
+            new BashTool(sys_get_temp_dir())->handle([]);
         } catch (ToolException $e) {
             $threw = true;
         }

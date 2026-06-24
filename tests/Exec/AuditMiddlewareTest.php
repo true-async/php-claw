@@ -21,7 +21,7 @@ final class AuditMiddlewareTest
         try {
             $store = new SessionStore($path);
 
-            (new AuditMiddleware($store))->handle(
+            new AuditMiddleware($store)->handle(
                 new ToolCall('1', 'bash', ['command' => 'ls']),
                 static fn (ToolCall $c): ToolResultBlock => new ToolResultBlock($c->id, 'output', false),
             );
@@ -39,7 +39,7 @@ final class AuditMiddlewareTest
     #[Test]
     public function withoutAStoreItJustPassesThrough(): void
     {
-        $result = (new AuditMiddleware(null))->handle(
+        $result = new AuditMiddleware(null)->handle(
             new ToolCall('1', 'x', []),
             static fn (ToolCall $c): ToolResultBlock => new ToolResultBlock($c->id, 'ran', false),
         );

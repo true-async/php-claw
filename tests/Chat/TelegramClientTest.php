@@ -48,7 +48,7 @@ final class TelegramClientTest
     {
         $http = new FakeHttpClient(new HttpResponse(200, '{"ok":true}'));
 
-        (new TelegramClient($http, 'TOK'))->sendMessage(42, 'hello');
+        new TelegramClient($http, 'TOK')->sendMessage(42, 'hello');
 
         Assert::true(str_contains((string) $http->lastUrl, '/sendMessage'));
 

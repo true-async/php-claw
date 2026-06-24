@@ -45,7 +45,7 @@ final class ChainExecutorTest
             return new ToolResultBlock($call->id, 'done', false);
         };
 
-        $result = (new ChainExecutor([$tracer('A'), $tracer('B')], $terminal))
+        $result = new ChainExecutor([$tracer('A'), $tracer('B')], $terminal)
             ->call(new ToolCall('1', 'x', []));
 
         Assert::same($result->content, 'done');
@@ -71,7 +71,7 @@ final class ChainExecutorTest
             return new ToolResultBlock($call->id, 'ran', false);
         };
 
-        $result = (new ChainExecutor([$blocker], $terminal))->call(new ToolCall('1', 'x', []));
+        $result = new ChainExecutor([$blocker], $terminal)->call(new ToolCall('1', 'x', []));
 
         Assert::same($result->content, 'blocked');
         Assert::true($result->isError);

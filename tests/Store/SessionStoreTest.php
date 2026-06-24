@@ -21,7 +21,7 @@ final class SessionStoreTest
         $path = self::tempDb();
 
         try {
-            Assert::same((new SessionStore($path))->load(), []);
+            Assert::same(new SessionStore($path)->load(), []);
         } finally {
             @unlink($path);
         }
@@ -33,7 +33,7 @@ final class SessionStoreTest
         $path = self::tempDb();
 
         try {
-            (new SessionStore($path))->append(
+            new SessionStore($path)->append(
                 Message::userText('hello'),
                 new Message(Role::Assistant, [new ToolUseBlock('u1', 'bash', ['command' => 'ls'])]),
                 new Message(Role::User, [new ToolResultBlock('u1', 'file.txt', false)]),
@@ -41,7 +41,7 @@ final class SessionStoreTest
             );
 
             // A fresh store on the same file simulates a restart.
-            $loaded = (new SessionStore($path))->load();
+            $loaded = new SessionStore($path)->load();
 
             Assert::same(count($loaded), 4);
 

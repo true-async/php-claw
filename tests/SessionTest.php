@@ -80,7 +80,7 @@ final class SessionTest
         $registry = new Registry();
         $registry->add($this->mutatingTool());
 
-        (new Session($conversation, $agent, $registry, 's', 'm'))->run();
+        new Session($conversation, $agent, $registry, 's', 'm')->run();
 
         // the user was asked, the tool did NOT run, and the model heard the refusal
         Assert::same(count($conversation->confirmed), 1);
@@ -103,7 +103,7 @@ final class SessionTest
         $registry = new Registry();
         $registry->add($this->mutatingTool());
 
-        (new Session($conversation, $agent, $registry, 's', 'm'))->run();
+        new Session($conversation, $agent, $registry, 's', 'm')->run();
 
         $toolResult = $agent->requests[1]->messages[2]->content[0];
         Assert::true($toolResult instanceof ToolResultBlock);
@@ -147,7 +147,7 @@ final class SessionTest
         $registry->add($this->echoTool());
 
         // The soft memory cap stops the runaway tool loop.
-        (new Session($conversation, $agent, $registry, 's', 'm', maxHistory: 4))->run();
+        new Session($conversation, $agent, $registry, 's', 'm', maxHistory: 4)->run();
 
         Assert::true(str_contains($conversation->sent[0], 'too long'));
     }
@@ -158,7 +158,7 @@ final class SessionTest
         $agent = new ScriptedAgent(new ContextLengthException('maximum context length exceeded'));
         $conversation = new FakeConversation('go');
 
-        (new Session($conversation, $agent, new Registry(), 's', 'm'))->run();
+        new Session($conversation, $agent, new Registry(), 's', 'm')->run();
 
         Assert::true(str_contains($conversation->sent[0], 'too long'));
     }
@@ -199,7 +199,7 @@ final class SessionTest
         $agent = new ScriptedAgent(new RateLimitException('rl', 5_000));
         $conversation = new FakeConversation('go');
 
-        (new Session($conversation, $agent, new Registry(), 's', 'm'))->run();
+        new Session($conversation, $agent, new Registry(), 's', 'm')->run();
 
         Assert::true(str_contains($conversation->sent[0], 'Rate limit'));
         Assert::true(str_contains($conversation->sent[0], '5s'));
@@ -211,7 +211,7 @@ final class SessionTest
         $agent = new ScriptedAgent(new AuthException('invalid key'));
         $conversation = new FakeConversation('go');
 
-        (new Session($conversation, $agent, new Registry(), 's', 'm'))->run();
+        new Session($conversation, $agent, new Registry(), 's', 'm')->run();
 
         Assert::true(str_contains($conversation->sent[0], 'Configuration error'));
     }
@@ -222,7 +222,7 @@ final class SessionTest
         $agent = new ScriptedAgent(new QuotaExceededException('no credits'));
         $conversation = new FakeConversation('go');
 
-        (new Session($conversation, $agent, new Registry(), 's', 'm'))->run();
+        new Session($conversation, $agent, new Registry(), 's', 'm')->run();
 
         Assert::true(str_contains($conversation->sent[0], 'Quota exhausted'));
     }
@@ -244,7 +244,7 @@ final class SessionTest
             $registry = new Registry();
             $registry->add($this->mutatingTool());
 
-            (new Session($conversation, $agent, $registry, 's', 'm', store: new SessionStore($path)))->run();
+            new Session($conversation, $agent, $registry, 's', 'm', store: new SessionStore($path))->run();
 
             // asked exactly once; the second call ran straight through the saved rule
             Assert::same(count($conversation->confirmed), 1);
@@ -271,14 +271,14 @@ final class SessionTest
             $agent1 = new ScriptedAgent(
                 new AgentResponse([new TextBlock('hi there')], [], StopReason::EndTurn, new Usage(), 'hi there'),
             );
-            (new Session(new FakeConversation('hello'), $agent1, new Registry(), 's', 'm', store: new SessionStore($path)))->run();
+            new Session(new FakeConversation('hello'), $agent1, new Registry(), 's', 'm', store: new SessionStore($path))->run();
 
             // Second run: a fresh Session reopening the same file. The prior turn
             // is loaded and replayed to the model as context.
             $agent2 = new ScriptedAgent(
                 new AgentResponse([new TextBlock('again')], [], StopReason::EndTurn, new Usage(), 'again'),
             );
-            (new Session(new FakeConversation('and now?'), $agent2, new Registry(), 's', 'm', store: new SessionStore($path)))->run();
+            new Session(new FakeConversation('and now?'), $agent2, new Registry(), 's', 'm', store: new SessionStore($path))->run();
 
             // The second model call saw: user 'hello', assistant 'hi there', user 'and now?'.
             $messages = $agent2->requests[0]->messages;

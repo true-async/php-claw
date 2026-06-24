@@ -342,7 +342,7 @@ final class WorkflowAbstractTest
         ?Tracer $tracer = null,
         string $systemPrompt = '',
     ): Environment {
-        $env = (new Environment())
+        $env = new Environment()
             ->set(EnvKey::Worker, $worker ?? new ScriptedAgent())
             ->set(EnvKey::Registry, $registry ?? new Registry())
             ->set(EnvKey::ModelId, 'm')

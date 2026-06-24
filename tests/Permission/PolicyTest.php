@@ -16,7 +16,7 @@ final class PolicyTest
     #[Test]
     public function safeToolIsAllowed(): void
     {
-        $verdict = (new Policy())->check($this->tool('read_file', Risk::Safe), []);
+        $verdict = new Policy()->check($this->tool('read_file', Risk::Safe), []);
 
         Assert::same($verdict->decision, Decision::Allow);
     }
@@ -24,7 +24,7 @@ final class PolicyTest
     #[Test]
     public function mutatingToolNeedsConfirmation(): void
     {
-        $verdict = (new Policy())->check($this->tool('bash', Risk::Mutating), ['command' => 'ls']);
+        $verdict = new Policy()->check($this->tool('bash', Risk::Mutating), ['command' => 'ls']);
 
         Assert::same($verdict->decision, Decision::Confirm);
     }
@@ -32,7 +32,7 @@ final class PolicyTest
     #[Test]
     public function dangerousToolIsDenied(): void
     {
-        $verdict = (new Policy())->check($this->tool('php_eval', Risk::Dangerous), []);
+        $verdict = new Policy()->check($this->tool('php_eval', Risk::Dangerous), []);
 
         Assert::same($verdict->decision, Decision::Deny);
     }
@@ -41,7 +41,7 @@ final class PolicyTest
     public function denylistOverridesRisk(): void
     {
         // A Mutating tool would normally only need confirmation, but a hard rule wins.
-        $verdict = (new Policy())->check(
+        $verdict = new Policy()->check(
             $this->tool('bash', Risk::Mutating),
             ['command' => 'sudo rm -rf / --no-preserve-root'],
         );

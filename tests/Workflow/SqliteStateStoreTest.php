@@ -20,7 +20,7 @@ final class SqliteStateStoreTest
             $store->save('r1', ['x' => 1, 'y' => 'two'], ['alpha']);
 
             // A fresh store on a NEW connection to the same file = a process restart.
-            $snap = (new SqliteStateStore(new \PDO('sqlite:' . $path)))->load('r1');
+            $snap = new SqliteStateStore(new \PDO('sqlite:' . $path))->load('r1');
 
             Assert::same($snap['state'], ['x' => 1, 'y' => 'two']);
             Assert::same($snap['done'], ['alpha']);
@@ -60,7 +60,7 @@ final class SqliteStateStoreTest
             $b = (int) $store->nextId();
             Assert::true($b > $a);
 
-            $c = (int) (new SqliteStateStore(new \PDO('sqlite:' . $path)))->nextId();
+            $c = (int) new SqliteStateStore(new \PDO('sqlite:' . $path))->nextId();
             Assert::true($c > $b);   // keeps climbing after a restart, no id reuse
         } finally {
             @unlink($path);

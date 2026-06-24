@@ -29,7 +29,7 @@ final class ConsoleChatTest
     {
         $output = $this->memoryStream();
 
-        (new ConsoleConversation($this->memoryStream(), $output))->send('hi there');
+        new ConsoleConversation($this->memoryStream(), $output)->send('hi there');
 
         rewind($output);
         Assert::same(stream_get_contents($output), "Claw: hi there\n");

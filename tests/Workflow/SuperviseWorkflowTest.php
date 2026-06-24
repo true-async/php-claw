@@ -35,20 +35,20 @@ final class SuperviseWorkflowTest
             // The supervisor returns the corrected source for the new class name.
             $agent = new ScriptedAgent(self::answer(self::solverCode('Issue7SolverR1')));
 
-            $env = (new Environment())
+            $env = new Environment()
                 ->set(EnvKey::Worker, $agent)
                 ->set(EnvKey::Registry, $registry)
                 ->set(EnvKey::ModelId, 'm')
                 ->set(EnvKey::SystemPrompt, '')
                 ->set(EnvKey::Store, new InMemoryStateStore());
 
-            (new SuperviseWorkflow($env, 'fix1', [
+            new SuperviseWorkflow($env, 'fix1', [
                 'brokenName' => 'Issue7Solver',
                 'brokenCode' => "<?php\nfinal class Issue7Solver { /* throws */ }",
                 'error' => 'TypeError: Return value must be of type string, null returned',
                 'fixedName' => 'Issue7SolverR1',
                 'fixedNamespace' => 'ClawWorkflow\\Common',
-            ]))->run();
+            ])->run();
 
             $saved = $store->path('Issue7SolverR1', true);
             Assert::true(is_file($saved));

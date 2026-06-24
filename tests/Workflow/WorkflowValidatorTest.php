@@ -59,7 +59,7 @@ final class WorkflowValidatorTest
     private function rejected(string $code, ?string $expectedClass = null): bool
     {
         try {
-            (new WorkflowValidator())->validate($code, $expectedClass);
+            new WorkflowValidator()->validate($code, $expectedClass);
 
             return false;
         } catch (WorkflowException) {

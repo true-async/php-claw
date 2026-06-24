@@ -67,7 +67,7 @@ final class TraceReaderTest
         $pdo->exec("INSERT INTO runs (issue_id, workflow, status, created_at) VALUES (7, 'Issue7Solver', 'done', 0)");
         $pdo->exec("INSERT INTO runs (issue_id, workflow, status, created_at) VALUES (7, 'Issue7Solver', 'failed', 0)");
 
-        $runs = (new TraceReader($pdo))->runs();
+        $runs = new TraceReader($pdo)->runs();
 
         Assert::count($runs, 2);
         Assert::same($runs[0]['id'], '2');          // newest first

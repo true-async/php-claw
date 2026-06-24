@@ -46,7 +46,7 @@ final class GenerateIssueWorkflowTest
                 self::answer(self::solverCode('Issue7Solver')),
             );
 
-            $env = (new Environment())
+            $env = new Environment()
                 ->set(EnvKey::Worker, $agent)
                 ->set(EnvKey::Registry, $registry)
                 ->set(EnvKey::ModelId, 'm')
@@ -56,11 +56,11 @@ final class GenerateIssueWorkflowTest
             $issue = new Issue('7', 'p1', 'Summarize the README');
             $project = new Project('p1', 'Demo');
 
-            (new GenerateIssueWorkflow($env, 'gen', [
+            new GenerateIssueWorkflow($env, 'gen', [
                 'solverName' => 'Issue7Solver',
                 'solverNamespace' => 'ClawWorkflow\\Common',
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
-            ], $issue, $project))->run();
+            ], $issue, $project)->run();
 
             $saved = $store->path('Issue7Solver', true);
             Assert::true(is_file($saved));

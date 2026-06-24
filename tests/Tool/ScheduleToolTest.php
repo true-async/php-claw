@@ -39,8 +39,8 @@ final class ScheduleToolTest
     {
         $threw = false;
         try {
-            (new ScheduleTool(static function (string $m): void {
-            }))->handle(['after_seconds' => 0, 'message' => 'x']);
+            new ScheduleTool(static function (string $m): void {
+            })->handle(['after_seconds' => 0, 'message' => 'x']);
         } catch (ToolException $e) {
             $threw = true;
         }
@@ -53,8 +53,8 @@ final class ScheduleToolTest
     {
         $threw = false;
         try {
-            (new ScheduleTool(static function (string $m): void {
-            }))->handle(['after_seconds' => 1, 'message' => '  ']);
+            new ScheduleTool(static function (string $m): void {
+            })->handle(['after_seconds' => 1, 'message' => '  ']);
         } catch (ToolException $e) {
             $threw = true;
         }

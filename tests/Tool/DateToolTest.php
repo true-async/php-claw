@@ -27,7 +27,7 @@ final class DateToolTest
     {
         $threw = false;
         try {
-            (new DateTool())->handle(['timezone' => 'Nowhere/Bad']);
+            new DateTool()->handle(['timezone' => 'Nowhere/Bad']);
         } catch (ToolException $e) {
             $threw = true;
         }

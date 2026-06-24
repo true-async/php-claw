@@ -49,6 +49,6 @@ final class DateTool implements ToolInterface
             throw new ToolException("current_date: invalid timezone '{$timezone}'");
         }
 
-        return (new \DateTimeImmutable('now', $tz))->format($format);
+        return new \DateTimeImmutable('now', $tz)->format($format);
     }
 }

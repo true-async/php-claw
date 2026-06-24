@@ -33,7 +33,7 @@ final class RegistryTest
     {
         $threw = false;
         try {
-            (new Registry())->get('nope');
+            new Registry()->get('nope');
         } catch (ToolException $e) {
             $threw = true;
             Assert::true(str_contains($e->getMessage(), 'Unknown tool'));

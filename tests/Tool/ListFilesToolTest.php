@@ -38,7 +38,7 @@ final class ListFilesToolTest
         mkdir($workspace->root() . '/sub');
         file_put_contents($workspace->root() . '/sub/inner.txt', 'x');
 
-        $out = (new ListFilesTool($workspace))->handle(['path' => 'sub']);
+        $out = new ListFilesTool($workspace)->handle(['path' => 'sub']);
 
         Assert::true(str_contains($out, 'inner.txt'));
 

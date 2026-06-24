@@ -196,7 +196,7 @@ final class WorkflowMode
         $registry->add(new ListFilesTool($workspace));
         $registry->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
 
-        $env = (new Environment())
+        $env = new Environment()
             ->set(EnvKey::Worker, $agent)
             ->set(EnvKey::Registry, $registry)
             ->set(EnvKey::ModelId, $config->model)
