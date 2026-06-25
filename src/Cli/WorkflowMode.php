@@ -17,6 +17,7 @@ use Claw\Tool\BashTool;
 use Claw\Tool\DefineWorkflowTool;
 use Claw\Tool\ListFilesTool;
 use Claw\Tool\ReadFileTool;
+use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
 use Claw\Tool\Workspace;
 use Claw\Tool\WriteFileTool;
@@ -226,6 +227,8 @@ final class WorkflowMode
         $store->setIssueStatus($issue->id, IssueStatus::InProgress);
         $tracer = new Tracer($runId, new TraceStore($projectDb), new ConsoleTraceSink(STDERR, $verbosity ?? Level::Info));
         $env->set(EnvKey::Tracer, $tracer);
+        $taskBrief = "Title: {$issue->title}\n\nDescription: {$issue->description}";
+        $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));   // recall this run's own journal + task
         if ($resuming) {
             fwrite(STDOUT, "Resuming run #{$runId} for issue #{$issue->id}…\n");
         }

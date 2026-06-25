@@ -56,12 +56,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private string $currentStep = '';
 
     /**
-     * Artifacts the current step has produced this attempt — handed to the critic, reset each re-run.
-     * Transient (not part of resume state): a re-run regenerates them.
+     * Artifacts produced this run, kept per step so PRIOR steps' outputs are not lost — only the
+     * current step's slot is reset on a critic re-run (it regenerates them). Transient: not part of
+     * resume state (the journal is the durable copy a resumed run reads back).
      *
-     * @var list<Artifact>
+     * @var array<string, list<Artifact>>
      */
-    private array $stepArtifacts = [];
+    private array $artifacts = [];
 
     /**
      * This workflow's own #[Tool] methods, wrapped as tools — discovered once by reflection, then cached.
@@ -143,14 +144,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $round = 0;
             $maxRounds = $this->stepMaxRounds($name);
             while (true) {
-                $this->stepArtifacts = [];   // a fresh attempt produces a fresh set
+                $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $raw = $this->{$name}();
                 $result = \is_string($raw) ? $raw : '';
                 if ($rubric === null) {
                     break;
                 }
 
-                $findings = $this->critic($name, $result, $rubric, $this->stepArtifacts);
+                $findings = $this->critic($name, $result, $rubric, $this->artifacts[$name]);
                 if ($findings === null) {
                     break;   // the critic is satisfied
                 }
@@ -209,7 +210,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function artifact(string $label, ?string $text = null, ?string $file = null): void
     {
         $entry = $file !== null ? Artifact::file($label, $file) : Artifact::text($label, $text ?? '');
-        $this->stepArtifacts[] = $entry;
+        $this->artifacts[$this->currentStep][] = $entry;
         $this->tracer()?->artifact($entry->label, $entry->kind, $entry->value);
     }
 

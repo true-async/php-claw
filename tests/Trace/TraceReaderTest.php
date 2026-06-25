@@ -36,6 +36,45 @@ final class TraceReaderTest
     }
 
     #[Test]
+    public function recallsAStepsHistoryToolCallsAndArtifactsFromTheJournal(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $tracer = new Tracer('9', new TraceStore($pdo));
+
+        $wf = $tracer->enterWorkflow('Solver');
+        $a = $tracer->enterStep('design');
+        $tracer->toolCall('read_file', ['path' => 'src/X.php']);
+        $tracer->artifact('plan', 'text', 'add method Y');
+        $tracer->exit($a);
+        $b = $tracer->enterStep('implement');
+        $tracer->toolCall('write_file', ['path' => 'src/X.php']);
+        $tracer->artifact('changed', 'file', 'src/X.php');
+        $tracer->exit($b);
+        $tracer->exit($wf);
+
+        $reader = new TraceReader($pdo);
+
+        // a step's own subtree, scoped — design's tool + artifact, not implement's
+        $design = $reader->stepHistory('9', 'design');
+        Assert::true(str_contains($design, 'tool read_file'));
+        Assert::true(str_contains($design, 'plan'));
+        Assert::true(!str_contains($design, 'write_file'));
+
+        // every call to one tool across the run
+        Assert::true(str_contains($reader->toolHistory('9', 'write_file'), 'write_file'));
+
+        // artifacts: all, then scoped to one step
+        $all = $reader->artifacts('9');
+        Assert::true(str_contains($all, 'plan') && str_contains($all, 'changed'));
+        $implementOnly = $reader->artifacts('9', 'implement');
+        Assert::true(str_contains($implementOnly, 'changed') && !str_contains($implementOnly, 'plan'));
+
+        // the run map
+        $map = $reader->describe('9');
+        Assert::true(str_contains($map, 'Solver') && str_contains($map, 'design, implement'));
+    }
+
+    #[Test]
     public function renderFiltersByThreshold(): void
     {
         $pdo = new \PDO('sqlite::memory:');
