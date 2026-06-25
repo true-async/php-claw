@@ -332,7 +332,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return \is_numeric($value) ? (float) $value : 0.0;
     }
 
-    /** The rubric a step's result is judged against, from its {@see Step} attribute — null if none. */
+    /**
+     * The rules a step's result is judged against. The {@see Step} attribute names a critic; the
+     * actual rules live in {@see criticRules()}, keyed by that name. Null when the step has no critic.
+     * An unknown name is a generation bug — fail loud rather than judge against an empty rubric.
+     */
     private function stepCritic(string $name): ?string
     {
         $attributes = new \ReflectionMethod($this, $name)->getAttributes(Step::class);
@@ -341,8 +345,28 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         $critic = $attributes[0]->newInstance()->critic;
+        if ($critic === null || $critic === '') {
+            return null;
+        }
 
-        return ($critic === null || $critic === '') ? null : $critic;
+        $rules = $this->criticRules()[$critic] ?? null;
+        if ($rules === null || trim($rules) === '') {
+            throw new \LogicException("Step '{$name}' names critic '{$critic}', but criticRules() has no rules for it.");
+        }
+
+        return $rules;
+    }
+
+    /**
+     * The rules each critic judges by, keyed by the name used in `#[Step(critic: '<name>')]`. A
+     * workflow that uses critics overrides this to spell out, per critic, the concrete criteria the
+     * reviewer must check. The base is empty — a workflow with no critics needs nothing here.
+     *
+     * @return array<string, string>
+     */
+    protected function criticRules(): array
+    {
+        return [];
     }
 
     /** Judge a step's result against its rubric on the reviewer role: null = it passes, else the findings. */

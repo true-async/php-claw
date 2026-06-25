@@ -336,6 +336,34 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aCriticNameWithNoRulesFailsLoud(): void
+    {
+        // The step names a critic the workflow never defined rules for — a generation bug we refuse
+        // to paper over by judging against an empty rubric.
+        $wf = new class ($this->config(worker: new ScriptedAgent($this->answer('x'))), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            #[Step(critic: 'undefined-rules')]
+            public function make(): string
+            {
+                return $this->ai('do it');
+            }
+        };
+
+        $threw = false;
+        try {
+            $wf->run();
+        } catch (\LogicException) {
+            $threw = true;
+        }
+
+        Assert::true($threw);
+    }
+
+    #[Test]
     public function aStepWhoseCriticPassesRunsOnce(): void
     {
         $worker = new ScriptedAgent(
@@ -349,6 +377,11 @@ final class WorkflowAbstractTest
             public function name(): string
             {
                 return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['must be good' => 'the work must be good'];
             }
 
             #[Step(critic: 'must be good')]
@@ -400,6 +433,11 @@ final class WorkflowAbstractTest
             public function name(): string
             {
                 return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['must be tested' => 'the work must include a test'];
             }
 
             #[Step(critic: 'must be tested')]

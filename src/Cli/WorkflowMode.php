@@ -304,6 +304,7 @@ final class WorkflowMode
         $tracer->exit($solverSpan);
 
         $store->setRunStatus($runId, 'done');
+        $store->setIssueStatus($issue->id, IssueStatus::Done);   // every step ran -> the issue is resolved
         fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
 
         return 0;
