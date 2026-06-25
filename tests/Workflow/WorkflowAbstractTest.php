@@ -428,6 +428,67 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aCriticIsAnOrdinaryAiThatGetsEveryToolToVerifyWith(): void
+    {
+        $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
+        $registry = new Registry();
+        $registry->add($this->echoTool('read'));
+        $registry->add($this->echoTool('bash'));
+        $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['ok' => 'the work must be fine'];
+            }
+
+            #[Step(critic: 'ok')]
+            public function make(): string
+            {
+                return $this->ai('do it', []);   // the step itself takes no tools
+            }
+        };
+
+        $wf->run();
+
+        // request 0 = the step's own ai() ([] -> no tools); request 1 = the critic, which must see all.
+        Assert::count($worker->requests[1]->tools, 2);
+    }
+
+    #[Test]
+    public function anArtifactIsRecordedInTheRunsJournal(): void
+    {
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'art';
+            }
+
+            #[Step]
+            public function emit(): void
+            {
+                $this->artifact('result', text: 'subtract added; php -l clean');
+                $this->artifact('file', file: 'src/Calculator.php');
+            }
+        };
+
+        $wf->run();
+
+        $artifacts = [];
+        foreach ($sink->records as $record) {
+            if ($record->event()->type === 'artifact') {
+                $artifacts[] = $record->event()->data['label'] . ':' . $record->event()->data['kind'];
+            }
+        }
+
+        Assert::same($artifacts, ['result:text', 'file:file']);
+    }
+
+    #[Test]
     public function aStepWhoseCriticPassesRunsOnce(): void
     {
         $worker = new ScriptedAgent(

@@ -23,6 +23,7 @@ final class TraceFormat
             'prompt' => self::oneLine(self::str($data, 'text')),
             'reply' => self::reply($data),
             'note' => trim(self::str($data, 'action') . ' ' . self::str($data, 'message')),
+            'artifact' => self::str($data, 'label') . ' (' . self::str($data, 'kind') . ')  ' . self::oneLine(self::str($data, 'value'), 60),
             default => '',
         };
     }

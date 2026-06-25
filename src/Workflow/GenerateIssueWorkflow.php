@@ -39,10 +39,13 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
            violation minimal and deliberate. If the decision is foundational AND non-obvious (an
            early or immature project, or it sets the base), get human approval of the design with
            $this->ask('...') before implementing; if it is obvious in a mature codebase, proceed.
-        4. Implement — make the change, component by component.
+        4. Implement — make the change by having the model edit the files with the tools and VERIFY
+           each edit with `php -l` in the same ai() exchange; never hand-write the new source as a
+           string. The model reads, writes, lints, and fixes itself before the step returns.
         5. Test & accept — add a test for EACH acceptance criterion from step 1; run the full
            quality gate via the bash tool (e.g. `composer qa`) and make it green; watch for
            regressions. If a review finding or a test fails, loop back to step 4 (or 2) until green.
+           Gate this step with a critic whose rules demand the proof (lint clean, gate green).
         6. Changelog — record what changed (docs / changelog).
         7. Deliver — commit on a branch and open it for review (bash tool: git).
         RECIPE;
@@ -194,6 +197,24 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             plain if/while in run() where a phase loops or branches):
             {$recipe}
 
+            HOW A STEP ACTUALLY DOES WORK — read this twice, it is the part solvers get wrong:
+            - A step does NOT do the work itself in PHP. You are writing the PLAN; the WORK is done by
+              a model you drive with `\$this->ai(...)`. Inside that call the model has exactly two moves:
+              call a TOOL, or `ask` a human. That is the whole vocabulary. Your step's job is to set up
+              the prompt and let the model act.
+            - NEVER build the change as a PHP string and write it yourself (no `\$code = "..."; \$this->tool('write_file', ...)`,
+              no str_replace/preg_replace surgery on source). That is blind: it cannot see or fix its own
+              mistakes, and it is exactly how solvers corrupt files. To change a file, tell the model to
+              do it: `\$this->ai('Read src/X.php and add method Y; then run `php -l` on it and fix any
+              error before you stop.')` — the model reads, edits, and VERIFIES with tools in ONE exchange,
+              seeing the verifier's output and correcting itself inside the same `ai()` call.
+            - Verification belongs INSIDE that exchange (the model runs `php -l` / the test gate via the
+              bash tool and reacts), because a tool result is only visible to the model while the `ai()`
+              call is still running. A separate later step that runs `php -l` and just RETURNS the error
+              is useless — once a step returns, no model sees that string. The only thing that re-runs a
+              step on a bad result is a CRITIC (below). So: either the model verifies-and-fixes within
+              its own `ai()` exchange, or you gate the step with a critic — never a bare "verify" step.
+
             Hard requirements (the code is validated before it is saved, and rejected if any are missed):
             - the file must begin with the opening tag `<?php` followed by `declare(strict_types=1);`
             - namespace {$namespace};
@@ -203,6 +224,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - keep state in plain typed properties
             - write each step as a method marked `#[Step]`; the default run() drives them in declaration order
             - to have a step's result reviewed automatically, mark it `#[Step(critic: '<name>')]`, make that method RETURN its result as a string, and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for the SOLID-review (step 3) and test&accept (step 5) steps
+            - record what a step produced with `\$this->artifact('<label>', text: '<summary>')` or `\$this->artifact('<label>', file: '<path it wrote>')`. Artifacts show up in the run log AND are handed to that step's critic — so a critic step MUST emit the artifacts its rubric is judged against (the changed file, the test output), or the critic has nothing concrete to check
+            - the critic is a REAL reviewer AI with every tool: it will OPEN the file artifacts, run `php -l`/the tests itself, and judge — it does not just read your summary. So make the work actually correct; a confident summary over a broken file will be caught
             - the critic name is just a key: for EVERY name you use you MUST define its actual rules by overriding `protected function criticRules(): array`, returning `['<name>' => '<the concrete criteria the reviewer checks>', ...]` — the reviewer is judged ONLY against this text, so spell the criteria out in full; a name with no rules makes the run fail
             - reach the model with `\$this->ai(string \$prompt, ?array \$tools = null, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
             - by DEFAULT `\$this->ai(\$prompt)` exposes EVERY tool to the model — that is the norm, let a step use whatever it needs; pass an explicit list ONLY to deliberately restrict, or `[]` for a pure-reasoning call that must not act

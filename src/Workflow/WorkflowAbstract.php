@@ -44,6 +44,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /** The critic/supervisor's latest guidance for the running step, exposed via {@see critique()}; transient. */
     private ?string $critique = null;
 
+    /** The step currently running, so {@see artifact()} attaches its outputs to the right step; transient. */
+    private string $currentStep = '';
+
+    /**
+     * Artifacts the current step has produced this attempt — handed to the critic, reset each re-run.
+     * Transient (not part of resume state): a re-run regenerates them.
+     *
+     * @var list<Artifact>
+     */
+    private array $stepArtifacts = [];
+
     /**
      * This workflow's own #[Tool] methods, wrapped as tools — discovered once by reflection, then cached.
      *
@@ -110,22 +121,25 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $tracer = $this->tracer();
         $span = $tracer?->enterStep($name);
+        $previousStep = $this->currentStep;
+        $this->currentStep = $name;   // so artifact() records under this step
 
         try {
             $rubric = $this->stepCritic($name);
             $this->critique = null;
 
-            // Run the step; if it declares a critic, judge its RESULT (the method's return value) and,
-            // while the critic is unhappy, let the supervisor guide a re-run — until the critic passes,
-            // the supervisor accepts/stops, or the budget runs out (the hard, deterministic backstop).
+            // Run the step; if it declares a critic, judge its RESULT (the return value) and the
+            // ARTIFACTS it produced, and while the critic is unhappy let the supervisor guide a re-run
+            // — until the critic passes, the supervisor accepts/stops, or the budget runs out.
             while (true) {
+                $this->stepArtifacts = [];   // a fresh attempt produces a fresh set
                 $raw = $this->{$name}();
                 $result = \is_string($raw) ? $raw : '';
                 if ($rubric === null) {
                     break;
                 }
 
-                $findings = $this->critic($result, $rubric);
+                $findings = $this->critic($name, $result, $rubric, $this->stepArtifacts);
                 if ($findings === null) {
                     break;   // the critic is satisfied
                 }
@@ -140,6 +154,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             }
         } finally {
             $this->critique = null;
+            $this->currentStep = $previousStep;
             $tracer?->exit($span);
         }
 
@@ -172,6 +187,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function critique(): ?string
     {
         return $this->critique;
+    }
+
+    /**
+     * Record a named output the current step produced — a piece of text, or a file the step wrote.
+     * Artifacts are journaled (so they show in `claw log`) and handed to the step's critic for review;
+     * a step that declares a critic SHOULD emit the artifacts the rubric is judged against. Pass either
+     * $text or $file (a path relative to the project), not both.
+     */
+    protected function artifact(string $label, ?string $text = null, ?string $file = null): void
+    {
+        $entry = $file !== null ? Artifact::file($label, $file) : Artifact::text($label, $text ?? '');
+        $this->stepArtifacts[] = $entry;
+        $this->tracer()?->artifact($entry->label, $entry->kind, $entry->value);
     }
 
     /** The issue this run was started under, if any — climb to it for wider context. */
@@ -433,15 +461,32 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return [];
     }
 
-    /** Judge a step's result against its rubric on the reviewer role: null = it passes, else the findings. */
-    private function critic(string $result, string $rubric): ?string
+    /**
+     * Judge a step's work against its rubric on the reviewer role: null = it passes, else the findings.
+     * The critic is an ORDINARY ai — it gets every tool, so it can actually verify (read the files the
+     * step wrote, run `php -l` or the tests) rather than judge a blurb. Its standing role, prepended
+     * here, is to REVIEW only: inspect and report, never do or fix the work itself. It is handed the
+     * step's reported result and the artifacts it produced.
+     *
+     * @param list<Artifact> $artifacts
+     */
+    private function critic(string $name, string $result, string $rubric, array $artifacts): ?string
     {
+        $rendered = $artifacts === []
+            ? '(the step recorded no artifacts)'
+            : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
+
         $verdict = trim($this->ai(
-            "You are a strict reviewer. Judge the work below ONLY against this rubric:\n{$rubric}\n\n"
-            . "Work:\n{$result}\n\n"
-            . "If it fully satisfies the rubric, reply with exactly: OK\n"
+            "You are a REVIEWER checking the work of step '{$name}'. Your ONLY job is to verify it "
+            . 'against the rubric below: inspect the artifacts, read the files, run linters/tests with '
+            . 'the tools as needed, and report. Do NOT implement, edit, or fix anything yourself — you '
+            . "judge and list findings, nothing more.\n\n"
+            . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
+            . "What the step reports it did:\n{$result}\n\n"
+            . "Artifacts the step produced:\n{$rendered}\n\n"
+            . "If the work fully satisfies the rubric, reply with exactly: OK\n"
             . 'Otherwise reply with the concrete problems that must be fixed.',
-            [],
+            null,   // every tool — a critic is a normal AI and must be able to verify, not just read
             'reviewer',
         ));
 

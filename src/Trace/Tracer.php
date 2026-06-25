@@ -107,6 +107,12 @@ final class Tracer
         $this->event(new TraceEvent('note', $level, ['action' => $action, 'message' => $message, 'context' => $context]));
     }
 
+    /** A named output a step produced — recorded under the current step so it shows in the journal. */
+    public function artifact(string $label, string $kind, string $value): void
+    {
+        $this->event(new TraceEvent('artifact', Level::Info, ['label' => $label, 'kind' => $kind, 'value' => $value]));
+    }
+
     private function open(TraceEvent $event): int
     {
         $id = ++$this->seq;
