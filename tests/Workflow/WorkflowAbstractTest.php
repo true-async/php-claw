@@ -94,6 +94,7 @@ final class WorkflowAbstractTest
         Assert::same($out, 'the answer');
         Assert::count($worker->requests[0]->tools, 1);          // only the palette is advertised
         Assert::same($worker->requests[0]->tools[0]->name, 'read');
+        Assert::true(str_contains($worker->requests[0]->system, '- read:'));   // and named in the system prompt
     }
 
     #[Test]

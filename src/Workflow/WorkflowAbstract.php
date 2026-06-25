@@ -269,6 +269,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
         $tracer?->prompt($prompt, $exposed);
 
+        // Spell the available tools into the system prompt too — the model gets them in the API tool
+        // list, but naming them up front makes it reliably reach for the right one (recall, done, ...)
+        // instead of only sometimes noticing them.
+        $system = $scope->findSystemPrompt() . $this->toolBriefing($palette);
+
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
         $ask = $scope->find(EnvKey::Ask);
@@ -277,7 +282,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $scope->findWorker(),
             $scope->executor(),
             $scope->findModelId(),
-            $scope->findSystemPrompt(),
+            $system,
             $scope->findRegistry()->specs(),
             $scope->findMaxHistory(),
             $tracer,
@@ -293,6 +298,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
         } finally {
             $tracer?->exit($span);
         }
+    }
+
+    /** A one-line-per-tool briefing appended to the system prompt, or '' when the call has no tools. */
+    private function toolBriefing(Registry $palette): string
+    {
+        $tools = $palette->all();
+        if ($tools === []) {
+            return '';
+        }
+
+        $lines = array_map(static fn (ToolInterface $t): string => "- {$t->name()}: {$t->description()}", $tools);
+
+        return "\n\nTools available to you this step — call them by name when useful:\n" . implode("\n", $lines);
     }
 
     /** The run's hierarchical tracer, if one is configured — else null (no tracing). */
