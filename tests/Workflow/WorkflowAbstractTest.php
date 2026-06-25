@@ -459,6 +459,40 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aWorkflowCanOverrideTheCriticsStandingRole(): void
+    {
+        $worker = new ScriptedAgent($this->answer('OK'));   // the step has no ai(); the critic is request 0
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['ok' => 'must be fine'];
+            }
+
+            protected function criticRole(): string
+            {
+                return 'ACT AS A SECURITY AUDITOR, NOT A STYLE REVIEWER.';
+            }
+
+            #[Step(critic: 'ok')]
+            public function make(): string
+            {
+                return 'the work';
+            }
+        };
+
+        $wf->run();
+
+        $block = $worker->requests[0]->messages[0]->content[0];
+        $prompt = $block instanceof TextBlock ? $block->text : '';
+        Assert::true(str_contains($prompt, 'ACT AS A SECURITY AUDITOR'));   // the override reached the critic
+    }
+
+    #[Test]
     public function anArtifactIsRecordedInTheRunsJournal(): void
     {
         $sink = new ArrayTraceSink();

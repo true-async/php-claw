@@ -477,10 +477,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
 
         $verdict = trim($this->ai(
-            "You are a REVIEWER checking the work of step '{$name}'. Your ONLY job is to verify it "
-            . 'against the rubric below: inspect the artifacts, read the files, run linters/tests with '
-            . 'the tools as needed, and report. Do NOT implement, edit, or fix anything yourself — you '
-            . "judge and list findings, nothing more.\n\n"
+            $this->criticRole() . "\n\n"
+            . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
             . "What the step reports it did:\n{$result}\n\n"
             . "Artifacts the step produced:\n{$rendered}\n\n"
@@ -491,6 +489,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
         ));
 
         return strtoupper($verdict) === 'OK' ? null : $verdict;
+    }
+
+    /**
+     * The standing role prepended to every critic call — what the reviewer IS and may do. The default
+     * casts it as a verify-only reviewer (inspect and report, never do or fix the work). A workflow
+     * overrides this when its review needs a different stance; the engine still appends the rubric,
+     * the step's result, its artifacts, and the OK/findings protocol.
+     */
+    protected function criticRole(): string
+    {
+        return 'You are a REVIEWER of a workflow step. Your ONLY job is to verify the work against the '
+            . 'rubric: inspect the artifacts, read the files, and run linters/tests with the tools as '
+            . 'needed, then report. Do NOT implement, edit, or fix anything yourself — you judge and '
+            . 'list findings, nothing more.';
     }
 
     /**
