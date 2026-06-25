@@ -36,8 +36,8 @@ final class ProbeWorkflow extends WorkflowAbstract
         $this->trail .= 'b';
     }
 
-    /** @param list<string> $tools */
-    public function callAi(string $prompt, array $tools = [], ?string $agent = null): string
+    /** @param ?list<string> $tools null = all tools, [] = none, list = only those */
+    public function callAi(string $prompt, ?array $tools = null, ?string $agent = null): string
     {
         return $this->ai($prompt, $tools, $agent);
     }

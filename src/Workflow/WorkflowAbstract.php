@@ -11,6 +11,7 @@ use Claw\Agent\SpeakerInterface;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
 use Claw\Trace\Level;
@@ -42,6 +43,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /** The critic/supervisor's latest guidance for the running step, exposed via {@see critique()}; transient. */
     private ?string $critique = null;
+
+    /**
+     * This workflow's own #[Tool] methods, wrapped as tools — discovered once by reflection, then cached.
+     *
+     * @var ?list<ToolInterface>
+     */
+    private ?array $localTools = null;
 
     /** This run's own environment scope — a child of the injected (project) env, so init() overrides locally. */
     private readonly Environment $env;
@@ -198,10 +206,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
     {
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
 
-        // The palette is a child scope holding the run's registry — full by default, or narrowed to
-        // exactly $tools when a step asks for least privilege. The model's specs and what the executor
-        // can resolve are the same set either way.
-        $registry = $this->env->findRegistry();
+        // The palette is a child scope holding the run's registry plus this workflow's own #[Tool]
+        // methods — full by default, or narrowed to exactly $tools when a step asks for least
+        // privilege. The model's specs and what the executor can resolve are the same set either way.
+        $registry = $this->withLocalTools($this->env->findRegistry());
         $palette = $tools === null ? $registry : $registry->only($tools);
         $scope = $this->env->child()->set(EnvKey::Registry, $palette);
 
@@ -247,6 +255,52 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $tracer = $this->env->find(EnvKey::Tracer);
 
         return $tracer instanceof Tracer ? $tracer : null;
+    }
+
+    /**
+     * The run's registry combined with this workflow's own {@see Tool}-marked methods. When the
+     * workflow defines none (the common case), the run's registry is returned untouched; otherwise a
+     * fresh registry holds both, the locals last so a workflow can shadow a global tool by name.
+     */
+    private function withLocalTools(Registry $registry): Registry
+    {
+        $local = $this->localTools();
+        if ($local === []) {
+            return $registry;
+        }
+
+        $combined = new Registry();
+        foreach ($registry->all() as $tool) {
+            $combined->add($tool);
+        }
+        foreach ($local as $tool) {
+            $combined->add($tool);
+        }
+
+        return $combined;
+    }
+
+    /**
+     * This workflow's {@see Tool}-marked methods, each wrapped as a {@see MethodTool}. Discovered once
+     * by reflection and cached; empty for a workflow that declares no local tools.
+     *
+     * @return list<ToolInterface>
+     */
+    private function localTools(): array
+    {
+        if ($this->localTools !== null) {
+            return $this->localTools;
+        }
+
+        $tools = [];
+        foreach (new \ReflectionClass($this)->getMethods() as $method) {
+            $attributes = $method->getAttributes(Tool::class);
+            if ($attributes !== []) {
+                $tools[] = new MethodTool($this, $method, $attributes[0]->newInstance());
+            }
+        }
+
+        return $this->localTools = $tools;
     }
 
     /** The model id configured for a named agent role, or null to keep the scope's default. */

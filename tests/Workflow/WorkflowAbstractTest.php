@@ -11,6 +11,7 @@ use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
+use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
@@ -25,6 +26,7 @@ use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\InMemoryStateStore;
 use Claw\Workflow\Step;
+use Claw\Workflow\Tool;
 use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStateStore;
 use Testo\Assert;
@@ -91,6 +93,71 @@ final class WorkflowAbstractTest
         Assert::same($out, 'the answer');
         Assert::count($worker->requests[0]->tools, 1);          // only the palette is advertised
         Assert::same($worker->requests[0]->tools[0]->name, 'read');
+    }
+
+    #[Test]
+    public function aWorkflowsOwnToolMethodIsAdvertisedAlongsideTheGlobalTools(): void
+    {
+        $worker = new ScriptedAgent($this->answer('ok'));
+        $registry = new Registry();
+        $registry->add($this->echoTool('read'));
+        $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'local-tool';
+            }
+
+            #[Tool(description: 'Shout the text back')]
+            public function shout(string $text): string
+            {
+                return strtoupper($text);
+            }
+
+            public function go(): string
+            {
+                return $this->ai('hi');   // null tools -> the whole palette, locals included
+            }
+        };
+
+        $wf->go();
+
+        $names = array_map(static fn ($spec): string => $spec->name, $worker->requests[0]->tools);
+        Assert::true(\in_array('read', $names, true));    // a global tool
+        Assert::true(\in_array('shout', $names, true));   // the workflow's own #[Tool] method
+    }
+
+    #[Test]
+    public function theModelCanCallAWorkflowsOwnToolMethodAndGetsItsReturnValue(): void
+    {
+        $shout = new ToolUseBlock('t1', 'shout', ['text' => 'hi']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$shout], [$shout], StopReason::ToolUse, new Usage()),
+            $this->answer('done'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public int $calls = 0;
+
+            public function name(): string
+            {
+                return 'local-tool';
+            }
+
+            #[Tool(description: 'Shout the text back')]
+            public function shout(string $text): string
+            {
+                $this->calls++;
+
+                return strtoupper($text);
+            }
+
+            public function go(): string
+            {
+                return $this->ai('hi');
+            }
+        };
+
+        Assert::same($wf->go(), 'done');   // the turn loop ran the local tool, then finished
+        Assert::same($wf->calls, 1);       // the model's tool call reached the workflow method
     }
 
     #[Test]
