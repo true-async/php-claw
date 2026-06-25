@@ -9,6 +9,7 @@ use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
 use Claw\Exceptions\WorkflowException;
+use Claw\Exceptions\WorkflowFinished;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\Registry;
@@ -100,8 +101,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     public function run(): void
     {
-        foreach ($this->stepMethods() as $name) {
-            $this->step($name);
+        try {
+            foreach ($this->stepMethods() as $name) {
+                $this->step($name);
+            }
+        } catch (WorkflowFinished $finished) {
+            // the model called the `done` tool: the task is solved, skip any remaining steps.
+            $this->tracer()?->log('done', $finished->summary, [], Level::Notice);
         }
     }
 

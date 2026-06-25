@@ -8,6 +8,7 @@ use Claw\Agent\Budget;
 use Claw\Agent\ConsoleSpeaker;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
+use Claw\Exceptions\WorkflowFinished;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
@@ -15,6 +16,7 @@ use Claw\Project\Project;
 use Claw\Project\ProjectStore;
 use Claw\Tool\BashTool;
 use Claw\Tool\DefineWorkflowTool;
+use Claw\Tool\FinishTool;
 use Claw\Tool\ListFilesTool;
 use Claw\Tool\ReadFileTool;
 use Claw\Tool\RecallTool;
@@ -196,6 +198,7 @@ final class WorkflowMode
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
         $registry->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
+        $registry->add(new FinishTool());   // the model can declare the task solved and end the run
 
         $env = new Environment()
             ->set(EnvKey::Worker, $agent)
@@ -283,6 +286,8 @@ final class WorkflowMode
                 }
                 $solver->run();
                 break;
+            } catch (WorkflowFinished) {
+                break;   // the solver called `done`: a clean finish, not a crash to repair
             } catch (\Throwable $e) {
                 if (++$attempt > self::MAX_REPAIRS) {
                     $tracer->exit($solverSpan);

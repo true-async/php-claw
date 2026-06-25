@@ -16,6 +16,7 @@ use Claw\Agent\Usage;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Tool\FinishTool;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
@@ -555,6 +556,40 @@ final class WorkflowAbstractTest
         }
 
         Assert::true($threw);
+    }
+
+    #[Test]
+    public function theDoneToolFinishesTheRunAndSkipsRemainingSteps(): void
+    {
+        // The model calls `done` in the first step; the workflow finishes and the second step never runs.
+        $doneCall = new ToolUseBlock('d1', 'done', ['summary' => 'subtract added, lint clean']);
+        $worker = new ScriptedAgent(new AgentResponse([$doneCall], [$doneCall], StopReason::ToolUse, new Usage()));
+        $registry = new Registry();
+        $registry->add(new FinishTool());
+        $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
+            public bool $secondRan = false;
+
+            public function name(): string
+            {
+                return 'fin';
+            }
+
+            #[Step]
+            public function first(): void
+            {
+                $this->ai('do the whole task');   // the model decides it is done and calls the tool
+            }
+
+            #[Step]
+            public function second(): void
+            {
+                $this->secondRan = true;
+            }
+        };
+
+        $wf->run();
+
+        Assert::false($wf->secondRan);   // `done` in step 1 skipped step 2
     }
 
     #[Test]
