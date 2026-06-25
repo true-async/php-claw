@@ -59,8 +59,36 @@ final class WorkflowValidator
             $this->assertNotForbiddenFunction($token, $significant[$i - 1] ?? null, $significant[$i + 1] ?? null);
         }
 
+        $this->assertStepsAreProtected($code);
+
         if ($expectedClass !== null) {
             $this->assertDeclaresExpectedClass($code, $expectedClass);
+        }
+    }
+
+    /**
+     * A #[Step] method is framework-driven — the base run() calls it — not part of the workflow's
+     * public surface, and it must be reachable from the base scope. So it must be declared `protected`:
+     * `public` leaks it, `private` (or no modifier) is wrong and a private one cannot even be called
+     * from the base. Reject anything else so the generator is forced to write steps correctly.
+     *
+     * @throws WorkflowException
+     */
+    private function assertStepsAreProtected(string $code): void
+    {
+        $pattern = '/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b[^\]]*\]\s*'
+            . '((?:(?:public|private|protected|static|final|abstract)\s+)*)function\s+(\w+)/';
+
+        if (preg_match_all($pattern, $code, $matches, PREG_SET_ORDER) === false) {
+            return;
+        }
+
+        foreach ($matches as $match) {
+            if (!preg_match('/\bprotected\b/', $match[1])) {
+                $found = trim($match[1]) === '' ? 'public (no modifier)' : trim($match[1]);
+
+                throw new WorkflowException("step method '{$match[2]}' must be declared protected, found {$found}");
+            }
         }
     }
 

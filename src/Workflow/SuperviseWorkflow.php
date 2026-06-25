@@ -27,13 +27,13 @@ final class SuperviseWorkflow extends WorkflowAbstract
     }
 
     #[Step]
-    public function repair(): void
+    protected function repair(): void
     {
         $this->fixed = $this->extractCode($this->ai($this->repairPrompt(), [], 'supervisor'));
     }
 
     #[Step]
-    public function save(): void
+    protected function save(): void
     {
         $name = (string) $this->param('fixedName');
 

@@ -95,7 +95,7 @@ final class GenerateIssueWorkflowTest
                 }
 
                 #[Step]
-                public function summarize(): void
+                protected function summarize(): void
                 {
                     \$this->summary = \$this->ai('Summarize the project.', ['read_file']);
                 }

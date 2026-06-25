@@ -28,19 +28,19 @@ final class ReviewFileWorkflow extends WorkflowAbstract
     }
 
     #[Step]
-    public function read(): void
+    protected function read(): void
     {
         $this->source = $this->tool('read_file', ['path' => (string) $this->param('path')]);
     }
 
     #[Step]
-    public function findIssues(): void
+    protected function findIssues(): void
     {
         $this->issues = $this->ai("List the problems in this file:\n\n" . $this->source);
     }
 
     #[Step]
-    public function propose(): void
+    protected function propose(): void
     {
         $this->proposal = $this->ai("Propose concrete fixes for:\n\n" . $this->issues);
 

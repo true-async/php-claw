@@ -63,7 +63,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     }
 
     #[Step]
-    public function understand(): void
+    protected function understand(): void
     {
         $this->plan = $this->ai(
             'You are planning how to solve a task by writing a workflow. Inspect the project if it '
@@ -83,7 +83,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
      * the chosen tier. Kept as its own step so the decision — and its reasoning — is visible in the trace.
      */
     #[Step]
-    public function assess(): void
+    protected function assess(): void
     {
         $verdict = strtolower(trim($this->ai(
             'Rate how hard this coding task is for an AI to solve correctly. Reply with EXACTLY one '
@@ -102,7 +102,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     }
 
     #[Step]
-    public function draft(): void
+    protected function draft(): void
     {
         $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));   // [] = return code, don't act
     }
@@ -114,7 +114,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
      * truly solved. On a rejection, one strong-tier revision pass folds the findings back in.
      */
     #[Step]
-    public function review(): void
+    protected function review(): void
     {
         $verdict = trim($this->ai(
             'You are a senior engineer reviewing a GENERATED solver workflow before it is allowed to '
@@ -143,7 +143,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     }
 
     #[Step]
-    public function save(): void
+    protected function save(): void
     {
         $name = (string) $this->param('solverName');
 
@@ -222,7 +222,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - `final class {$class} extends WorkflowAbstract`
             - implement `public function name(): string`
             - keep state in plain typed properties
-            - write each step as a method marked `#[Step]`; the default run() drives them in declaration order
+            - write each step as a `protected` method marked `#[Step]` (NOT public, NOT private — the base run() drives them and the code is rejected otherwise); the default run() runs them in declaration order
             - to have a step's result reviewed automatically, mark it `#[Step(critic: '<name>')]`, make that method RETURN its result as a string, and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for the SOLID-review (step 3) and test&accept (step 5) steps
             - record what a step produced with `\$this->artifact('<label>', text: '<summary>')` or `\$this->artifact('<label>', file: '<path it wrote>')`. Artifacts show up in the run log AND are handed to that step's critic — so a critic step MUST emit the artifacts its rubric is judged against (the changed file, the test output), or the critic has nothing concrete to check
             - the critic is a REAL reviewer AI with every tool: it will OPEN the file artifacts, run `php -l`/the tests itself, and judge — it does not just read your summary. So make the work actually correct; a confident summary over a broken file will be caught

@@ -560,36 +560,6 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function aPrivateStepMethodStillRuns(): void
-    {
-        // A generated solver may write a step private; the base must call it anyway (via reflection).
-        $wf = new class ($this->config(), 'r1') extends WorkflowAbstract {
-            public string $trail = '';
-
-            public function name(): string
-            {
-                return 'vis';
-            }
-
-            /** Exists only so static analysis sees `hidden` referenced; run() calls it via reflection. */
-            public function reference(): void
-            {
-                $this->hidden();
-            }
-
-            #[Step]
-            private function hidden(): void
-            {
-                $this->trail .= 'h';
-            }
-        };
-
-        $wf->run();   // drives #[Step] methods by reflection — private must still run
-
-        Assert::same($wf->trail, 'h');
-    }
-
-    #[Test]
     public function theDoneToolFinishesTheRunAndSkipsRemainingSteps(): void
     {
         // The model calls `done` in the first step; the workflow finishes and the second step never runs.

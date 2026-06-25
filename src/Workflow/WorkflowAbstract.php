@@ -149,13 +149,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // or the budget runs out.
             $round = 0;
             $maxRounds = $this->stepMaxRounds($name);
-            // Invoke via reflection (setAccessible) so a generated solver's step works whether the
-            // model wrote it public, protected or private — `$this->{$name}()` from this base scope
-            // cannot reach a subclass private method, and the model's visibility choice is arbitrary.
-            $method = new \ReflectionMethod($this, $name);
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
-                $raw = $method->invoke($this);
+                $raw = $this->{$name}();
                 $result = \is_string($raw) ? $raw : '';
                 if ($rubric === null) {
                     break;

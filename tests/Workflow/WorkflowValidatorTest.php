@@ -56,6 +56,19 @@ final class WorkflowValidatorTest
         Assert::false($this->rejected("<?php\n \$ctx->system(['x']);"));
     }
 
+    #[Test]
+    public function requiresStepMethodsToBeProtected(): void
+    {
+        $step = static fn (string $vis): string => "<?php\n use Claw\\Workflow\\Step;\n class W { #[Step]\n {$vis} function go(): void {} }";
+
+        Assert::true($this->rejected($step('public')));    // public leaks the step
+        Assert::true($this->rejected($step('private')));   // private can't be called from the base
+        Assert::true($this->rejected("<?php\n use Claw\\Workflow\\Step;\n class W { #[Step]\n function go(): void {} }"));   // no modifier = public
+        Assert::false($this->rejected($step('protected')));   // the one allowed form
+        // attribute arguments don't confuse the check
+        Assert::false($this->rejected("<?php\n use Claw\\Workflow\\Step;\n class W { #[Step(critic: 'r')]\n protected function go(): void {} }"));
+    }
+
     private function rejected(string $code, ?string $expectedClass = null): bool
     {
         try {
