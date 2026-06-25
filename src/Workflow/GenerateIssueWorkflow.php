@@ -101,7 +101,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     #[Step]
     public function draft(): void
     {
-        $this->code = $this->extractCode($this->ai($this->draftPrompt(), agent: 'worker-smart'));
+        $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));   // [] = return code, don't act
     }
 
     /**
@@ -134,7 +134,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             "A senior reviewer rejected the workflow you wrote. Problems to fix:\n{$verdict}\n\n"
             . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
             . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
-            agent: 'worker-smart',
+            [],
+            'worker-smart',
         ));
     }
 
@@ -154,7 +155,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             "The workflow class you wrote was rejected: {$result}\n\n"
             . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
             . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
-            agent: 'worker-smart',
+            [],
+            'worker-smart',
         ));
 
         $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
@@ -202,8 +204,9 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - write each step as a method marked `#[Step]`; the default run() drives them in declaration order
             - to have a step's result reviewed automatically, mark it `#[Step(critic: '<name>')]`, make that method RETURN its result as a string, and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for the SOLID-review (step 3) and test&accept (step 5) steps
             - the critic name is just a key: for EVERY name you use you MUST define its actual rules by overriding `protected function criticRules(): array`, returning `['<name>' => '<the concrete criteria the reviewer checks>', ...]` — the reviewer is judged ONLY against this text, so spell the criteria out in full; a name with no rules makes the run fail
-            - reach the model with `\$this->ai(string \$prompt, array \$tools, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
-            - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (cheap default), worker-smart (stronger model), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
+            - reach the model with `\$this->ai(string \$prompt, ?array \$tools = null, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
+            - by DEFAULT `\$this->ai(\$prompt)` exposes EVERY tool to the model — that is the norm, let a step use whatever it needs; pass an explicit list ONLY to deliberately restrict, or `[]` for a pure-reasoning call that must not act
+            - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, null, agent: 'reviewer')`; roles: worker (cheap default), worker-smart (stronger model), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
             - this task was assessed as **{$this->difficulty}**; route the solver's own implementation/test steps that call the model to `agent: '{$this->workerTier}'` so the work runs on the right-sized model (keep reviewer/supervisor steps on their roles)
             - when you NEED a missing detail or a decision from a person (an incomplete issue, a foundational design choice), do NOT guess: call `\$this->ask(string \$question): string` and use the returned answer — behind it may be a human or a supervisor agent
             - the run is budget-limited (tokens and time); work in focused steps and do not loop or re-read pointlessly, an exhausted budget stops the run

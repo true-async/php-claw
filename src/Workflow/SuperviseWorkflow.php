@@ -85,8 +85,9 @@ final class SuperviseWorkflow extends WorkflowAbstract
             - KEEP the same `#[Step]` method names and the same typed property names as the broken
               solver: the run is mid-flight, and its saved state is restored by property name and
               resumed by step name, so renaming them loses progress
-            - reach the model with `\$this->ai(string \$prompt, array \$tools, ?string \$agent = null)`,
-              tools with `\$this->tool(string \$name, array \$params)`, and a person or supervisor with
+            - reach the model with `\$this->ai(string \$prompt, ?array \$tools = null, ?string \$agent = null)`
+              (\$tools defaults to ALL tools; pass a list to restrict or `[]` for none), tools with
+              `\$this->tool(string \$name, array \$params)`, and a person or supervisor with
               `\$this->ask(string \$question): string`; all of them return STRINGS
             - the ONLY way to touch files or the shell is `\$this->tool(...)`; file paths are relative to the project root
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval,

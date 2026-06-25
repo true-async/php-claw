@@ -12,6 +12,7 @@ use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\ToolCall;
+use Claw\Tool\ToolInterface;
 use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
@@ -178,32 +179,41 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * A model call: one exchange over $prompt with the named tools, returning the final text. The
-     * turn loop that drives it (tool round-trips and all) is an internal detail. The tools are a
-     * least-privilege palette — the model is shown, and can run, only these.
+     * A model call: one exchange over $prompt, returning the final text. The turn loop that drives it
+     * (tool round-trips and all) is an internal detail.
+     *
+     * By default the model is shown — and can run — EVERY tool the run has: a capable agent should
+     * reach for whatever the task needs, so a full palette is the norm. Narrowing is the exception,
+     * a deliberate least-privilege choice for a step that must NOT act a certain way: pass an explicit
+     * list to expose only those tools, or `[]` to forbid tools entirely (a pure-reasoning judge, or a
+     * call whose whole job is to return text/code rather than do anything).
      *
      * Pass $agent to route the call to a named agent role (worker/reviewer/supervisor/planner, set
      * up in the run's {@see EnvKey::Agents} map): the role's model is used for just this call, on
      * the same access. An unknown role falls back to the scope's default model.
      *
-     * @param list<string> $tools tool names to expose to the model for this call
+     * @param ?list<string> $tools null = every tool (default); a list = only those; [] = none
      */
-    protected function ai(string $prompt, array $tools = [], ?string $agent = null): string
+    protected function ai(string $prompt, ?array $tools = null, ?string $agent = null): string
     {
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
 
-        // The palette is a child scope holding a registry narrowed to exactly these tools, so what
-        // the model is shown (specs) and what the executor can resolve (get) are one set.
-        $scope = $this->env->child()->set(EnvKey::Registry, $this->env->findRegistry()->only($tools));
+        // The palette is a child scope holding the run's registry — full by default, or narrowed to
+        // exactly $tools when a step asks for least privilege. The model's specs and what the executor
+        // can resolve are the same set either way.
+        $registry = $this->env->findRegistry();
+        $palette = $tools === null ? $registry : $registry->only($tools);
+        $scope = $this->env->child()->set(EnvKey::Registry, $palette);
 
         $model = $agent !== null ? $this->agentModel($agent) : null;
         if ($model !== null) {
             $scope->set(EnvKey::ModelId, $model);   // route this call to the role's model
         }
 
+        $exposed = array_map(static fn (ToolInterface $t): string => $t->name(), $palette->all());
         $tracer = $this->tracer();
         $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
-        $tracer?->prompt($prompt, $tools);
+        $tracer?->prompt($prompt, $exposed);
 
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
