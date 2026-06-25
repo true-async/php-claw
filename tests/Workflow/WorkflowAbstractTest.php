@@ -523,6 +523,41 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aStuckCriticEscalatesAtTheRoundCapAndStopsWithNoOneToAsk(): void
+    {
+        // The critic never passes and there is no supervisor channel. Below the cap the step
+        // self-corrects on findings; at the per-step cap (2) it escalates — and with no one to ask,
+        // it stops rather than rework forever.
+        $worker = new ScriptedAgent($this->answer('nope'), $this->answer('nope'), $this->answer('nope'));
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['x' => 'must be perfect'];
+            }
+
+            #[Step(critic: 'x', maxRounds: 2)]
+            public function make(): string
+            {
+                return 'work';
+            }
+        };
+
+        $threw = false;
+        try {
+            $wf->run();
+        } catch (WorkflowException) {
+            $threw = true;
+        }
+
+        Assert::true($threw);
+    }
+
+    #[Test]
     public function aStepWhoseCriticPassesRunsOnce(): void
     {
         $worker = new ScriptedAgent(

@@ -29,6 +29,14 @@ final class DefaultTurnLoop implements TurnLoopInterface
     /** The marker a worker ends a turn with to ask the ask channel instead of finishing. */
     private const string QUESTION_MARKER = '[question]';
 
+    /**
+     * Soft cap on model turns in ONE exchange. A step can legitimately take many turns (running a test
+     * gate, retrying), so this is generous — but a runaway loop (the same failing command over and
+     * over) should not churn forever. Every MAX_TURNS turns the loop pauses to ask the ask channel
+     * whether to keep going; with no one to ask it stops and returns what it has, rather than run away.
+     */
+    private const int MAX_TURNS = 50;
+
     /** Appended to the system prompt when an ask channel is present, teaching that marker. */
     private const string ASK_INSTRUCTION = "\n\nIf you need input or a decision from a person to "
         . 'proceed, do not guess: end your turn with no tool call and a line beginning "[question]" '
@@ -63,6 +71,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         $totalInput  = 0;
         $totalOutput = 0;
         $turnNo      = 0;
+        $lastText    = null;
 
         // With an ask channel present, teach the worker the [question] marker so it can pause for
         // input instead of finishing; without one the system prompt is untouched (headless).
@@ -76,10 +85,17 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 throw new ContextLengthException("History reached the configured limit of {$this->maxHistory} messages");
             }
 
+            // Every MAX_TURNS turns, pause and ask whether to keep going — a runaway loop should not
+            // churn forever. With no one to ask, stop here and return the last answer we have.
+            if ($turnNo > 0 && $turnNo % self::MAX_TURNS === 0 && !$this->keepGoing($turnNo)) {
+                return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput));
+            }
+
             // The model is stateless: every call carries the FULL history (system +
             // all messages + tool results). The repeated prefix is cheap via prompt
             // caching; trimming/summarization is a later layer.
-            $turn = $this->tracer?->enterTurn(++$turnNo, $this->model);
+            $turnNo++;   // NOT inside the tracer call below: a null tracer would skip the increment
+            $turn = $this->tracer?->enterTurn($turnNo, $this->model);
 
             $response = $this->agent->send(new AgentRequest(
                 model: $this->model,
@@ -90,6 +106,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
             $totalInput  += $response->usage->inputTokens;
             $totalOutput += $response->usage->outputTokens;
+            $lastText = $response->text;
 
             $this->tracer?->reply(
                 $response->text ?? '',
@@ -149,6 +166,26 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
         }
+    }
+
+    /**
+     * The turn-cap checkpoint: ask the ask channel whether to keep going after a long run of turns.
+     * True = continue. With no channel, or no answer, or anything other than "continue", stop — a
+     * headless run must not loop forever. This is the soft backstop for a model stuck repeating a
+     * failing command; the budget is the hard one.
+     */
+    private function keepGoing(int $turnNo): bool
+    {
+        if (!$this->ask instanceof SpeakerInterface) {
+            return false;   // headless: stop at the cap rather than run away
+        }
+
+        $reply = $this->ask->reply(
+            "This step has run {$turnNo} model turns without finishing (tests, retries, and the like). "
+            . "Reply 'continue' to keep going, or anything else to stop here.",
+        );
+
+        return $reply !== null && str_starts_with(strtolower(trim($reply)), 'continue');
     }
 
     /**

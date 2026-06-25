@@ -38,6 +38,14 @@ use Claw\Trace\Tracer;
  */
 abstract class WorkflowAbstract implements WorkflowInterface
 {
+    /**
+     * Default soft cap on critic rework rounds for a step: once a step has failed review this many
+     * times, stop auto-retrying and escalate — ask the supervisor whether to accept, try once more, or
+     * stop. A step overrides it per case via `#[Step(maxRounds: N)]`. A checkpoint, not a hard kill;
+     * the budget is still the ultimate backstop.
+     */
+    private const int DEFAULT_MAX_ROUNDS = 50;
+
     /** @var list<string> step methods already completed (restored from the store) — skipped on re-run */
     private array $done;
 
@@ -130,7 +138,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
             // Run the step; if it declares a critic, judge its RESULT (the return value) and the
             // ARTIFACTS it produced, and while the critic is unhappy let the supervisor guide a re-run
-            // — until the critic passes, the supervisor accepts/stops, or the budget runs out.
+            // — until the critic passes, the supervisor accepts/stops, the soft round cap escalates,
+            // or the budget runs out.
+            $round = 0;
+            $maxRounds = $this->stepMaxRounds($name);
             while (true) {
                 $this->stepArtifacts = [];   // a fresh attempt produces a fresh set
                 $raw = $this->{$name}();
@@ -144,7 +155,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
                     break;   // the critic is satisfied
                 }
 
-                $guidance = $this->superviseStep($name, $result, $findings);
+                $guidance = $this->superviseStep($name, $result, $findings, ++$round, $maxRounds);
                 if ($guidance === null) {
                     break;   // the supervisor accepted the work as-is
                 }
@@ -449,6 +460,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return $rules;
     }
 
+    /** The soft critic-round cap for a step — its `#[Step(maxRounds: N)]`, else the workflow default. */
+    private function stepMaxRounds(string $name): int
+    {
+        $attributes = new \ReflectionMethod($this, $name)->getAttributes(Step::class);
+        $max = $attributes === [] ? null : $attributes[0]->newInstance()->maxRounds;
+
+        return $max !== null && $max > 0 ? $max : self::DEFAULT_MAX_ROUNDS;
+    }
+
     /**
      * The rules each critic judges by, keyed by the name used in `#[Step(critic: '<name>')]`. A
      * workflow that uses critics overrides this to spell out, per critic, the concrete criteria the
@@ -507,24 +527,44 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * The critic rejected the step — consult the supervisor (the ask channel; behind it a supervisor
-     * agent, then a human). Returns guidance for a re-run, or null to accept the work as-is. With no
-     * channel the run self-corrects on the critic's own findings.
+     * agent, then a human). Returns guidance for a re-run, or null to accept the work as-is.
      *
-     * @throws WorkflowException when the supervisor says to stop
+     * Below {@see MAX_CRITIC_ROUNDS} this self-corrects on the critic's findings when no one is on the
+     * channel (the normal autonomous case). At/after the cap it ESCALATES: the round count looks stuck,
+     * so it asks the supervisor whether to accept, retry, or stop — and if there is no one to ask, it
+     * stops the step rather than churn the same rework forever.
+     *
+     * @throws WorkflowException when the supervisor says to stop, or the cap is hit with no one to ask
      */
-    private function superviseStep(string $name, string $result, string $findings): ?string
+    private function superviseStep(string $name, string $result, string $findings, int $round, int $maxRounds): ?string
     {
+        $stuck = $round >= $maxRounds;
         $channel = $this->env->find(EnvKey::Ask);
+
         if (!$channel instanceof SpeakerInterface) {
+            if ($stuck) {
+                throw new WorkflowException(
+                    "step '{$name}' still failed review after {$round} rounds, with no supervisor to escalate to",
+                );
+            }
+
             return $findings;   // no supervisor/human -> self-correct using the critic's findings
         }
 
-        $reply = $channel->reply(
-            "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
-            . "The work:\n{$result}\n\n"
-            . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.",
-        );
+        $prompt = $stuck
+            ? "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
+                . "Latest findings:\n{$findings}\n\nThe work:\n{$result}\n\n"
+                . "Is this OK? Reply 'accept' to keep it as is, 'stop' to abort, or guidance for one more try."
+            : "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
+                . "The work:\n{$result}\n\n"
+                . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.";
+
+        $reply = $channel->reply($prompt);
         if ($reply === null) {
+            if ($stuck) {
+                throw new WorkflowException("step '{$name}' still failed review after {$round} rounds");
+            }
+
             return $findings;   // the chain passed all the way up with no answer -> self-correct
         }
 

@@ -18,8 +18,16 @@ namespace Claw\Workflow;
 #[\Attribute(\Attribute::TARGET_METHOD)]
 final class Step
 {
-    /** @param ?string $critic the rubric the step's result is judged against (null = no critic) */
-    public function __construct(public ?string $critic = null)
-    {
+    /**
+     * @param ?string $critic    the critic name this step's result is judged against (null = no critic)
+     * @param ?int    $maxRounds soft cap on critic rework rounds for THIS step before the run escalates
+     *                           to the supervisor (null = the workflow default). Raise it for a step
+     *                           that legitimately churns — runs a test gate, retries — and lower it for
+     *                           a cheap one. The budget is still the ultimate backstop.
+     */
+    public function __construct(
+        public ?string $critic = null,
+        public ?int $maxRounds = null,
+    ) {
     }
 }

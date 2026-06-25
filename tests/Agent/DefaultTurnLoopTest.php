@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tests\Agent;
 
+use Claw\Agent\AgentInterface;
+use Claw\Agent\AgentRequest;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\Budget;
 use Claw\Agent\DefaultTurnLoop;
@@ -51,6 +53,32 @@ final class DefaultTurnLoopTest
         Assert::same($agent->requests[0]->model, 'model-x');
         Assert::same($agent->requests[0]->system, 'you are claw');
         Assert::same($agent->requests[0]->tools[0]->name, 'echo');
+    }
+
+    #[Test]
+    public function aRunawayLoopStopsAtTheTurnCapInsteadOfChurningForever(): void
+    {
+        // A model that never finishes — every turn is another tool call. With no ask channel the loop
+        // must stop at the soft turn cap and return, not spin forever (this test would hang otherwise).
+        $agent = new class () implements AgentInterface {
+            public int $calls = 0;
+
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $this->calls++;
+                $use = new ToolUseBlock('t' . $this->calls, 'echo', []);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $executor = new RecordingExecutor(
+            static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'ok', false),
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');   // no ask channel -> stop at the cap
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::same($agent->calls, 50);   // ran exactly MAX_TURNS turns, then stopped
     }
 
     #[Test]
