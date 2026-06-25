@@ -420,11 +420,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * A tool call through the run's executor. Throws if the tool reports an error.
+     * A tool call through the run's executor. A tool error does NOT throw: its message is returned
+     * as the result string (prefixed so it is unmistakable), exactly as a tool error inside {@see
+     * ai()} is handed back to the model rather than crashing the turn. A step that feeds the result
+     * into a later ai() thus lets the model see and react to the failure — a wrong path, a red test —
+     * instead of the whole run dying on one bad call.
      *
      * @param array<string, mixed> $params
-     *
-     * @throws WorkflowException
      */
     protected function tool(string $name, array $params): string
     {
@@ -435,7 +437,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $tracer?->toolResult($name, $result->content, $result->isError);
         if ($result->isError) {
-            throw new WorkflowException("tool '{$name}' failed: " . $result->content);
+            return "tool '{$name}' failed: " . $result->content;
         }
 
         return $result->content;

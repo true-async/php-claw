@@ -104,18 +104,15 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function toolThrowsWhenTheCallErrors(): void
+    public function toolReturnsTheErrorAsAStringInsteadOfThrowing(): void
     {
         $wf = new ProbeWorkflow($this->config(), 'r1');   // empty registry
 
-        $threw = false;
-        try {
-            $wf->callTool('nope', []);   // unknown tool -> error result -> WorkflowException
-        } catch (WorkflowException) {
-            $threw = true;
-        }
+        // An unknown tool errors; tool() hands the failure back as a string (so a step can feed it to
+        // the model) rather than crashing the run — mirroring how a tool error inside ai() is handled.
+        $result = $wf->callTool('nope', []);
 
-        Assert::true($threw);
+        Assert::true(str_starts_with($result, "tool 'nope' failed: "));
     }
 
     #[Test]

@@ -143,22 +143,25 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     {
         $name = (string) $this->param('solverName');
 
-        try {
-            $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
-
+        // tool() no longer throws on a validator rejection; the saved-confirmation contains "saved as",
+        // a rejection returns the validator's complaint. Hand that complaint back for one repair pass.
+        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
+        if (str_contains($result, 'saved as')) {
             return;
-        } catch (WorkflowException $e) {
-            // One repair pass: hand the validator's complaint back to the model and retry once.
-            $this->code = $this->extractCode($this->ai(
-                "The workflow class you wrote was rejected: {$e->getMessage()}\n\n"
-                . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-                . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
-                agent: 'worker-smart',
-            ));
         }
 
-        // A second failure surfaces to the run-path, which marks the run failed.
-        $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
+        $this->code = $this->extractCode($this->ai(
+            "The workflow class you wrote was rejected: {$result}\n\n"
+            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
+            . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
+            agent: 'worker-smart',
+        ));
+
+        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
+        if (!str_contains($result, 'saved as')) {
+            // A second failure surfaces to the run-path, which marks the run failed.
+            throw new WorkflowException($result);
+        }
     }
 
     /** The issue's title and description as a compact task brief — shared by the planning steps. */
@@ -208,6 +211,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             {$toolDocs}
             - file paths are relative to the project root, EXACTLY as list_files shows them (e.g. 'src/Calculator.php', NOT 'Calculator.php'); when unsure of a path, call list_files at run time inside a step rather than hardcoding a guess
             - `\$this->tool(...)` returns the tool's raw output as a STRING and `\$this->ai(...)` returns the model's text as a STRING — never index them like arrays (no `\$result['content']`); parse the string if you need to
+            - a tool error does NOT throw — `\$this->tool(...)` returns the failure as a string starting `tool '<name>' failed: ...`; check for that and recover (e.g. a wrong path: call list_files and retry) or fold the message into the next `\$this->ai(...)` so the model fixes it, rather than blindly using a failed result
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
 
             Return ONLY the PHP source — no prose, no markdown fences.

@@ -37,23 +37,26 @@ final class SuperviseWorkflow extends WorkflowAbstract
     {
         $name = (string) $this->param('fixedName');
 
-        try {
-            $this->tool('define_workflow', ['name' => $name, 'code' => $this->fixed, 'shared' => true]);
-
+        // tool() no longer throws on a rejection; a save returns "saved as", a rejection the validator's
+        // complaint. Hand that complaint back to the supervisor for one repair pass, then retry.
+        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->fixed, 'shared' => true]);
+        if (str_contains($result, 'saved as')) {
             return;
-        } catch (WorkflowException $e) {
-            // One repair pass: hand the validator's complaint back to the supervisor and retry once.
-            $this->fixed = $this->extractCode($this->ai(
-                "The corrected class was rejected: {$e->getMessage()}\n\n"
-                . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-                . $this->repairPrompt() . "\n\nThe code you produced was:\n\n" . $this->fixed,
-                [],
-                'supervisor',
-            ));
         }
 
-        // A second failure surfaces to the run-path, which gives up on this repair attempt.
-        $this->tool('define_workflow', ['name' => $name, 'code' => $this->fixed, 'shared' => true]);
+        $this->fixed = $this->extractCode($this->ai(
+            "The corrected class was rejected: {$result}\n\n"
+            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
+            . $this->repairPrompt() . "\n\nThe code you produced was:\n\n" . $this->fixed,
+            [],
+            'supervisor',
+        ));
+
+        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->fixed, 'shared' => true]);
+        if (!str_contains($result, 'saved as')) {
+            // A second failure surfaces to the run-path, which gives up on this repair attempt.
+            throw new WorkflowException($result);
+        }
     }
 
     private function repairPrompt(): string
