@@ -50,6 +50,10 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     private string $plan = '';
     private string $code = '';
 
+    /** The worker tier assess() decided this task warrants — folded into the draft's step routing. */
+    private string $workerTier = 'worker';
+    private string $difficulty = 'moderate';
+
     public function name(): string
     {
         return 'generate-issue-workflow';
@@ -58,25 +62,80 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     #[Step]
     public function understand(): void
     {
-        $issue = $this->issue();
-        $task = $issue !== null
-            ? "Title: {$issue->title}\n\nDescription: {$issue->description}"
-            : 'No issue was attached to this run.';
-
         $this->plan = $this->ai(
             'You are planning how to solve a task by writing a workflow. Inspect the project if it '
             . 'helps (read_file, list_files), then, in a few concrete sentences: outline the steps a '
             . 'workflow should take to solve this task, AND assess whether the project is mature with '
             . 'an established architecture and whether the change is foundational — this decides '
-            . "whether a human must approve the design before it is implemented:\n\n" . $task,
+            . "whether a human must approve the design before it is implemented:\n\n" . $this->taskSummary(),
             ['read_file', 'list_files'],
+            'worker-smart',   // planning a whole workflow is heavy thinking — use the strong tier
         );
+    }
+
+    /**
+     * Judge how hard the task is and pick the model tier the GENERATED solver should run its steps
+     * on: a trivial fix wastes money on the strong model, a subtle change needs it. The verdict
+     * ('worker' vs 'worker-smart') is folded into the draft, so the solver routes its `ai()` calls to
+     * the chosen tier. Kept as its own step so the decision — and its reasoning — is visible in the trace.
+     */
+    #[Step]
+    public function assess(): void
+    {
+        $verdict = strtolower(trim($this->ai(
+            'Rate how hard this coding task is for an AI to solve correctly. Reply with EXACTLY one '
+            . 'word on the first line — `simple`, `moderate`, or `complex` — then one sentence of '
+            . 'reasoning. Simple = a localized, mechanical change; complex = subtle logic, wide blast '
+            . "radius, or design judgement.\n\nTask:\n{$this->taskSummary()}\n\nPlan:\n{$this->plan}",
+            [],
+            'supervisor-smart',
+        )));
+
+        $this->difficulty = str_contains($verdict, 'complex') ? 'complex'
+            : (str_contains($verdict, 'simple') ? 'simple' : 'moderate');
+
+        // A simple task runs cheap; anything with real judgement gets the strong tier.
+        $this->workerTier = $this->difficulty === 'simple' ? 'worker' : 'worker-smart';
     }
 
     #[Step]
     public function draft(): void
     {
-        $this->code = $this->extractCode($this->ai($this->draftPrompt()));
+        $this->code = $this->extractCode($this->ai($this->draftPrompt(), agent: 'worker-smart'));
+    }
+
+    /**
+     * The supervisor reviews the finished solver before it is saved: not "is it valid PHP" (the
+     * validator does that) but "will it actually work" — does every step do real work via tools/ai
+     * rather than return a placeholder, is each critic name backed by criticRules(), is the task
+     * truly solved. On a rejection, one strong-tier revision pass folds the findings back in.
+     */
+    #[Step]
+    public function review(): void
+    {
+        $verdict = trim($this->ai(
+            'You are a senior engineer reviewing a GENERATED solver workflow before it is allowed to '
+            . 'run. Judge whether it will actually solve the task — not its syntax. Reject it if any '
+            . 'step just returns a placeholder string instead of doing real work via $this->tool()/'
+            . "\$this->ai(), if a `#[Step(critic: '<name>')]` has no matching entry in criticRules(), "
+            . "or if the recipe is not genuinely carried out.\n\n"
+            . "If it is genuinely ready to run, reply with exactly: OK\n"
+            . "Otherwise reply with the concrete problems that must be fixed.\n\n"
+            . "The task:\n{$this->taskSummary()}\n\nThe workflow code:\n{$this->code}",
+            [],
+            'supervisor-smart',
+        ));
+
+        if (strtoupper(trim($verdict)) === 'OK') {
+            return;
+        }
+
+        $this->code = $this->extractCode($this->ai(
+            "A senior reviewer rejected the workflow you wrote. Problems to fix:\n{$verdict}\n\n"
+            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
+            . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
+            agent: 'worker-smart',
+        ));
     }
 
     #[Step]
@@ -94,11 +153,22 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
                 "The workflow class you wrote was rejected: {$e->getMessage()}\n\n"
                 . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
                 . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
+                agent: 'worker-smart',
             ));
         }
 
         // A second failure surfaces to the run-path, which marks the run failed.
         $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
+    }
+
+    /** The issue's title and description as a compact task brief — shared by the planning steps. */
+    private function taskSummary(): string
+    {
+        $issue = $this->issue();
+
+        return $issue !== null
+            ? "Title: {$issue->title}\n\nDescription: {$issue->description}"
+            : 'No issue was attached to this run.';
     }
 
     private function draftPrompt(): string
@@ -130,7 +200,8 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - to have a step's result reviewed automatically, mark it `#[Step(critic: '<name>')]`, make that method RETURN its result as a string, and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for the SOLID-review (step 3) and test&accept (step 5) steps
             - the critic name is just a key: for EVERY name you use you MUST define its actual rules by overriding `protected function criticRules(): array`, returning `['<name>' => '<the concrete criteria the reviewer checks>', ...]` — the reviewer is judged ONLY against this text, so spell the criteria out in full; a name with no rules makes the run fail
             - reach the model with `\$this->ai(string \$prompt, array \$tools, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
-            - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (default), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
+            - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, \$tools, agent: 'reviewer')`; roles: worker (cheap default), worker-smart (stronger model), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
+            - this task was assessed as **{$this->difficulty}**; route the solver's own implementation/test steps that call the model to `agent: '{$this->workerTier}'` so the work runs on the right-sized model (keep reviewer/supervisor steps on their roles)
             - when you NEED a missing detail or a decision from a person (an incomplete issue, a foundational design choice), do NOT guess: call `\$this->ask(string \$question): string` and use the returned answer — behind it may be a human or a supervisor agent
             - the run is budget-limited (tokens and time); work in focused steps and do not loop or re-read pointlessly, an exhausted budget stops the run
             - the ONLY way to touch files or the shell is through `\$this->tool(\$name, \$params)`; use EXACTLY these tool names and input keys (do not invent keys):

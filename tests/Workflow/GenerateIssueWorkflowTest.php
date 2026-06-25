@@ -40,10 +40,12 @@ final class GenerateIssueWorkflowTest
             $registry->add(new ListFilesTool($workspace));
             $registry->add(new DefineWorkflowTool($store, new WorkflowValidator()));
 
-            // The model returns a short plan, then the solver's PHP source.
+            // understand -> plan; assess -> difficulty; draft -> solver source; review -> OK.
             $agent = new ScriptedAgent(
                 self::answer('Plan: read the file, then summarize it.'),
+                self::answer('simple — a localized, mechanical change.'),
                 self::answer(self::solverCode('Issue7Solver')),
+                self::answer('OK'),
             );
 
             $env = new Environment()

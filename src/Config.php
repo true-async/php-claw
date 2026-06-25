@@ -180,7 +180,9 @@ final class Config
                 continue;
             }
 
-            $role = strtolower(substr($key, \strlen($prefix)));
+            // CLAW_AGENT_WORKER_SMART -> role 'worker-smart': env vars carry '_', roles read as '-'
+            // so a workflow routes a call with the readable `ai(..., agent: 'worker-smart')`.
+            $role = str_replace('_', '-', strtolower(substr($key, \strlen($prefix))));
             $model = trim($value);
             if ($role !== '' && $model !== '') {
                 $agents[$role] = $model;
