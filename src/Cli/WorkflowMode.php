@@ -4,8 +4,14 @@ declare(strict_types=1);
 
 namespace Claw\Cli;
 
+use Claw\Agent\AgentInterface;
+use Claw\Agent\AgentSpeaker;
 use Claw\Agent\Budget;
 use Claw\Agent\ConsoleSpeaker;
+use Claw\Agent\DefaultTurnLoop;
+use Claw\Agent\EscalatingSpeaker;
+use Claw\Agent\SpeakerInterface;
+use Claw\Agent\SpeakerRole;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Exceptions\WorkflowFinished;
@@ -59,6 +65,28 @@ final class WorkflowMode
 {
     /** How many times the supervisor may repair-and-resume a crashing solver before giving up. */
     private const int MAX_REPAIRS = 2;
+
+    /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
+    private const string SUPERVISOR_SYSTEM = <<<'PROMPT'
+        You are the SUPERVISOR of an autonomous coding workflow. You are consulted when a step is stuck:
+        a worker pauses with a question, or a step's work failed review and the run asks whether to keep
+        going. Your job is to UNBLOCK with the smallest sound decision, so the run does not churn.
+
+        How to answer (reply with ONLY the decision, no preamble):
+        - To resolve a "did not pass review / is this OK?" escalation, reply with exactly one of:
+          `accept` — the work is good enough as is, stop reworking;
+          `stop`   — the goal cannot be reached here (e.g. a required tool is missing, the gate is
+                     unsatisfiable in this environment) or it is looping with no progress — abort the step;
+          or a short, concrete GUIDANCE for ONE more attempt (only if a specific fix is likely to work).
+        - To answer a worker's question, give the briefest concrete answer that lets it proceed.
+
+        Bias to ending churn: if a step has failed several times for the same reason, or the blocker is
+        environmental (a missing test runner, an absent dependency) and cannot change, choose `accept`
+        (if the actual work looks correct) or `stop` — do NOT keep saying "try again".
+
+        Reply exactly `ESCALATE` only when the decision genuinely needs a human (a scope or product call
+        you must not make alone); it will then be passed up to the person.
+        PROMPT;
 
     /** @param string $root the install root: anchors the app home (state db, generated workflows). */
     public function __construct(private readonly string $root)
@@ -208,11 +236,18 @@ final class WorkflowMode
             ->set(EnvKey::MaxHistory, $config->maxHistory)
             ->set(EnvKey::Store, new SqliteStateStore($projectDb))   // durable: a killed run resumes here
             ->set(EnvKey::Agents, $config->agents)                   // named roles share this access, override only the model
-            ->set(EnvKey::Ask, new ConsoleSpeaker(STDIN, STDOUT))    // ask() reaches the human at the console (Request>)
             ->set(EnvKey::Budget, new Budget($config->budgetTokens, (float) $config->budgetSeconds))   // run total (0 = unlimited)
             ->set(EnvKey::TurnTokenLimit, $config->turnTokens)       // per-exchange caps (0 = unlimited)
             ->set(EnvKey::TurnTimeLimit, (float) $config->turnSeconds)
             ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($config->budgetPolicy));   // stop | ask on the run total
+
+        // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle
+        // a critic escalation — accept / stop / guidance — on its own judgement), then the HUMAN console
+        // behind it. The supervisor passes a decision up to the human only when it replies ESCALATE.
+        $env->set(EnvKey::Ask, new EscalatingSpeaker(
+            $this->supervisorSpeaker($env, $agent, $config),
+            new ConsoleSpeaker(STDIN, STDOUT),
+        ));
 
         $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
         $solverClass = $workflowStore->classFor($solverName, true);
@@ -316,6 +351,40 @@ final class WorkflowMode
         fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
 
         return 0;
+    }
+
+    /**
+     * The supervisor tier of the ask channel: an agent on the `supervisor` model that settles in-run
+     * escalations (accept / stop / guidance) on its own judgement, so a stuck step does not wait on —
+     * or churn against — the human. It runs tool-less (it judges from the escalation text). Replying
+     * `ESCALATE` returns null, so {@see EscalatingSpeaker} passes the decision up to the human console.
+     */
+    private function supervisorSpeaker(Environment $env, AgentInterface $agent, Config $config): SpeakerInterface
+    {
+        $configured = $config->agents['supervisor'] ?? null;
+        $model = \is_string($configured) && $configured !== '' ? $configured : $config->model;
+
+        $loop = new DefaultTurnLoop($agent, $env->executor(), $model, self::SUPERVISOR_SYSTEM);
+        $supervisor = new AgentSpeaker(SpeakerRole::Supervisor, $loop);
+
+        return new class ($supervisor) implements SpeakerInterface {
+            public function __construct(private readonly AgentSpeaker $supervisor)
+            {
+            }
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): ?string
+            {
+                $answer = trim($this->supervisor->reply($incoming));
+
+                // ESCALATE (or an empty answer) -> pass up to the next tier (the human).
+                return $answer === '' || str_contains(strtoupper($answer), 'ESCALATE') ? null : $answer;
+            }
+        };
     }
 
     /**
