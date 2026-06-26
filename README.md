@@ -4,14 +4,15 @@
 [![Built on PHP TrueAsync](https://img.shields.io/badge/built%20on-PHP%20TrueAsync-8892BF?logo=php&logoColor=white)](https://github.com/true-async/)
 [![Tested with Testo](https://img.shields.io/badge/tested%20with-Testo-2ea44f)](https://github.com/php-testo/testo)
 
-An **agent-orchestration system** built **entirely on PHP
-[TrueAsync](https://github.com/true-async/)**. You give it an issue; it does not
-answer it directly — it **generates a solver _workflow_ tailored to that issue**, you
-approve the generated code, and then it runs that workflow as a **supervised hierarchy of
-agent steps**. Each step is its own ReAct turn loop with a scoped tool palette, a **critic**
-that reviews the step's work against a rubric, and a **supervisor** that unblocks a stuck
-step or escalates to you. Every run is **durable** (resumes from a snapshot after a crash or
-kill) and **fully traced** (a tinted tree you can replay).
+An **AI-agent orchestration system** that **metaprograms its own logic**, built **entirely on
+PHP [TrueAsync](https://github.com/true-async/)**. You give it an issue; it does not solve the
+issue directly — it **writes a program to solve it**: the model generates a solver _workflow_ as
+real PHP source (a `WorkflowAbstract` subclass), which is validated, approved, and then run as a
+**supervised hierarchy of agent steps**. The orchestration logic is not hardcoded — it is code
+the system generates, reviews, and executes at runtime. Each step is its own ReAct turn loop with
+a scoped tool palette, a **critic** that reviews the step's work against a rubric, and a
+**supervisor** that unblocks a stuck step or escalates to you. Every run is **durable** (resumes
+from a snapshot after a crash or kill) and **fully traced** (a tinted tree you can replay).
 
 It runs on a single thread: all the I/O — model HTTP, `bash` subprocesses, file and DB
 access — is `await`ed under TrueAsync, so many agents, turns and tool calls overlap with no
@@ -35,18 +36,19 @@ project ──▶ issue ──▶ run
 - **Project / Issue / Run ledger.** `claw -c` registers a project (its own SQLite state
   db), `claw -i` opens an issue, `claw run <id>` starts a run. Projects resolve like a git
   repo — from the current directory up to the nearest registered one.
-- **Generate, don't hardcode.** The default workflow (`GenerateIssueWorkflow`) sizes the
-  issue, drafts a solver workflow as PHP source, has a critic review it, validates it
-  (`WorkflowValidator` blocks dangerous code), and saves it via the `define_workflow` tool.
-  A solver already generated for an issue is reused — the project's growing *procedural
-  memory*.
+- **Metaprogramming — a workflow that writes a workflow.** The default workflow
+  (`GenerateIssueWorkflow`) sizes the issue, drafts a solver workflow as PHP source, has a critic
+  review it, validates it (`WorkflowValidator` blocks dangerous code), and saves it via the
+  `define_workflow` tool — generating new logic at runtime rather than hardcoding it. A solver
+  already generated for an issue is reused — the project's growing *procedural memory*.
 - **Human in the loop.** The generated solver is shown for approval before it ever touches
   the real folder. An autonomous run is opt-in, not the default.
 - **Supervised steps.** A workflow is written as a small DSL on `WorkflowAbstract`:
-  `step()`, `ai()`, `tool()`, `ask()`, `artifact()`, `handoff()`. A step can carry a
+  `step()`, `ai()`, `tool()`, `ask()`, `artifact()`, `critique()`. A step can carry a
   **critic rubric** (the step reworks until the critic passes or a round cap is hit) and the
   **supervisor** settles in-run escalations (`accept` / `stop` / one more concrete attempt)
-  or defers to the person via the **ask channel**.
+  or defers to the person via the **ask channel**. The **handoff** between steps is formed
+  automatically — the model summarizes what a step did for the next one.
 - **Durable & resumable.** State, completed steps and the **handoff** carried between them
   are snapshotted (`SqliteStateStore`). Kill a run mid-flight and `claw run` resumes it,
   re-running only the unfinished tail. A crashing solver is repaired-and-resumed by
@@ -55,10 +57,10 @@ project ──▶ issue ──▶ run
   and stored sinks; `claw log [<id>]` replays the run as an indented, type-tinted tree
   (`NO_COLOR` or a pipe turns it plain).
 
-The agents reach the host through a **tool layer** — `define_workflow`, `finish`,
-`handoff`, `recall` (read back what a sibling step/tool/artifact did) plus `bash`,
-`read_file`, `write_file`, `list_files`, `date`, `php_eval`, `schedule` — and every tool
-call passes through a middleware chain (permission gatekeeper, audit log, per-tool timeout).
+The agents reach the host through a **tool layer** — `define_workflow` (write a new workflow),
+`done` (declare the task solved), `recall` (read back what a sibling step/tool/artifact did),
+plus `bash`, `read_file`, `write_file`, `list_files` — and every tool call passes through a
+middleware chain (permission gatekeeper, audit log, per-tool timeout).
 
 ## Architecture at a glance
 
@@ -140,10 +142,10 @@ Composer shortcuts: `composer test`, `composer analyse`, `composer cs`, `compose
 End-to-end on a single TrueAsync thread: project/issue/run ledger, per-issue solver
 generation with critic + human approval, supervised step execution (critic rubric,
 supervisor escalation ladder, token/time budgets), durable snapshot-and-resume with a
-repair loop, a full trace (`claw log`), the tool layer (`define_workflow`, `finish`,
-`handoff`, `recall`, `bash`, `read_file`, `write_file`, `list_files`, `date`, `php_eval`,
-`schedule`) behind a permission/audit/timeout middleware chain, and the older session path
-(console + Telegram, per-conversation SQLite history, `/stop`, inline approvals). Next:
+repair loop, a full trace (`claw log`), the workflow tool layer (`define_workflow`, `done`,
+`recall`, `bash`, `read_file`, `write_file`, `list_files`) behind a permission/audit/timeout
+middleware chain, and the older session path (console + Telegram, per-conversation SQLite
+history, `/stop`, inline approvals, plus the `date`/`php_eval`/`schedule` tools). Next:
 hardening the autonomous-run permission policy and OS-level sandboxing of the `bash` tool.
 
 Not affiliated with Anthropic, OpenClaw or NanoClaw.
