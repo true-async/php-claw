@@ -562,11 +562,12 @@ final class WorkflowAbstractTest
     #[Test]
     public function aStepsWorkIsHandedToTheNextStepAsAConsciouslyFormedBaton(): void
     {
-        // After step 1, the engine explicitly asks the model to FORM the handoff (request 0); the
-        // second step's own ai() (request 1) then carries that baton in its system prompt.
+        // first() does its work in an ai() exchange; the handoff is formed by CONTINUING that exact
+        // conversation (request 1), then the second step's ai() (request 2) carries the baton.
         $worker = new ScriptedAgent(
-            $this->answer('added subtract(); next, run the tests'),   // the consciously-formed handoff
-            $this->answer('done'),                                    // the second step's own ai()
+            $this->answer('did the work'),                            // first()'s own ai()
+            $this->answer('added subtract(); next, run the tests'),   // the handoff, formed in-context
+            $this->answer('ok'),                                      // second()'s own ai()
         );
         $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
             public function name(): string
@@ -575,9 +576,9 @@ final class WorkflowAbstractTest
             }
 
             #[Step]
-            public function first(): string
+            public function first(): void
             {
-                return 'I added subtract()';
+                $this->ai('do the work');
             }
 
             #[Step]
@@ -589,7 +590,11 @@ final class WorkflowAbstractTest
 
         $wf->run();
 
-        Assert::true(str_contains($worker->requests[1]->system, 'added subtract(); next, run the tests'));
+        // the handoff (request 1) CONTINUED first()'s conversation: it carries the work's user turn,
+        // the assistant turn, and the handoff question — 3 messages, not a fresh 1.
+        Assert::count($worker->requests[1]->messages, 3);
+        // and that baton reaches the second step's own ai()
+        Assert::true(str_contains($worker->requests[2]->system, 'added subtract(); next, run the tests'));
     }
 
     #[Test]

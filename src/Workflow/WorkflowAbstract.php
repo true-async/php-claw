@@ -63,12 +63,22 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private string $incomingHandoff = '';
 
     /**
-     * The previous step's name + result, awaiting handoff formation — set at step end, consumed (and
-     * turned into {@see $incomingHandoff}) by the next step's first ai() call. Null = nothing pending.
+     * The previous step's name + the conversation history of its work, awaiting handoff formation —
+     * set at step end, consumed by the next step's first ai() call (which continues that history to
+     * ask the model for the handoff IN CONTEXT). Null = nothing pending.
      *
-     * @var ?array{name: string, result: string}
+     * @var ?array{name: string, history: list<Message>}
      */
     private ?array $pendingBaton = null;
+
+    /**
+     * The full message history of the most recent {@see ai()} exchange — kept so a step's handoff can
+     * be formed by CONTINUING that exact conversation (the model still holds what it actually did),
+     * not from a cold re-summary. Transient.
+     *
+     * @var list<Message>
+     */
+    private array $lastHistory = [];
 
     /**
      * Artifacts produced this run, kept per step so PRIOR steps' outputs are not lost — only the
@@ -164,10 +174,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $round = 0;
             $maxRounds = $this->stepMaxRounds($name);
             $result = '';
+            $workHistory = [];
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
+                $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
                 $raw = $this->{$name}();
                 $result = \is_string($raw) ? $raw : '';
+                $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
                 if ($rubric === null) {
                     break;
                 }
@@ -191,10 +204,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $tracer?->exit($span);
         }
 
-        // Remember the material for this step's handoff. The baton itself is formed LAZILY — only if a
+        // Remember the work exchange for this step's handoff. The baton is formed LAZILY — only if a
         // later step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
-        // e.g. the last step). See the formation at the top of {@see ai()}.
-        $this->pendingBaton = ['name' => $name, 'result' => $result];
+        // e.g. the last step) — by CONTINUING this history. See the formation at the top of {@see ai()}.
+        $this->pendingBaton = ['name' => $name, 'history' => $workHistory];
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
@@ -273,6 +286,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
         $this->formPendingHandoff();   // a downstream step is reading: form the previous step's baton now
 
+        return $this->runTurns($prompt, $tools, $agent, []);
+    }
+
+    /**
+     * Drive one model exchange and return its final text. $prior is conversation history to CONTINUE
+     * (empty for a fresh call); the prompt is appended as the next user turn. The whole exchange's
+     * history is kept in {@see $lastHistory} so the step can later continue it (e.g. to form its
+     * handoff IN the same context the work happened, not from a cold summary).
+     *
+     * @param ?list<string> $tools null = every tool; a list = only those; [] = none
+     * @param list<Message> $prior conversation to continue
+     */
+    private function runTurns(string $prompt, ?array $tools, ?string $agent, array $prior): string
+    {
         // The palette is a child scope holding the run's registry plus this workflow's own #[Tool]
         // methods — full by default, or narrowed to exactly $tools when a step asks for least
         // privilege. The model's specs and what the executor can resolve are the same set either way.
@@ -290,9 +317,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
         $tracer?->prompt($prompt, $exposed);
 
-        // The baton from the previous step (its return value) is fed in automatically — the selective
-        // context carry-over — plus the available tools named up front so the model reliably reaches
-        // for the right one (recall, done, ...) instead of only sometimes noticing them.
+        // The baton from the previous step is fed in automatically — the selective context carry-over —
+        // plus the available tools named up front so the model reliably reaches for the right one
+        // (recall, done, ...) instead of only sometimes noticing them.
         $system = $scope->findSystemPrompt() . $this->handoffContext() . $this->toolBriefing($palette);
 
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
@@ -312,10 +339,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
         );
 
         try {
-            $text = $loop->run([Message::userText($prompt)])->text ?? '';
-            $this->enforceBudget();   // the loop charged the total — stop the run if that tipped it over
+            $result = $loop->run([...$prior, Message::userText($prompt)]);
+            $this->lastHistory = $result->history;   // kept so a handoff can continue this exact context
+            $this->enforceBudget();                  // the loop charged the total — stop the run if that tipped it over
 
-            return $text;
+            return $result->text ?? '';
         } finally {
             $tracer?->exit($span);
         }
@@ -323,9 +351,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * Form the previous step's handoff — once, lazily, when a downstream step's ai() asks for it. The
-     * baton is NOT a grab of the return value: the model is EXPLICITLY asked to write the handoff (what
-     * it did + what to watch for) from the step's result and artifacts. Cleared before the inner ai()
-     * so it never re-enters. A step that produced nothing hands on an empty baton.
+     * baton is NOT a grab of the return value: the model is EXPLICITLY asked to write the handoff by
+     * CONTINUING the step's own work conversation, so it still holds what it actually did (its tool
+     * calls, what it read/changed) — not a cold re-summary. Cleared before the inner call so it never
+     * re-enters. A step that ran no model exchange hands on an empty baton.
      */
     private function formPendingHandoff(): void
     {
@@ -333,26 +362,22 @@ abstract class WorkflowAbstract implements WorkflowInterface
         if ($baton === null) {
             return;
         }
-        $this->pendingBaton = null;   // clear FIRST: the formation below calls ai() again
+        $this->pendingBaton = null;   // clear FIRST: the formation below drives the turn loop again
 
-        $artifacts = $this->artifacts[$baton['name']] ?? [];
-        if ($baton['result'] === '' && $artifacts === []) {
+        if ($baton['history'] === []) {
             $this->incomingHandoff = '';
 
             return;
         }
 
-        $rendered = $artifacts === []
-            ? '(none)'
-            : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
-
-        $this->incomingHandoff = trim($this->ai(
-            "You have just finished the workflow step '{$baton['name']}'. Now CONSCIOUSLY form the HANDOFF "
-            . 'to the NEXT step: in a few sentences, state what you accomplished and the findings the next '
-            . 'step must pay attention to — decisions made, files/paths touched, what remains, gotchas. '
-            . "Pass on only what matters, not everything. Reply with that handoff only.\n\n"
-            . "What this step did:\n{$baton['result']}\n\nArtifacts it produced:\n{$rendered}",
+        $this->incomingHandoff = trim($this->runTurns(
+            'Now, before this step ends, CONSCIOUSLY write the HANDOFF to the NEXT step: in a few '
+            . 'sentences, state what you accomplished here and the findings the next step must pay '
+            . 'attention to — decisions made, files/paths touched, what remains, gotchas. Pass on only '
+            . 'what matters, not everything. Reply with that handoff only.',
             [],
+            null,
+            $baton['history'],   // continue the work conversation — the model still has the full context
         ));
 
         if ($this->incomingHandoff !== '') {
