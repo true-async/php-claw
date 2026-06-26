@@ -14,3 +14,6 @@ parameters:
     # knows the class is catchable, without scanning all of src/ (it redeclares \PDO).
     scanFiles:
         - vendor/true-async/ide-helper/src/Cancellation.php
+        # HTTP server extension classes (HttpServer, HttpRequest, HttpResponse, …)
+        # used by src/Server.php. A single file, so it sidesteps the root \PDO clash.
+        - vendor/true-async/ide-helper/src/Server/true-async-server.php
