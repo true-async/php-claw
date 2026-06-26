@@ -55,14 +55,14 @@ final class TraceReader
      * below $threshold are dropped, so the same density knob as the live console applies to history;
      * the default shows everything that was recorded.
      */
-    public function render(string $runId, Level $threshold = Level::Debug): string
+    public function render(string $runId, Level $threshold = Level::Debug, bool $color = false): string
     {
         $stmt = $this->pdo->prepare('SELECT depth, phase, type, data FROM trace WHERE run_id = :r AND level >= :lvl ORDER BY seq');
         $stmt->bindValue('r', $runId);
         $stmt->bindValue('lvl', $threshold->value, \PDO::PARAM_INT);
         $stmt->execute();
 
-        return $this->renderRows($stmt->fetchAll(\PDO::FETCH_ASSOC));
+        return $this->renderRows($stmt->fetchAll(\PDO::FETCH_ASSOC), $color);
     }
 
     /**
@@ -174,11 +174,12 @@ final class TraceReader
     }
 
     /**
-     * Render trace rows as the indented tree: ▶ opens a span, ◀ closes it, · a point event.
+     * Render trace rows as the indented tree: ▶ opens a span, ◀ closes it, · a point event. With
+     * $color on (a TTY), each line is tinted by its event type via {@see TraceFormat::paint()}.
      *
      * @param array<int, mixed> $rows
      */
-    private function renderRows(array $rows): string
+    private function renderRows(array $rows, bool $color = false): string
     {
         $lines = [];
         foreach ($rows as $row) {
@@ -198,7 +199,8 @@ final class TraceReader
             };
 
             // Same one-line renderer as the live console, so history and live can never diverge.
-            $lines[] = str_repeat('  ', $depth) . $glyph . ' ' . trim($type . ' ' . TraceFormat::summary($type, $data));
+            $head = $glyph . ' ' . trim($type . ' ' . TraceFormat::summary($type, $data));
+            $lines[] = str_repeat('  ', $depth) . TraceFormat::paint($type, $head, $color);
         }
 
         return implode("\n", $lines);

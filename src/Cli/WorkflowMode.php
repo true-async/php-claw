@@ -472,7 +472,8 @@ final class WorkflowMode
         $title = $header !== null
             ? "run #{$runId}  (issue #{$header['issue']}, {$header['workflow']}, {$header['status']})"
             : "run #{$runId}";
-        $tree = $reader->render($runId, $verbosity ?? Level::Debug);
+        $color = stream_isatty(STDOUT) && getenv('NO_COLOR') === false;
+        $tree = $reader->render($runId, $verbosity ?? Level::Debug, $color);
         fwrite(STDOUT, "\nTrace of {$title}:\n" . ($tree === '' ? '  (no trace recorded)' : $tree) . "\n");
 
         return 0;

@@ -14,11 +14,19 @@ namespace Claw\Trace;
  */
 final class ConsoleTraceSink implements TraceSinkInterface
 {
-    /** @param resource $stream */
+    /** Whether to tint each line by event type — on for a real terminal, off for a pipe/file/NO_COLOR. */
+    private readonly bool $color;
+
+    /**
+     * @param resource  $stream
+     * @param ?bool     $color force colour on/off; null = auto-detect from the stream (a TTY, NO_COLOR unset)
+     */
     public function __construct(
         private $stream,
         private readonly Level $threshold = Level::Info,
+        ?bool $color = null,
     ) {
+        $this->color = $color ?? (\is_resource($stream) && stream_isatty($stream) && getenv('NO_COLOR') === false);
     }
 
     public function write(TraceRecordInterface $record): void
@@ -38,8 +46,8 @@ final class ConsoleTraceSink implements TraceSinkInterface
             default => '·',
         };
 
-        $head = trim($event->type . ' ' . TraceFormat::summary($event->type, $event->data));
+        $head = $glyph . ' ' . trim($event->type . ' ' . TraceFormat::summary($event->type, $event->data));
 
-        fwrite($this->stream, str_repeat('  ', $record->depth()) . $glyph . ' ' . $head . "\n");
+        fwrite($this->stream, str_repeat('  ', $record->depth()) . TraceFormat::paint($event->type, $head, $this->color) . "\n");
     }
 }

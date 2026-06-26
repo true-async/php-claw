@@ -12,6 +12,26 @@ namespace Claw\Trace;
  */
 final class TraceFormat
 {
+    /**
+     * The ANSI SGR code each event type is painted with, so the tree reads at a glance — structure
+     * (workflow/step) stands out, the model's own words (prompt/reply) are tinted apart from the
+     * machinery (tool/turn), and the handoff — the context carried between steps — is highlighted.
+     * A type absent here is left uncoloured.
+     */
+    private const array COLOR = [
+        'workflow'    => '1;35',   // bold magenta — the run
+        'step'        => '1;36',   // bold cyan — a phase
+        'ai'          => '1;34',   // bold blue — a model exchange
+        'prompt'      => '33',     // yellow — what we asked
+        'reply'       => '32',     // green — what the model said
+        'tool'        => '35',     // magenta — a tool call
+        'tool-result' => '90',     // grey — its result
+        'turn'        => '90',     // grey — turn marker
+        'note'        => '90',     // grey — a logged note
+        'artifact'    => '36',     // cyan — a produced output
+        'handoff'     => '1;33',   // bold yellow — context carried to the next step
+    ];
+
     /** @param array<string, mixed> $data */
     public static function summary(string $type, array $data): string
     {
@@ -27,6 +47,22 @@ final class TraceFormat
             'handoff' => self::oneLine(self::str($data, 'text'), 70),
             default => '',
         };
+    }
+
+    /**
+     * Wrap a rendered line in the ANSI colour chosen for its event type, or return it untouched when
+     * $color is off (a pipe, a file, NO_COLOR) or the type has no colour. The one place colour is
+     * applied, so live and replayed trees tint identically.
+     */
+    public static function paint(string $type, string $text, bool $color): string
+    {
+        if (!$color) {
+            return $text;
+        }
+
+        $code = self::COLOR[$type] ?? '';
+
+        return $code === '' ? $text : "\e[{$code}m{$text}\e[0m";
     }
 
     /**
