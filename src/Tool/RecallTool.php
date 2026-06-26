@@ -35,6 +35,7 @@ final class RecallTool implements ToolInterface
     {
         return 'Recall context about THIS workflow run from its journal. '
             . "what='task' returns the original task/issue brief the run was started for; "
+            . "what='handoff' returns the baton the previous step left for you (its summary + findings); "
             . "what='workflow' maps the workflow and the steps run so far; "
             . "what='step' (name=the step) returns that step's recorded history — its model turns, tool "
             . "calls and artifacts; what='tool' (name=the tool) returns every call to that tool; "
@@ -49,7 +50,7 @@ final class RecallTool implements ToolInterface
             'properties' => [
                 'what' => [
                     'type' => 'string',
-                    'enum' => ['task', 'workflow', 'step', 'tool', 'artifacts'],
+                    'enum' => ['task', 'handoff', 'workflow', 'step', 'tool', 'artifacts'],
                     'description' => 'which slice of the run to recall',
                 ],
                 'name' => [
@@ -73,6 +74,7 @@ final class RecallTool implements ToolInterface
 
         return match ($what) {
             'task' => $this->task !== '' ? $this->task : 'No task brief is attached to this run.',
+            'handoff' => $this->journal->handoff($this->runId),
             'workflow' => $this->journal->describe($this->runId),
             'artifacts' => $this->journal->artifacts($this->runId, $name),
             'step' => $name === ''

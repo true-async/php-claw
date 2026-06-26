@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Tool;
 
+use Claw\Tool\HandoffTool;
 use Claw\Tool\RecallTool;
 use Claw\Tool\Risk;
 use Claw\Trace\Tracer;
@@ -39,6 +40,28 @@ final class RecallToolTest
 
         // the run map lists the step
         Assert::true(str_contains($tool->handle(['what' => 'workflow']), 'design'));
+    }
+
+    #[Test]
+    public function aStepHandsTheBatonToTheNextViaHandoffAndRecall(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $tracer = new Tracer('4', new TraceStore($pdo));
+
+        // step 1 runs and hands off
+        $wf = $tracer->enterWorkflow('Solver');
+        $s1 = $tracer->enterStep('implement');
+        new HandoffTool($tracer)->handle(['summary' => 'added subtract()', 'findings' => 'no tests yet']);
+        $tracer->exit($s1);
+
+        // step 2 recalls the baton
+        $recall = new RecallTool(new TraceReader($pdo), '4');
+        $baton = $recall->handle(['what' => 'handoff']);
+
+        Assert::true(str_contains($baton, 'added subtract()'));
+        Assert::true(str_contains($baton, 'no tests yet'));
+
+        $tracer->exit($wf);
     }
 
     #[Test]

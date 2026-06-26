@@ -113,6 +113,12 @@ final class Tracer
         $this->event(new TraceEvent('artifact', Level::Info, ['label' => $label, 'kind' => $kind, 'value' => $value]));
     }
 
+    /** The baton a step hands to the next: a summary of its work and findings to watch for. */
+    public function handoff(string $summary, string $findings): void
+    {
+        $this->event(new TraceEvent('handoff', Level::Notice, ['summary' => $summary, 'findings' => $findings]));
+    }
+
     private function open(TraceEvent $event): int
     {
         $id = ++$this->seq;

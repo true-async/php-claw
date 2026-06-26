@@ -122,6 +122,22 @@ final class TraceReader
         return $lines === [] ? 'No artifacts have been recorded in this workflow yet.' : implode("\n", $lines);
     }
 
+    /** The most recent handoff — the baton the previous step left for this one (summary + findings). */
+    public function handoff(string $runId): string
+    {
+        $stmt = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = :r AND type = 'handoff' ORDER BY seq DESC LIMIT 1");
+        $stmt->execute(['r' => $runId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($row === false) {
+            return 'No previous step has handed off anything yet.';
+        }
+
+        $data = json_decode($this->str($row, 'data'), true);
+        $data = \is_array($data) ? $data : [];
+
+        return "Summary: {$this->str($data, 'summary')}\nFindings: {$this->str($data, 'findings')}";
+    }
+
     /** The workflow's name and the steps it has run so far (in order) — a quick map of the run. */
     public function describe(string $runId): string
     {
