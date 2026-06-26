@@ -57,8 +57,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private string $currentStep = '';
 
     /**
-     * The baton fed into the current step's model context — what the previous step handed on. Formed
-     * lazily from {@see $pendingBaton} on the first ai() call of a step. Transient.
+     * The handoff fed into the current step's model context — what the previous step handed on. Formed
+     * lazily from {@see $pendingHandoff} on the first ai() call of a step. Transient.
      */
     private string $incomingHandoff = '';
 
@@ -69,7 +69,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      *
      * @var ?array{name: string, history: list<Message>}
      */
-    private ?array $pendingBaton = null;
+    private ?array $pendingHandoff = null;
 
     /**
      * The full message history of the most recent {@see ai()} exchange — kept so a step's handoff can
@@ -204,10 +204,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $tracer?->exit($span);
         }
 
-        // Remember the work exchange for this step's handoff. The baton is formed LAZILY — only if a
+        // Remember the work exchange for this step. The handoff is formed LAZILY — only if a
         // later step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
         // e.g. the last step) — by CONTINUING this history. See the formation at the top of {@see ai()}.
-        $this->pendingBaton = ['name' => $name, 'history' => $workHistory];
+        $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
@@ -284,7 +284,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function ai(string $prompt, ?array $tools = null, ?string $agent = null): string
     {
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
-        $this->formPendingHandoff();   // a downstream step is reading: form the previous step's baton now
+        $this->formPendingHandoff();   // a downstream step is reading: form the previous step.s handoff now
 
         return $this->runTurns($prompt, $tools, $agent, []);
     }
@@ -317,7 +317,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
         $tracer?->prompt($prompt, $exposed);
 
-        // The baton from the previous step is fed in automatically — the selective context carry-over —
+        // The handoff from the previous step is fed in automatically — the selective context carry-over —
         // plus the available tools named up front so the model reliably reaches for the right one
         // (recall, done, ...) instead of only sometimes noticing them.
         $system = $scope->findSystemPrompt() . $this->handoffContext() . $this->toolBriefing($palette);
@@ -351,20 +351,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * Form the previous step's handoff — once, lazily, when a downstream step's ai() asks for it. The
-     * baton is NOT a grab of the return value: the model is EXPLICITLY asked to write the handoff by
+     * handoff is NOT a grab of the return value: the model is EXPLICITLY asked to write the handoff by
      * CONTINUING the step's own work conversation, so it still holds what it actually did (its tool
      * calls, what it read/changed) — not a cold re-summary. Cleared before the inner call so it never
-     * re-enters. A step that ran no model exchange hands on an empty baton.
+     * re-enters. A step that ran no model exchange hands on an empty handoff.
      */
     private function formPendingHandoff(): void
     {
-        $baton = $this->pendingBaton;
-        if ($baton === null) {
+        $pending = $this->pendingHandoff;
+        if ($pending === null) {
             return;
         }
-        $this->pendingBaton = null;   // clear FIRST: the formation below drives the turn loop again
+        $this->pendingHandoff = null;   // clear FIRST: the formation below drives the turn loop again
 
-        if ($baton['history'] === []) {
+        if ($pending['history'] === []) {
             $this->incomingHandoff = '';
 
             return;
@@ -377,7 +377,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'what matters, not everything. Reply with that handoff only.',
             [],
             null,
-            $baton['history'],   // continue the work conversation — the model still has the full context
+            $pending['history'],   // continue the work conversation — the model still has the full context
         ));
 
         if ($this->incomingHandoff !== '') {
@@ -385,7 +385,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
     }
 
-    /** The previous step's baton as a context block for the system prompt, or '' for the first step. */
+    /** The previous step.s handoff as a context block for the system prompt, or '' for the first step. */
     private function handoffContext(): string
     {
         if ($this->incomingHandoff === '') {
