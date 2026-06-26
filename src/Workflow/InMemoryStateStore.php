@@ -16,6 +16,9 @@ final class InMemoryStateStore implements WorkflowStateStore
     /** @var array<string, array{state: array<string, mixed>, done: list<string>}> latest snapshot per run */
     private array $runs = [];
 
+    /** @var array<string, array{from: string, handoff: string}> the handoff awaiting the next step, per run */
+    private array $handoffs = [];
+
     /** Monotonic counter behind nextId() — the in-memory stand-in for a DB autoincrement. */
     private int $seq = 0;
 
@@ -28,6 +31,17 @@ final class InMemoryStateStore implements WorkflowStateStore
     public function load(string $runId): array
     {
         return $this->runs[$runId] ?? ['state' => [], 'done' => []];
+    }
+
+    public function saveHandoff(string $runId, string $fromStep, string $handoff): void
+    {
+        $this->handoffs[$runId] = ['from' => $fromStep, 'handoff' => $handoff];
+    }
+
+    /** @return array{from: string, handoff: string} */
+    public function loadHandoff(string $runId): array
+    {
+        return $this->handoffs[$runId] ?? ['from' => '', 'handoff' => ''];
     }
 
     public function nextId(): string

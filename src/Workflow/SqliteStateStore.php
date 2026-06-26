@@ -10,8 +10,10 @@ namespace Claw\Workflow;
  * saved fields + completed steps and re-runs only the unfinished tail. The in-memory store is the
  * drop-in for tests / single-process runs; this is the production one.
  *
- * One row per run keyed by run id (state + completed steps as JSON). Leaf-call ids come from a
- * monotonic table so they stay unique across restarts, not just within a process.
+ * One row per run keyed by run id (state + completed steps as JSON). The handoff awaiting the next
+ * step lives in its own one-row-per-run table, written by a finished step and read back by the next
+ * one — kept apart from the state snapshot because the two are saved at different moments. Leaf-call
+ * ids come from a monotonic table so they stay unique across restarts, not just within a process.
  */
 final readonly class SqliteStateStore implements WorkflowStateStore
 {
@@ -23,6 +25,15 @@ final readonly class SqliteStateStore implements WorkflowStateStore
                 run_id     TEXT PRIMARY KEY,
                 state      TEXT NOT NULL,
                 done       TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )',
+        );
+
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS workflow_handoff (
+                run_id     TEXT PRIMARY KEY,
+                from_step  TEXT NOT NULL,
+                handoff    TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             )',
         );
@@ -57,6 +68,32 @@ final readonly class SqliteStateStore implements WorkflowStateStore
         return [
             'state' => $this->decodeState($row['state'] ?? ''),
             'done' => $this->decodeDone($row['done'] ?? ''),
+        ];
+    }
+
+    public function saveHandoff(string $runId, string $fromStep, string $handoff): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT OR REPLACE INTO workflow_handoff (run_id, from_step, handoff, updated_at)
+             VALUES (:run, :from, :handoff, :at)',
+        );
+
+        $stmt->execute(['run' => $runId, 'from' => $fromStep, 'handoff' => $handoff, 'at' => time()]);
+    }
+
+    /** @return array{from: string, handoff: string} */
+    public function loadHandoff(string $runId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT from_step, handoff FROM workflow_handoff WHERE run_id = :run');
+        $stmt->execute(['run' => $runId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if (!\is_array($row)) {
+            return ['from' => '', 'handoff' => ''];
+        }
+
+        return [
+            'from' => \is_string($row['from_step'] ?? null) ? $row['from_step'] : '',
+            'handoff' => \is_string($row['handoff'] ?? null) ? $row['handoff'] : '',
         ];
     }
 

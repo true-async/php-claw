@@ -50,6 +50,42 @@ final class SqliteStateStoreTest
     }
 
     #[Test]
+    public function persistsTheHandoffAndItsSourceStepAcrossARestart(): void
+    {
+        $path = self::tempDb();
+
+        try {
+            $store = new SqliteStateStore(new \PDO('sqlite:' . $path));
+            $store->saveHandoff('r1', 'implement', 'added subtract(); run the tests next');
+
+            // A fresh store on a new connection = a process restart: the handoff and its source survive.
+            $restored = new SqliteStateStore(new \PDO('sqlite:' . $path))->loadHandoff('r1');
+
+            Assert::same($restored, ['from' => 'implement', 'handoff' => 'added subtract(); run the tests next']);
+        } finally {
+            @unlink($path);
+        }
+    }
+
+    #[Test]
+    public function saveHandoffOverwritesThePrior(): void
+    {
+        $store = new SqliteStateStore(new \PDO('sqlite::memory:'));
+        $store->saveHandoff('r1', 'design', 'first cut');
+        $store->saveHandoff('r1', 'implement', 'second cut');
+
+        Assert::same($store->loadHandoff('r1'), ['from' => 'implement', 'handoff' => 'second cut']);
+    }
+
+    #[Test]
+    public function loadHandoffReturnsEmptyForAnUnknownRun(): void
+    {
+        $store = new SqliteStateStore(new \PDO('sqlite::memory:'));
+
+        Assert::same($store->loadHandoff('nope'), ['from' => '', 'handoff' => '']);
+    }
+
+    #[Test]
     public function nextIdIsMonotonicAndSurvivesARestart(): void
     {
         $path = self::tempDb();

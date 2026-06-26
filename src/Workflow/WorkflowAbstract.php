@@ -58,14 +58,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * The handoff fed into the current step's model context — what the previous step handed on. Formed
-     * lazily from {@see $pendingHandoff} on the first ai() call of a step. Transient.
+     * lazily from {@see $pendingHandoff} on the first ai() call of a step, and persisted as it is formed
+     * so a resume (a fresh process whose in-memory history is gone) can {@see loadHandoff()} it back
+     * here at construction instead. Read by {@see handoffContext()}. '' for the first step.
      */
     private string $incomingHandoff = '';
 
     /**
      * The previous step's name + the conversation history of its work, awaiting handoff formation —
      * set at step end, consumed by the next step's first ai() call (which continues that history to
-     * ask the model for the handoff IN CONTEXT). Null = nothing pending.
+     * ask the model for the handoff IN CONTEXT). Null = nothing pending (e.g. on a resume, where the
+     * already-formed handoff is restored from the store rather than re-formed).
      *
      * @var ?array{name: string, history: list<Message>}
      */
@@ -110,9 +113,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->env = $env->child();   // the project env is the parent; this run overrides only what it must
         $this->init();                 // the workflow configures its scope before any step runs
 
-        $snapshot = $this->env->findStore()->load($runId);
+        $store = $this->env->findStore();
+        $snapshot = $store->load($runId);
         $this->restoreState($snapshot['state']);   // a resumed run sees the state its done steps left behind
         $this->done = $snapshot['done'];
+
+        // Restore the handoff awaiting the next step: the one the LAST finished step formed. A handoff
+        // from any earlier step is stale (its reader already ran), so it is ignored — the next step
+        // simply gets none, as it would have had the crash struck a moment earlier.
+        $saved = $store->loadHandoff($runId);
+        $lastDone = $this->done === [] ? null : $this->done[array_key_last($this->done)];
+        if ($saved['from'] !== '' && $saved['from'] === $lastDone) {
+            $this->incomingHandoff = $saved['handoff'];
+        }
     }
 
     abstract public function name(): string;
@@ -204,9 +217,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $tracer?->exit($span);
         }
 
-        // Remember the work exchange for this step. The handoff is formed LAZILY — only if a
-        // later step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
-        // e.g. the last step) — by CONTINUING this history. See the formation at the top of {@see ai()}.
+        // Remember the work exchange for this step. The handoff is formed LAZILY — only if a later
+        // step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
+        // e.g. the last step, or a step that finishes through a tool) — by CONTINUING this history,
+        // and is persisted as it is formed. See {@see formPendingHandoff()}.
         $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
 
         $this->done[] = $name;
@@ -284,7 +298,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function ai(string $prompt, ?array $tools = null, ?string $agent = null): string
     {
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
-        $this->formPendingHandoff();   // a downstream step is reading: form the previous step.s handoff now
+        $this->formPendingHandoff();   // a downstream step is reading: form (and persist) the previous step's handoff
 
         return $this->runTurns($prompt, $tools, $agent, []);
     }
@@ -350,11 +364,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Form the previous step's handoff — once, lazily, when a downstream step's ai() asks for it. The
-     * handoff is NOT a grab of the return value: the model is EXPLICITLY asked to write the handoff by
-     * CONTINUING the step's own work conversation, so it still holds what it actually did (its tool
-     * calls, what it read/changed) — not a cold re-summary. Cleared before the inner call so it never
-     * re-enters. A step that ran no model exchange hands on an empty handoff.
+     * Form the previous step's handoff — once — when a downstream step's ai() reads it. The handoff
+     * is NOT a grab of the return value: the model is EXPLICITLY asked to write it by CONTINUING the
+     * step's own work conversation, so it still holds what it actually did (its tool calls, what it
+     * read/changed), not a cold re-summary. The result is SAVED to the store keyed by the step that
+     * formed it the instant it exists — so a resume in a fresh process, where that conversation is
+     * gone, reads it back at construction ({@see loadHandoff()}) instead of re-forming it. Cleared
+     * before the inner call so it never re-enters; a step that ran no model exchange hands on ''.
      */
     private function formPendingHandoff(): void
     {
@@ -364,13 +380,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
         $this->pendingHandoff = null;   // clear FIRST: the formation below drives the turn loop again
 
-        if ($pending['history'] === []) {
-            $this->incomingHandoff = '';
-
-            return;
-        }
-
-        $this->incomingHandoff = trim($this->runTurns(
+        $this->incomingHandoff = $pending['history'] === [] ? '' : trim($this->runTurns(
             'Now, before this step ends, CONSCIOUSLY write the HANDOFF to the NEXT step: in a few '
             . 'sentences, state what you accomplished here and the findings the next step must pay '
             . 'attention to — decisions made, files/paths touched, what remains, gotchas. Pass on only '
@@ -379,6 +389,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             null,
             $pending['history'],   // continue the work conversation — the model still has the full context
         ));
+
+        // Persist it the moment it is formed, keyed by the step that formed it. A resume that lands on
+        // the next step loads it straight back instead of re-asking the model (whose context is gone).
+        $this->env->findStore()->saveHandoff($this->runId, $pending['name'], $this->incomingHandoff);
 
         if ($this->incomingHandoff !== '') {
             $this->tracer()?->handoff($this->incomingHandoff);

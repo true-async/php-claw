@@ -17,6 +17,12 @@ namespace Claw\Workflow;
  *
  * The store is also the source of leaf-call ids: nextId() hands out a monotonic identifier so
  * the workflow never fabricates ids by string-mangling the run id.
+ *
+ * The handoff — the selective context one step forms for the next — is persisted ALONGSIDE the
+ * snapshot but on its own, because it is not part of the workflow's own state and it is written at
+ * a different moment: a finished step saves the handoff it formed, and the next step (after a resume
+ * in a fresh process, where the in-memory conversation that formed it is gone) loads it back before
+ * it runs. {@see saveHandoff()}/{@see loadHandoff()} are that explicit door.
  */
 interface WorkflowStateStore
 {
@@ -35,6 +41,21 @@ interface WorkflowStateStore
      * @return array{state: array<string, mixed>, done: list<string>}
      */
     public function load(string $runId): array;
+
+    /**
+     * Persist the handoff a finished step formed for the next step to read, keyed by the step that
+     * formed it ($fromStep) — so a resume can tell whether the saved handoff is the current one or a
+     * stale leftover from an earlier transition.
+     */
+    public function saveHandoff(string $runId, string $fromStep, string $handoff): void;
+
+    /**
+     * The saved handoff and the step that formed it, or {from: '', handoff: ''} when none was saved
+     * (the first step, or a fresh run).
+     *
+     * @return array{from: string, handoff: string}
+     */
+    public function loadHandoff(string $runId): array;
 
     /** A fresh, monotonic id for a leaf call — the store owns identity, not the caller. */
     public function nextId(): string;

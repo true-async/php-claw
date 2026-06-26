@@ -598,6 +598,79 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aFormedHandoffIsSavedToTheStoreKeyedByTheStepThatFormedIt(): void
+    {
+        // first() works, second()'s ai() triggers the handoff formation (request 1, continuing first()'s
+        // conversation). The instant it is formed it is saved to the store, keyed by 'first'.
+        $store = new InMemoryStateStore();
+        $worker = new ScriptedAgent(
+            $this->answer('did the work'),
+            $this->answer('added subtract(); next, run the tests'),
+            $this->answer('ok'),
+        );
+        $this->relay($this->config(worker: $worker, store: $store))->run();
+
+        Assert::same($store->loadHandoff('r1'), ['from' => 'first', 'handoff' => 'added subtract(); next, run the tests']);
+    }
+
+    #[Test]
+    public function aResumeReadsTheSavedHandoffFromTheStoreWithoutReFormingIt(): void
+    {
+        // A fresh instance for the same run — the conversation that formed the handoff is gone, only the
+        // store survived. The handoff saved by the last finished step ('first') is restored at
+        // construction and reaches the next step's ai() WITHOUT a second formation call.
+        $store = new InMemoryStateStore();
+        $store->save('r1', [], ['first']);                            // 'first' already done
+        $store->saveHandoff('r1', 'first', 'added subtract(); run the tests next');   // its handoff, persisted
+
+        $worker = new ScriptedAgent($this->answer('ok'));            // ONE outcome: no re-formation allowed
+        $this->relay($this->config(worker: $worker, store: $store))->run();
+
+        Assert::count($worker->requests, 1);                                         // second()'s ai() only — no re-form
+        Assert::true(str_contains($worker->requests[0]->system, 'added subtract(); run the tests next'));
+    }
+
+    #[Test]
+    public function aStaleHandoffFromAnEarlierStepIsNotReplayedOnResume(): void
+    {
+        // The store holds a handoff from 'first', but the run already finished 'second' too. That handoff
+        // is stale — its reader ('second') has run — so the resumed run must NOT feed it to a later step.
+        $store = new InMemoryStateStore();
+        $store->save('r1', [], ['first', 'second']);
+        $store->saveHandoff('r1', 'first', 'stale context from the first step');
+
+        $worker = new ScriptedAgent($this->answer('did three'), $this->answer('h3'));
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'relay3';
+            }
+
+            #[Step]
+            protected function first(): void
+            {
+                $this->ai('one');
+            }
+
+            #[Step]
+            protected function second(): void
+            {
+                $this->ai('two');
+            }
+
+            #[Step]
+            protected function third(): void
+            {
+                $this->ai('three');
+            }
+        };
+
+        $wf->run();   // only third() runs
+
+        Assert::false(str_contains($worker->requests[0]->system, 'stale context from the first step'));
+    }
+
+    #[Test]
     public function theDoneToolFinishesTheRunAndSkipsRemainingSteps(): void
     {
         // The model calls `done` in the first step; the workflow finishes and the second step never runs.
@@ -725,6 +798,29 @@ final class WorkflowAbstractTest
         Assert::same($wf->runs, 2);                             // one re-run
         Assert::same($wf->sawCritique, 'add the missing test'); // the re-run saw the supervisor's guidance
         Assert::true($supervisor->heard !== null);              // the supervisor was consulted on the rejection
+    }
+
+    /** A two-step relay workflow whose steps each make one ai() call — for handoff/resume cases. */
+    private function relay(Environment $env): WorkflowAbstract
+    {
+        return new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'relay';
+            }
+
+            #[Step]
+            protected function first(): void
+            {
+                $this->ai('do the work');
+            }
+
+            #[Step]
+            protected function second(): void
+            {
+                $this->ai('carry on');
+            }
+        };
     }
 
     private function config(
