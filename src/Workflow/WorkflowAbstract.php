@@ -57,11 +57,18 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private string $currentStep = '';
 
     /**
-     * The baton between steps: the value the PREVIOUS step returned, automatically fed into the next
-     * step's model context (its summary of what it did + what to watch for). Selective carry-over, not
-     * the whole prior context. Set at each step's end from its return value; transient.
+     * The baton fed into the current step's model context — what the previous step handed on. Formed
+     * lazily from {@see $pendingBaton} on the first ai() call of a step. Transient.
      */
     private string $incomingHandoff = '';
+
+    /**
+     * The previous step's name + result, awaiting handoff formation — set at step end, consumed (and
+     * turned into {@see $incomingHandoff}) by the next step's first ai() call. Null = nothing pending.
+     *
+     * @var ?array{name: string, result: string}
+     */
+    private ?array $pendingBaton = null;
 
     /**
      * Artifacts produced this run, kept per step so PRIOR steps' outputs are not lost — only the
@@ -184,12 +191,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $tracer?->exit($span);
         }
 
-        // The step's return value IS the baton: it becomes the next step's incoming context, fed into
-        // its model automatically. Journaled so the relay shows in `claw log`.
-        $this->incomingHandoff = $result;
-        if ($result !== '') {
-            $tracer?->handoff($result);
-        }
+        // Remember the material for this step's handoff. The baton itself is formed LAZILY — only if a
+        // later step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
+        // e.g. the last step). See the formation at the top of {@see ai()}.
+        $this->pendingBaton = ['name' => $name, 'result' => $result];
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
@@ -266,6 +271,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function ai(string $prompt, ?array $tools = null, ?string $agent = null): string
     {
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
+        $this->formPendingHandoff();   // a downstream step is reading: form the previous step's baton now
 
         // The palette is a child scope holding the run's registry plus this workflow's own #[Tool]
         // methods — full by default, or narrowed to exactly $tools when a step asks for least
@@ -312,6 +318,45 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return $text;
         } finally {
             $tracer?->exit($span);
+        }
+    }
+
+    /**
+     * Form the previous step's handoff — once, lazily, when a downstream step's ai() asks for it. The
+     * baton is NOT a grab of the return value: the model is EXPLICITLY asked to write the handoff (what
+     * it did + what to watch for) from the step's result and artifacts. Cleared before the inner ai()
+     * so it never re-enters. A step that produced nothing hands on an empty baton.
+     */
+    private function formPendingHandoff(): void
+    {
+        $baton = $this->pendingBaton;
+        if ($baton === null) {
+            return;
+        }
+        $this->pendingBaton = null;   // clear FIRST: the formation below calls ai() again
+
+        $artifacts = $this->artifacts[$baton['name']] ?? [];
+        if ($baton['result'] === '' && $artifacts === []) {
+            $this->incomingHandoff = '';
+
+            return;
+        }
+
+        $rendered = $artifacts === []
+            ? '(none)'
+            : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
+
+        $this->incomingHandoff = trim($this->ai(
+            "You have just finished the workflow step '{$baton['name']}'. Now CONSCIOUSLY form the HANDOFF "
+            . 'to the NEXT step: in a few sentences, state what you accomplished and the findings the next '
+            . 'step must pay attention to — decisions made, files/paths touched, what remains, gotchas. '
+            . "Pass on only what matters, not everything. Reply with that handoff only.\n\n"
+            . "What this step did:\n{$baton['result']}\n\nArtifacts it produced:\n{$rendered}",
+            [],
+        ));
+
+        if ($this->incomingHandoff !== '') {
+            $this->tracer()?->handoff($this->incomingHandoff);
         }
     }
 

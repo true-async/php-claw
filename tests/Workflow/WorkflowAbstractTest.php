@@ -560,9 +560,14 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function aStepsReturnValueIsHandedToTheNextStepAsContext(): void
+    public function aStepsWorkIsHandedToTheNextStepAsAConsciouslyFormedBaton(): void
     {
-        $worker = new ScriptedAgent($this->answer('done'));   // only the second step calls ai()
+        // After step 1, the engine explicitly asks the model to FORM the handoff (request 0); the
+        // second step's own ai() (request 1) then carries that baton in its system prompt.
+        $worker = new ScriptedAgent(
+            $this->answer('added subtract(); next, run the tests'),   // the consciously-formed handoff
+            $this->answer('done'),                                    // the second step's own ai()
+        );
         $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
             public function name(): string
             {
@@ -572,7 +577,7 @@ final class WorkflowAbstractTest
             #[Step]
             public function first(): string
             {
-                return 'I added subtract(); the next step should run the tests';
+                return 'I added subtract()';
             }
 
             #[Step]
@@ -584,8 +589,7 @@ final class WorkflowAbstractTest
 
         $wf->run();
 
-        // the first step's RETURN is auto-fed into the second step's model context
-        Assert::true(str_contains($worker->requests[0]->system, 'I added subtract()'));
+        Assert::true(str_contains($worker->requests[1]->system, 'added subtract(); next, run the tests'));
     }
 
     #[Test]
