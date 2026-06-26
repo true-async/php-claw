@@ -63,6 +63,21 @@ final class WorkflowValidator
 
         if ($expectedClass !== null) {
             $this->assertDeclaresExpectedClass($code, $expectedClass);
+            $this->assertImplementsName($code);
+        }
+    }
+
+    /**
+     * `WorkflowAbstract::name()` is abstract — a workflow that omits it is not "invalid code" to the
+     * tokenizer, but it FATALS (uncatchable) the moment PHP loads the class, killing the run before any
+     * step. Catch it here, at save, so the generator gets a clear error and can fix it instead.
+     *
+     * @throws WorkflowException
+     */
+    private function assertImplementsName(string $code): void
+    {
+        if (preg_match('/\bfunction\s+name\s*\(/', $code) !== 1) {
+            throw new WorkflowException('workflow must implement `public function name(): string`');
         }
     }
 

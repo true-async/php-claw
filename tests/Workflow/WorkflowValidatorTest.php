@@ -57,6 +57,15 @@ final class WorkflowValidatorTest
     }
 
     #[Test]
+    public function rejectsAWorkflowMissingNameMethod(): void
+    {
+        // name() is abstract; omitting it fatals (uncatchable) at class load — catch it at save.
+        $base = "<?php\n namespace ClawWorkflow\\Common;\n use Claw\\Workflow\\WorkflowAbstract;\n final class W extends WorkflowAbstract { ";
+        Assert::true($this->rejected($base . '}', 'ClawWorkflow\\Common\\W'));   // no name()
+        Assert::false($this->rejected($base . 'public function name(): string { return \'w\'; } }', 'ClawWorkflow\\Common\\W'));
+    }
+
+    #[Test]
     public function requiresStepMethodsToBeProtected(): void
     {
         $step = static fn (string $vis): string => "<?php\n use Claw\\Workflow\\Step;\n class W { #[Step]\n {$vis} function go(): void {} }";
