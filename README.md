@@ -44,10 +44,13 @@ cp .env.example .env       # then set an API key (e.g. DeepSeek or Anthropic) an
 php bin/claw --session     # interactive chat — type a message, Ctrl+D to exit
 ```
 
-`claw` runs the **workflow** mode by default (`claw -c` to register a project, `claw -i` to
-open an issue, `claw run <id>` to solve it, `claw log` to inspect a run); run `claw` with no
-command for the full list. The interactive chat is the older **session** mode, reached with
-`--session`.
+`claw` runs the **workflow** mode by default: `claw -c` registers a project, `claw -i` opens
+an issue, `claw run <id>` generates and runs a solver workflow for it, and `claw log [<id>] [-v]`
+prints that run's trace tree — tinted by event type on a terminal (`NO_COLOR` or a pipe turns
+it plain). A run is **durable**: killed mid-flight, `claw run` resumes it from a snapshot of its
+state, its completed steps, and the handoff carried between them, re-running only the unfinished
+tail. Run `claw` with no command for the full list. The interactive chat is the older
+**session** mode, reached with `--session`.
 
 `.env` configures the backend (`CLAW_AGENT` = `claude` | `openai-compatible` | `gemini`), the
 model, the API key, and the sandbox working directory. Secrets stay in memory and are never
