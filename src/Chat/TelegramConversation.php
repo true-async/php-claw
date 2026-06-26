@@ -70,6 +70,8 @@ final class TelegramConversation implements ConversationInterface
 
     public function confirm(string $prompt): Approval
     {
+        $this->cancelTyping();   // permanent output ends the "typing…" keep-alive, same as send()
+
         // Inline buttons. Their callback_data are the same y/a/n tokens a typed
         // reply uses, so a click and a text reply both flow through deliver() into
         // the inbox — confirm() just waits for whichever arrives.

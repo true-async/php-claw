@@ -73,9 +73,23 @@ final class WorkflowStore
     {
         $this->assertValidName($name);
 
+        return $this->namespaceFor($shared) . '\\' . $name;
+    }
+
+    /** The namespace a workflow declares, given its scope — the package its {@see classFor()} lives in. */
+    public function namespaceFor(bool $shared): string
+    {
         return $shared
-            ? self::NS_ROOT . '\\Common\\' . $name
-            : self::NS_ROOT . '\\Session\\' . $this->sessionSegment . '\\' . $name;
+            ? self::NS_ROOT . '\\Common'
+            : self::NS_ROOT . '\\Session\\' . $this->sessionSegment;
+    }
+
+    /** The short class name — the segment after the last namespace separator of a fully-qualified name. */
+    public static function shortName(string $class): string
+    {
+        $pos = strrpos($class, '\\');
+
+        return $pos === false ? $class : substr($class, $pos + 1);
     }
 
     private function commonDir(): string

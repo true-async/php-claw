@@ -105,10 +105,10 @@ final class Environment
         return $registry;
     }
 
-    public function findStore(): WorkflowStateStore
+    public function findStore(): WorkflowStateStoreInterface
     {
         $store = $this->find(EnvKey::Store);
-        if (!$store instanceof WorkflowStateStore) {
+        if (!$store instanceof WorkflowStateStoreInterface) {
             throw new WorkflowException('environment has no state store');
         }
 

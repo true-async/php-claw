@@ -9,6 +9,8 @@ use Async\Coroutine;
 use function Async\delay;
 use function Async\spawn;
 
+use Claw\Chat\Status\SpinnerBlock;
+
 /**
  * Async terminal conversation with a fixed coloured chrome:
  *
@@ -458,13 +460,13 @@ final class AsyncConsoleConversation implements ConversationInterface
     /** Spinner coroutine: animate the status label. Cancelled by cancelSpinner(). */
     private function spin(): void
     {
-        static $frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+        $frames = SpinnerBlock::FRAMES;   // single source for the spinner frames
         $frame = 0;
 
         // Cancelled via cancelSpinner() — the runtime unwinds the cancellation.
         while (true) { // @phpstan-ignore while.alwaysTrue
             $this->writeStatus(
-                self::C_SPIN . $frames[$frame % 10] . self::C_RESET . self::C_DIM . $this->statusLabel . self::C_RESET
+                self::C_SPIN . $frames[$frame % \count($frames)] . self::C_RESET . self::C_DIM . $this->statusLabel . self::C_RESET
             );
 
             $frame++;

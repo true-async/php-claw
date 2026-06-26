@@ -59,7 +59,7 @@ final class SessionStore
     {
         $stmt = $this->pdo->query('SELECT role, content FROM messages ORDER BY seq');
         if ($stmt === false) {
-            return [];
+            return [];   // unreachable under ERRMODE_EXCEPTION; kept because query() is typed PDOStatement|false
         }
 
         /** @var list<array{role: string, content: string}> $rows */
@@ -72,9 +72,6 @@ final class SessionStore
     public function append(Message ...$messages): void
     {
         $stmt = $this->pdo->prepare('INSERT INTO messages (role, content) VALUES (:role, :content)');
-        if ($stmt === false) {
-            throw new ClawException('SessionStore: failed to prepare insert');
-        }
 
         foreach ($messages as $message) {
             $stmt->execute([
@@ -88,10 +85,6 @@ final class SessionStore
     public function isToolAllowed(string $tool): bool
     {
         $stmt = $this->pdo->prepare('SELECT 1 FROM rules WHERE name = :name');
-        if ($stmt === false) {
-            return false;
-        }
-
         $stmt->execute(['name' => $tool]);
 
         return $stmt->fetchColumn() !== false;
@@ -101,10 +94,6 @@ final class SessionStore
     public function allowTool(string $tool): void
     {
         $stmt = $this->pdo->prepare('INSERT OR IGNORE INTO rules (name) VALUES (:name)');
-        if ($stmt === false) {
-            throw new ClawException('SessionStore: failed to prepare rule insert');
-        }
-
         $stmt->execute(['name' => $tool]);
     }
 
@@ -112,10 +101,6 @@ final class SessionStore
     public function logToolCall(string $call, string $result, bool $isError): void
     {
         $stmt = $this->pdo->prepare('INSERT INTO audit (call, is_error, result) VALUES (:call, :err, :result)');
-        if ($stmt === false) {
-            throw new ClawException('SessionStore: failed to prepare audit insert');
-        }
-
         $stmt->execute(['call' => $call, 'err' => $isError ? 1 : 0, 'result' => $result]);
     }
 
@@ -128,7 +113,7 @@ final class SessionStore
     {
         $stmt = $this->pdo->query('SELECT call, is_error, result FROM audit ORDER BY id');
         if ($stmt === false) {
-            return [];
+            return [];   // unreachable under ERRMODE_EXCEPTION; kept because query() is typed PDOStatement|false
         }
 
         /** @var list<array{call: string, is_error: int, result: string}> $rows */

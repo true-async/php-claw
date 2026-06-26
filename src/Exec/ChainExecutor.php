@@ -13,13 +13,13 @@ use Claw\Tool\ToolCall;
  * to the terminal, which resolves and runs the tool. Adding behaviour = adding a
  * middleware, not editing the loop.
  */
-final class ChainExecutor implements ExecutorInterface
+final readonly class ChainExecutor implements ExecutorInterface
 {
     /** @var list<MiddlewareInterface> */
-    private readonly array $middlewares;
+    private array $middlewares;
 
     /** @var \Closure(ToolCall): ToolResultBlock */
-    private readonly \Closure $terminal;
+    private \Closure $terminal;
 
     /**
      * @param list<MiddlewareInterface>            $middlewares outer first

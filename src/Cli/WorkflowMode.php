@@ -16,10 +16,9 @@ use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Exceptions\WorkflowFinished;
 use Claw\Http\CurlHttpClient;
-use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
-use Claw\Project\Project;
 use Claw\Project\ProjectStore;
+use Claw\Project\RunStatus;
 use Claw\Tool\BashTool;
 use Claw\Tool\DefineWorkflowTool;
 use Claw\Tool\FinishTool;
@@ -251,8 +250,6 @@ final class WorkflowMode
 
         $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
         $solverClass = $workflowStore->classFor($solverName, true);
-        $solverPath = $workflowStore->path($solverName, true);
-        $solverNamespace = substr($solverClass, 0, (int) strrpos($solverClass, '\\'));
 
         // Resume an interrupted run (status still 'running') for this issue's solver, else start a new
         // one. The run id ties the ledger row, the trace, and the durable state snapshot together — so
@@ -271,51 +268,78 @@ final class WorkflowMode
             fwrite(STDOUT, "Resuming run #{$runId} for issue #{$issue->id}…\n");
         }
 
-        if (!is_file($solverPath)) {
-            fwrite(STDOUT, "Generating a solver workflow for issue #{$issue->id}…\n");
+        $ctx = new RunContext($env, $tracer, $store, $workflowStore, $runId, $issue, $project, $solverName, $solverClass);
 
-            $gen = $tracer->enterWorkflow('generate-issue-workflow');
-            try {
-                new GenerateIssueWorkflow($env, $runId . '-gen', [
-                    'solverName' => $solverName,
-                    'solverNamespace' => $solverNamespace,
-                    'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
-                ], $issue, $project)->run();
-            } catch (\Throwable $e) {
-                $tracer->exit($gen);
-                $store->setRunStatus($runId, 'failed');
-                fwrite(STDERR, 'claw run: generation failed: ' . $e->getMessage() . "\n");
-
-                return 1;
-            }
-            $tracer->exit($gen);
-
-            if (!is_file($solverPath)) {
-                $store->setRunStatus($runId, 'failed');
-                fwrite(STDERR, "claw run: no solver workflow was produced\n");
-
-                return 1;
-            }
-
-            fwrite(STDOUT, "\n--- {$solverPath} ---\n" . (string) file_get_contents($solverPath) . "\n--- end ---\n\n");
-            if (!$this->confirm('Run this workflow now?')) {
-                $store->setRunStatus($runId, 'generated');
-                fwrite(STDOUT, "Saved. Not run — review it, then `claw run {$issue->id}` again.\n");
-
-                return 0;
-            }
-        } else {
-            fwrite(STDOUT, "Reusing solver {$solverClass}.\n");
+        $early = $this->ensureSolver($ctx);
+        if ($early !== null) {
+            return $early;   // generation failed, or the human saved the solver without running it
         }
 
-        // Run the solver; on a runtime crash, ask the supervisor to repair it (a new class version)
-        // and resume — the same runId's snapshot skips finished steps. Bounded by MAX_REPAIRS.
-        $solverSpan = $tracer->enterWorkflow($solverName);
-        $currentClass = $solverClass;
+        return $this->runSolver($ctx);
+    }
+
+    /**
+     * Make sure a solver workflow exists for the run: reuse the one on disk, or generate one and have
+     * the human approve it. Returns null to proceed to running, or an exit code to stop here — a failed
+     * generation (1), or the human saving the solver without running it yet (0).
+     */
+    private function ensureSolver(RunContext $ctx): ?int
+    {
+        $solverPath = $ctx->workflowStore->path($ctx->solverName, true);
+        if (is_file($solverPath)) {
+            fwrite(STDOUT, "Reusing solver {$ctx->solverClass}.\n");
+
+            return null;
+        }
+
+        fwrite(STDOUT, "Generating a solver workflow for issue #{$ctx->issue->id}…\n");
+
+        $gen = $ctx->tracer->enterWorkflow('generate-issue-workflow');
+        try {
+            new GenerateIssueWorkflow($ctx->env, $ctx->runId . '-gen', [
+                'solverName' => $ctx->solverName,
+                'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
+                'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
+            ], $ctx->issue, $ctx->project)->run();
+        } catch (\Throwable $e) {
+            $ctx->tracer->exit($gen);
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            fwrite(STDERR, 'claw run: generation failed: ' . $e->getMessage() . "\n");
+
+            return 1;
+        }
+        $ctx->tracer->exit($gen);
+
+        if (!is_file($solverPath)) {
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            fwrite(STDERR, "claw run: no solver workflow was produced\n");
+
+            return 1;
+        }
+
+        fwrite(STDOUT, "\n--- {$solverPath} ---\n" . (string) file_get_contents($solverPath) . "\n--- end ---\n\n");
+        if (!$this->confirm('Run this workflow now?')) {
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Generated);
+            fwrite(STDOUT, "Saved. Not run — review it, then `claw run {$ctx->issue->id}` again.\n");
+
+            return 0;
+        }
+
+        return null;
+    }
+
+    /**
+     * Run the solver to completion; on a runtime crash, ask the supervisor to repair it (a new class
+     * version) and resume the same runId — its snapshot skips the finished steps. Bounded by MAX_REPAIRS.
+     */
+    private function runSolver(RunContext $ctx): int
+    {
+        $solverSpan = $ctx->tracer->enterWorkflow($ctx->solverName);
+        $currentClass = $ctx->solverClass;
         $attempt = 0;
         while (true) {
             try {
-                $solver = new $currentClass($env, $runId, [], $issue, $project);
+                $solver = new $currentClass($ctx->env, $ctx->runId, [], $ctx->issue, $ctx->project);
                 if (!$solver instanceof WorkflowAbstract) {
                     throw new ClawException("{$currentClass} is not a workflow");
                 }
@@ -325,30 +349,30 @@ final class WorkflowMode
                 break;   // the solver called `done`: a clean finish, not a crash to repair
             } catch (\Throwable $e) {
                 if (++$attempt > self::MAX_REPAIRS) {
-                    $tracer->exit($solverSpan);
-                    $store->setRunStatus($runId, 'failed');
-                    fwrite(STDERR, "claw run: run #{$runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}\n");
+                    $ctx->tracer->exit($solverSpan);
+                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                    fwrite(STDERR, "claw run: run #{$ctx->runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}\n");
 
                     return 1;
                 }
 
                 fwrite(STDOUT, "Run hit an error; asking the supervisor to repair (attempt {$attempt})…\n");
-                $fixed = $this->repairSolver($env, $tracer, $workflowStore, $currentClass, $solverName, $e->getMessage(), $runId, $attempt, $issue, $project);
+                $fixed = $this->repairSolver($ctx, $currentClass, $e->getMessage(), $attempt);
                 if ($fixed === null) {
-                    $tracer->exit($solverSpan);
-                    $store->setRunStatus($runId, 'failed');
-                    fwrite(STDERR, "claw run: the supervisor could not repair run #{$runId}\n");
+                    $ctx->tracer->exit($solverSpan);
+                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                    fwrite(STDERR, "claw run: the supervisor could not repair run #{$ctx->runId}\n");
 
                     return 1;
                 }
                 $currentClass = $fixed;   // resume with the fixed class on the next loop turn
             }
         }
-        $tracer->exit($solverSpan);
+        $ctx->tracer->exit($solverSpan);
 
-        $store->setRunStatus($runId, 'done');
-        $store->setIssueStatus($issue->id, IssueStatus::Done);   // every step ran -> the issue is resolved
-        fwrite(STDOUT, "Run #{$runId} finished for issue #{$issue->id}.\n");
+        $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
+        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Done);   // every step ran -> the issue is resolved
+        fwrite(STDOUT, "Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.\n");
 
         return 0;
     }
@@ -392,44 +416,34 @@ final class WorkflowMode
      * (the supervisor role), which writes a corrected version under a new class name. Returns that
      * fully-qualified class name, or null if the repair produced nothing.
      */
-    private function repairSolver(
-        Environment $env,
-        Tracer $tracer,
-        WorkflowStore $workflowStore,
-        string $brokenClass,
-        string $baseName,
-        string $error,
-        string $runId,
-        int $attempt,
-        Issue $issue,
-        Project $project,
-    ): ?string {
-        $fixedName = $baseName . 'R' . $attempt;
-        $fixedClass = $workflowStore->classFor($fixedName, true);
-        $fixedNamespace = substr($fixedClass, 0, (int) strrpos($fixedClass, '\\'));
+    private function repairSolver(RunContext $ctx, string $brokenClass, string $error, int $attempt): ?string
+    {
+        $fixedName = $ctx->solverName . 'R' . $attempt;
+        $fixedClass = $ctx->workflowStore->classFor($fixedName, true);
+        $fixedNamespace = $ctx->workflowStore->namespaceFor(true);
 
-        $brokenShort = substr($brokenClass, (int) strrpos($brokenClass, '\\') + 1);
-        $brokenPath = $workflowStore->path($brokenShort, true);
+        $brokenShort = WorkflowStore::shortName($brokenClass);
+        $brokenPath = $ctx->workflowStore->path($brokenShort, true);
         $brokenCode = is_file($brokenPath) ? (string) file_get_contents($brokenPath) : '';
 
-        $span = $tracer->enterWorkflow('supervise-run');
+        $span = $ctx->tracer->enterWorkflow('supervise-run');
         try {
-            new SuperviseWorkflow($env, $runId . '-fix' . $attempt, [
+            new SuperviseWorkflow($ctx->env, $ctx->runId . '-fix' . $attempt, [
                 'brokenName' => $brokenShort,
                 'brokenCode' => $brokenCode,
                 'error' => $error,
                 'fixedName' => $fixedName,
                 'fixedNamespace' => $fixedNamespace,
-            ], $issue, $project)->run();
+            ], $ctx->issue, $ctx->project)->run();
         } catch (\Throwable $e) {
-            $tracer->exit($span);
+            $ctx->tracer->exit($span);
             fwrite(STDERR, 'claw run: repair failed: ' . $e->getMessage() . "\n");
 
             return null;
         }
-        $tracer->exit($span);
+        $ctx->tracer->exit($span);
 
-        return is_file($workflowStore->path($fixedName, true)) ? $fixedClass : null;
+        return is_file($ctx->workflowStore->path($fixedName, true)) ? $fixedClass : null;
     }
 
     /**
@@ -450,7 +464,7 @@ final class WorkflowMode
 
         $reader = new TraceReader($store->pdo());
 
-        $runs = $reader->runs();
+        $runs = $store->recentRuns();
         if ($runs === []) {
             fwrite(STDOUT, "No runs yet for this project.\n");
 

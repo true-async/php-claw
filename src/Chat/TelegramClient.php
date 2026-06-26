@@ -91,6 +91,12 @@ final readonly class TelegramClient
     {
         $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
-        $this->http->post($this->base . $method, $body, ['Content-Type: application/json']);
+        // Telegram returns HTTP 200 with {"ok":false,"description":...} for application-level failures
+        // (message too long, chat blocked, bad markup). Check ok like getUpdates so a failed write does
+        // not silently look like success.
+        $data = $this->http->post($this->base . $method, $body, ['Content-Type: application/json'])->json();
+        if (($data['ok'] ?? false) !== true) {
+            throw new HttpException("Telegram {$method} failed: " . json_encode($data['description'] ?? $data));
+        }
     }
 }

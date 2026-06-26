@@ -21,6 +21,7 @@ use Claw\Agent\Role;
 use Claw\Agent\ToolResultBlock;
 use Claw\Agent\ToolSpec;
 use Claw\Agent\ToolUseBlock;
+use Claw\Agent\Usage;
 use Claw\Chat\ConversationInterface;
 use Claw\Chat\Status;
 use Claw\Exceptions\AgentException;
@@ -39,7 +40,6 @@ use Claw\Store\SessionStore;
 use Claw\Tool\DefineWorkflowTool;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
-use Claw\Tool\ToolInterface;
 use Claw\Workflow\WorkflowStore;
 use Claw\Workflow\WorkflowValidator;
 
@@ -107,7 +107,7 @@ final class Session
         }
 
         // Built last, so the workflow tools registered above are advertised too.
-        $this->specs = $this->buildSpecs();
+        $this->specs = $this->tools->specs();
 
         // Buffered so the input loop can keep queuing while a turn runs without blocking.
         $this->inbox = new Channel(16);
@@ -266,9 +266,13 @@ final class Session
 
             $this->history[] = new Message(Role::Assistant, $response->content);
 
-            if (!$response->wantsToolUse()) {
+            // Terminate on the dispatchable subset (toolCalls), not the advertised intent
+            // (wantsToolUse): a response can carry a tool_use stop reason yet no parseable tool
+            // calls (a truncated turn). Branching on toolCalls — like DefaultTurnLoop — ends with
+            // the text present instead of looping forever on an empty tool batch.
+            if ($response->toolCalls === []) {
                 $this->conversation->send($response->text ?? '');
-                $this->conversation->updateStatus(Status::done(new \Claw\Agent\Usage($totalInput, $totalOutput)));
+                $this->conversation->updateStatus(Status::done(new Usage($totalInput, $totalOutput)));
 
                 return;
             }
@@ -310,22 +314,5 @@ final class Session
         } catch (ToolException $e) {
             return new ToolResultBlock($call->id, $e->getMessage(), true);
         }
-    }
-
-    /**
-     * Build the tool specs advertised to the model (Tool -> Agent bridge).
-     *
-     * @return list<ToolSpec>
-     */
-    private function buildSpecs(): array
-    {
-        return array_map(
-            static fn (ToolInterface $tool): ToolSpec => new ToolSpec(
-                $tool->name(),
-                $tool->description(),
-                $tool->inputSchema(),
-            ),
-            $this->tools->all(),
-        );
     }
 }

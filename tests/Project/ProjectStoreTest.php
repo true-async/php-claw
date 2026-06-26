@@ -7,6 +7,7 @@ namespace Tests\Project;
 use Claw\Exceptions\ClawException;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
+use Claw\Project\RunStatus;
 use Testo\Assert;
 use Testo\Test;
 
@@ -180,8 +181,33 @@ final class ProjectStoreTest
             Assert::same($store->resumableRun('1', 'Issue1Solver'), $runId);
             Assert::null($store->resumableRun('1', 'OtherSolver'));   // different workflow
 
-            $store->setRunStatus($runId, 'done');
+            $store->setRunStatus($runId, RunStatus::Done);
             Assert::null($store->resumableRun('1', 'Issue1Solver'));   // finished -> not resumable
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function recentRunsListsTheLedgerNewestFirst(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $store->recordRun('7', 'Issue7Solver');
+            $second = $store->recordRun('7', 'Issue7Solver');
+            $store->setRunStatus($second, RunStatus::Failed);
+
+            $runs = $store->recentRuns();
+
+            Assert::count($runs, 2);
+            Assert::same($runs[0]['id'], $second);        // newest first
+            Assert::same($runs[0]['status'], 'failed');
+            Assert::same($runs[1]['issue'], '7');
+            Assert::same($runs[1]['workflow'], 'Issue7Solver');
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($folder);

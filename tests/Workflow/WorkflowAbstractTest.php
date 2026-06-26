@@ -29,7 +29,7 @@ use Claw\Workflow\InMemoryStateStore;
 use Claw\Workflow\Step;
 use Claw\Workflow\Tool;
 use Claw\Workflow\WorkflowAbstract;
-use Claw\Workflow\WorkflowStateStore;
+use Claw\Workflow\WorkflowStateStoreInterface;
 use Testo\Assert;
 use Testo\Test;
 use Tests\Support\ProbeWorkflow;
@@ -826,7 +826,7 @@ final class WorkflowAbstractTest
     private function config(
         ?AgentInterface $worker = null,
         ?Registry $registry = null,
-        ?WorkflowStateStore $store = null,
+        ?WorkflowStateStoreInterface $store = null,
         ?Tracer $tracer = null,
         string $systemPrompt = '',
     ): Environment {

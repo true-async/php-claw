@@ -18,7 +18,8 @@ interface SpeakerInterface
     /**
      * React to one incoming message and return this speaker's reply, or null to "pass it up" —
      * escalate to the next speaker in a chain (see {@see EscalatingSpeaker}). A terminal speaker
-     * (a person) always answers, so it never returns null.
+     * (a person) answers while it can; it returns null only when its input is exhausted (EOF /
+     * closed channel) — "no one is there", distinct from a deliberately blank reply ('').
      */
     public function reply(string $incoming): ?string;
 }

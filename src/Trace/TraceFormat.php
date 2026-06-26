@@ -32,6 +32,24 @@ final class TraceFormat
         'handoff'     => '1;33',   // bold yellow — context carried to the next step
     ];
 
+    /**
+     * The glyph + type + summary head for one record — ▶ opens a span, ◀ closes it, · is a point
+     * event. The shared one-line body the live {@see ConsoleTraceSink} and the history
+     * {@see TraceReader} both indent and {@see paint()}, so the two can never drift.
+     *
+     * @param array<string, mixed> $data
+     */
+    public static function line(string $phase, string $type, array $data): string
+    {
+        $glyph = match ($phase) {
+            'enter' => '▶',
+            'exit' => '◀',
+            default => '·',
+        };
+
+        return $glyph . ' ' . trim($type . ' ' . self::summary($type, $data));
+    }
+
     /** @param array<string, mixed> $data */
     public static function summary(string $type, array $data): string
     {
@@ -97,8 +115,13 @@ final class TraceFormat
         return mb_strlen($text) > $width ? mb_substr($text, 0, $width) . '…' : $text;
     }
 
-    /** @param array<array-key, mixed> $data */
-    private static function str(array $data, string $key): string
+    /**
+     * Read a field from the data bag as a string, coercing scalars and mapping anything else to ''.
+     * Shared with {@see TraceReader} so the fresh-event and row-read-back paths coerce identically.
+     *
+     * @param array<array-key, mixed> $data
+     */
+    public static function str(array $data, string $key): string
     {
         $value = $data[$key] ?? '';
 

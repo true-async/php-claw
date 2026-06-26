@@ -24,7 +24,7 @@ namespace Claw\Workflow;
  * in a fresh process, where the in-memory conversation that formed it is gone) loads it back before
  * it runs. {@see saveHandoff()}/{@see loadHandoff()} are that explicit door.
  */
-interface WorkflowStateStore
+interface WorkflowStateStoreInterface
 {
     /**
      * Persist a run's state snapshot and the names of the steps completed so far.

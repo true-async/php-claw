@@ -8,6 +8,7 @@ use Claw\Agent\Budget;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
+use Claw\Agent\TurnLoopInterface;
 use Claw\Exceptions\WorkflowException;
 use Claw\Exceptions\WorkflowFinished;
 use Claw\Project\Issue;
@@ -28,7 +29,7 @@ use Claw\Trace\Tracer;
  *  - {@see ai()} talks to the model (the turn loop inside is an internal detail) with a
  *    least-privilege tool palette; {@see tool()} runs one tool; {@see param()} reads run inputs.
  *  - {@see step()} runs a step method unless a prior run already did, then snapshots the
- *    workflow's state + progress to the {@see WorkflowStateStore}. The state is restored at
+ *    workflow's state + progress to the {@see WorkflowStateStoreInterface}. The state is restored at
  *    construction, so a skipped step loses nothing.
  *  - {@see run()} is just the entry point — by default it drives the step methods in order, but
  *    the author may override it and orchestrate by hand (plain if/while), calling step() as needed.
@@ -177,7 +178,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->currentStep = $name;   // so artifact() records under this step
 
         try {
-            $rubric = $this->stepCritic($name);
+            $step = $this->stepAttribute($name);   // reflect the Step attribute once, read both fields off it
+            $rubric = $this->criticRubric($step, $name);
             $this->critique = null;
 
             // Run the step; if it declares a critic, judge its RESULT (the return value) and the
@@ -185,7 +187,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // — until the critic passes, the supervisor accepts/stops, the soft round cap escalates,
             // or the budget runs out.
             $round = 0;
-            $maxRounds = $this->stepMaxRounds($name);
+            $maxRounds = $this->maxRounds($step);
             $result = '';
             $workHistory = [];
             while (true) {
@@ -262,7 +264,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     protected function artifact(string $label, ?string $text = null, ?string $file = null): void
     {
-        $entry = $file !== null ? Artifact::file($label, $file) : Artifact::text($label, $text ?? '');
+        // Exactly one of $text / $file — enforce the contract rather than silently preferring $file
+        // (dropping $text) or recording an empty artifact when neither is given.
+        $entry = match (true) {
+            $file !== null && $text === null => Artifact::file($label, $file),
+            $text !== null && $file === null => Artifact::text($label, $text),
+            default => throw new \LogicException("artifact('{$label}') needs exactly one of \$text or \$file."),
+        };
         $this->artifacts[$this->currentStep][] = $entry;
         $this->tracer()?->artifact($entry->label, $entry->kind, $entry->value);
     }
@@ -314,17 +322,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private function runTurns(string $prompt, ?array $tools, ?string $agent, array $prior): string
     {
-        // The palette is a child scope holding the run's registry plus this workflow's own #[Tool]
-        // methods — full by default, or narrowed to exactly $tools when a step asks for least
-        // privilege. The model's specs and what the executor can resolve are the same set either way.
-        $registry = $this->withLocalTools($this->env->findRegistry());
-        $palette = $tools === null ? $registry : $registry->only($tools);
-        $scope = $this->env->child()->set(EnvKey::Registry, $palette);
-
-        $model = $agent !== null ? $this->agentModel($agent) : null;
-        if ($model !== null) {
-            $scope->set(EnvKey::ModelId, $model);   // route this call to the role's model
-        }
+        $scope = $this->paletteScope($tools, $agent);
+        $palette = $scope->findRegistry();
 
         $exposed = array_map(static fn (ToolInterface $t): string => $t->name(), $palette->all());
         $tracer = $this->tracer();
@@ -340,17 +339,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
         $ask = $scope->find(EnvKey::Ask);
 
-        $loop = new DefaultTurnLoop(
-            $scope->findWorker(),
-            $scope->executor(),
-            $scope->findModelId(),
-            $system,
-            $scope->findRegistry()->specs(),
-            $scope->findMaxHistory(),
-            $tracer,
-            $ask instanceof SpeakerInterface ? $ask : null,
-            $this->turnBudget(),   // caps this one exchange; its spend bubbles up to the run total
-        );
+        $loop = $this->makeTurnLoop($scope, $system, $ask instanceof SpeakerInterface ? $ask : null);
 
         try {
             $result = $loop->run([...$prior, Message::userText($prompt)]);
@@ -361,6 +350,48 @@ abstract class WorkflowAbstract implements WorkflowInterface
         } finally {
             $tracer?->exit($span);
         }
+    }
+
+    /**
+     * The child scope one {@see ai()} call runs in: the run's registry plus this workflow's own
+     * #[Tool] methods, full by default or narrowed to exactly $tools for a least-privilege step, and
+     * routed to $agent's model when a role is named. The model's specs and what the executor can
+     * resolve are the same set either way.
+     *
+     * @param ?list<string> $tools null = every tool; a list = only those; [] = none
+     */
+    private function paletteScope(?array $tools, ?string $agent): Environment
+    {
+        $registry = $this->withLocalTools($this->env->findRegistry());
+        $palette = $tools === null ? $registry : $registry->only($tools);
+        $scope = $this->env->child()->set(EnvKey::Registry, $palette);
+
+        $model = $agent !== null ? $this->agentModel($agent) : null;
+        if ($model !== null) {
+            $scope->set(EnvKey::ModelId, $model);   // route this call to the role's model
+        }
+
+        return $scope;
+    }
+
+    /**
+     * Build the turn loop for one exchange from the call's scope. Kept a method (not a newed-up local)
+     * so the wiring lives in one place and the loop is an overridable {@see TurnLoopInterface} seam —
+     * the budget caps this one exchange and its spend bubbles up to the run total.
+     */
+    private function makeTurnLoop(Environment $scope, string $system, ?SpeakerInterface $ask): TurnLoopInterface
+    {
+        return new DefaultTurnLoop(
+            $scope->findWorker(),
+            $scope->executor(),
+            $scope->findModelId(),
+            $system,
+            $scope->findRegistry()->specs(),
+            $scope->findMaxHistory(),
+            $this->tracer(),
+            $ask,
+            $this->turnBudget(),
+        );
     }
 
     /**
@@ -569,19 +600,22 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return \is_numeric($value) ? (float) $value : 0.0;
     }
 
+    /** The {@see Step} attribute on a step method, instantiated once per step run, or null if absent. */
+    private function stepAttribute(string $name): ?Step
+    {
+        $attributes = new \ReflectionMethod($this, $name)->getAttributes(Step::class);
+
+        return $attributes === [] ? null : $attributes[0]->newInstance();
+    }
+
     /**
      * The rules a step's result is judged against. The {@see Step} attribute names a critic; the
      * actual rules live in {@see criticRules()}, keyed by that name. Null when the step has no critic.
      * An unknown name is a generation bug — fail loud rather than judge against an empty rubric.
      */
-    private function stepCritic(string $name): ?string
+    private function criticRubric(?Step $step, string $name): ?string
     {
-        $attributes = new \ReflectionMethod($this, $name)->getAttributes(Step::class);
-        if ($attributes === []) {
-            return null;
-        }
-
-        $critic = $attributes[0]->newInstance()->critic;
+        $critic = $step?->critic;
         if ($critic === null || $critic === '') {
             return null;
         }
@@ -595,10 +629,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /** The soft critic-round cap for a step — its `#[Step(maxRounds: N)]`, else the workflow default. */
-    private function stepMaxRounds(string $name): int
+    private function maxRounds(?Step $step): int
     {
-        $attributes = new \ReflectionMethod($this, $name)->getAttributes(Step::class);
-        $max = $attributes === [] ? null : $attributes[0]->newInstance()->maxRounds;
+        $max = $step?->maxRounds;
 
         return $max !== null && $max > 0 ? $max : self::DEFAULT_MAX_ROUNDS;
     }
@@ -663,8 +696,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * The critic rejected the step — consult the supervisor (the ask channel; behind it a supervisor
      * agent, then a human). Returns guidance for a re-run, or null to accept the work as-is.
      *
-     * Below {@see MAX_CRITIC_ROUNDS} this self-corrects on the critic's findings when no one is on the
-     * channel (the normal autonomous case). At/after the cap it ESCALATES: the round count looks stuck,
+     * Below the step's round cap ($maxRounds, default {@see DEFAULT_MAX_ROUNDS}) this self-corrects on
+     * the critic's findings when no one is on the channel (the normal autonomous case). At/after the cap
+     * it ESCALATES: the round count looks stuck,
      * so it asks the supervisor whether to accept, retry, or stop — and if there is no one to ask, it
      * stops the step rather than churn the same rework forever.
      *
@@ -739,6 +773,53 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
+     * Strip a ``` ... ``` fence if the model wrapped the code in one — a base-level concern shared by
+     * any code-generating workflow (the solver generator, the supervisor's repair), so it lives here.
+     */
+    protected function extractCode(string $text): string
+    {
+        $text = trim($text);
+        if (preg_match('/```(?:php)?\s*(.+?)\s*```/s', $text, $m) === 1) {
+            return trim($m[1]);
+        }
+
+        return $text;
+    }
+
+    /**
+     * The substring `define_workflow` returns on a successful save. Sniffing the tool's prose is the
+     * current save/reject protocol; the sentinel lives in one place so the code-generating workflows
+     * that branch on it cannot drift.
+     */
+    protected const string WORKFLOW_SAVED_MARKER = 'saved as';
+
+    /**
+     * Save a generated workflow through the `define_workflow` tool, with one repair pass — the
+     * save/detect/repair/retry control flow shared by every code-generating workflow. On the first
+     * rejection it hands the validator's complaint to $revise (which re-drafts the source on the
+     * appropriate role) and retries once; a second rejection throws. Returns the saved source.
+     *
+     * @param callable(string): string $revise given the rejection text, returns corrected source
+     *
+     * @throws WorkflowException on a second rejection
+     */
+    protected function saveGeneratedWorkflow(string $name, string $code, callable $revise): string
+    {
+        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
+        if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
+            return $code;
+        }
+
+        $code = $revise($result);
+        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
+        if (!str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
+            throw new WorkflowException($result);   // a second failure surfaces to the run-path
+        }
+
+        return $code;
+    }
+
+    /**
      * Ask a question of whoever sits on the run's ask channel — a person at the console, or an agent
      * (any {@see SpeakerInterface} placed in {@see EnvKey::Ask}) — and return their answer. The
      * exchange is two-way, so it runs OFF the trace; the question and answer are noted at
@@ -800,9 +881,24 @@ abstract class WorkflowAbstract implements WorkflowInterface
     {
         $state = [];
         foreach ($this->stateProperties() as $property) {
-            if ($property->isInitialized($this)) {
-                $state[$property->getName()] = $property->getValue($this);
+            if (!$property->isInitialized($this)) {
+                continue;
             }
+
+            $value = $property->getValue($this);
+            // The snapshot is JSON-persisted; a closure or resource is not durable state and would
+            // corrupt the store or fail opaquely later. Fail loud here, naming the offending field.
+            if ($value instanceof \Closure || \is_resource($value)) {
+                throw new \LogicException(sprintf(
+                    "Workflow '%s' field \$%s holds a %s, which is not durable state — keep step state in "
+                    . 'plain serializable properties (scalars, arrays, enums).',
+                    static::class,
+                    $property->getName(),
+                    $value instanceof \Closure ? 'closure' : 'resource',
+                ));
+            }
+
+            $state[$property->getName()] = $value;
         }
 
         return $state;

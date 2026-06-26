@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Claw\Agent;
 
-use Claw\Exceptions\HttpException;
 use Claw\Http\HttpClientInterface;
 
 /**
@@ -15,12 +14,12 @@ use Claw\Http\HttpClientInterface;
 final class OpenAiCompatibleAgent extends AbstractAgent
 {
     public function __construct(
-        private readonly HttpClientInterface $http,
+        HttpClientInterface $http,
         private readonly string $apiKey,
         private readonly string $baseUrl,
         AgentRetryPolicyInterface $retryPolicy = new BackoffAgentRetryPolicy(),
     ) {
-        parent::__construct($retryPolicy);
+        parent::__construct($http, $retryPolicy);
     }
 
     public static function deepSeek(HttpClientInterface $http, string $apiKey): self
@@ -30,24 +29,14 @@ final class OpenAiCompatibleAgent extends AbstractAgent
 
     protected function attempt(AgentRequest $request): AgentResponse
     {
-        try {
-            $response = $this->http->post(
-                rtrim($this->baseUrl, '/') . '/chat/completions',
-                json_encode(self::encodeRequest($request), JSON_THROW_ON_ERROR),
-                [
-                    'authorization: Bearer ' . $this->apiKey,
-                    'content-type: application/json',
-                ],
-            );
-        } catch (HttpException $e) {
-            throw AgentErrors::fromTransport($e);
-        }
-
-        if (!$response->isOk()) {
-            throw AgentErrors::fromResponse($response);
-        }
-
-        return self::decodeResponse($response->json());
+        return self::decodeResponse($this->postJson(
+            rtrim($this->baseUrl, '/') . '/chat/completions',
+            json_encode(self::encodeRequest($request), JSON_THROW_ON_ERROR),
+            [
+                'authorization: Bearer ' . $this->apiKey,
+                'content-type: application/json',
+            ],
+        ));
     }
 
     /**

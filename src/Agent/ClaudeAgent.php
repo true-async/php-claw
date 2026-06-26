@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Claw\Agent;
 
 use Claw\Exceptions\AgentException;
-use Claw\Exceptions\HttpException;
 use Claw\Http\HttpClientInterface;
 
 /**
@@ -19,36 +18,26 @@ use Claw\Http\HttpClientInterface;
 final class ClaudeAgent extends AbstractAgent
 {
     public function __construct(
-        private readonly HttpClientInterface $http,
+        HttpClientInterface $http,
         private readonly string $apiKey,
         private readonly string $baseUrl = 'https://api.anthropic.com',
         private readonly string $anthropicVersion = '2023-06-01',
         AgentRetryPolicyInterface $retryPolicy = new BackoffAgentRetryPolicy(),
     ) {
-        parent::__construct($retryPolicy);
+        parent::__construct($http, $retryPolicy);
     }
 
     protected function attempt(AgentRequest $request): AgentResponse
     {
-        try {
-            $response = $this->http->post(
-                rtrim($this->baseUrl, '/') . '/v1/messages',
-                json_encode(self::encodeRequest($request), JSON_THROW_ON_ERROR),
-                [
-                    'x-api-key: ' . $this->apiKey,
-                    'anthropic-version: ' . $this->anthropicVersion,
-                    'content-type: application/json',
-                ],
-            );
-        } catch (HttpException $e) {
-            throw AgentErrors::fromTransport($e);
-        }
-
-        if (!$response->isOk()) {
-            throw AgentErrors::fromResponse($response);
-        }
-
-        return self::decodeResponse($response->json());
+        return self::decodeResponse($this->postJson(
+            rtrim($this->baseUrl, '/') . '/v1/messages',
+            json_encode(self::encodeRequest($request), JSON_THROW_ON_ERROR),
+            [
+                'x-api-key: ' . $this->apiKey,
+                'anthropic-version: ' . $this->anthropicVersion,
+                'content-type: application/json',
+            ],
+        ));
     }
 
     /**

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
-use Claw\Exceptions\WorkflowException;
 use Claw\Tool\Registry;
 
 /**
@@ -85,17 +84,23 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     #[Step]
     protected function assess(): void
     {
-        $verdict = strtolower(trim($this->ai(
+        $verdict = $this->ai(
             'Rate how hard this coding task is for an AI to solve correctly. Reply with EXACTLY one '
             . 'word on the first line — `simple`, `moderate`, or `complex` — then one sentence of '
             . 'reasoning. Simple = a localized, mechanical change; complex = subtle logic, wide blast '
             . "radius, or design judgement.\n\nTask:\n{$this->taskSummary()}\n\nPlan:\n{$this->plan}",
             [],
             'supervisor-smart',
-        )));
+        );
 
-        $this->difficulty = str_contains($verdict, 'complex') ? 'complex'
-            : (str_contains($verdict, 'simple') ? 'simple' : 'moderate');
+        // Classify on the FIRST WORD only — the one-word verdict — not the whole reply: the reasoning
+        // sentence routinely names the other tiers ("not a simple change"), which would misclassify.
+        $word = strtolower((string) strtok(trim($verdict), " \t\r\n"));
+        $this->difficulty = match (true) {
+            str_contains($word, 'complex') => 'complex',
+            str_contains($word, 'simple') => 'simple',
+            default => 'moderate',
+        };
 
         // A simple task runs cheap; anything with real judgement gets the strong tier.
         $this->workerTier = $this->difficulty === 'simple' ? 'worker' : 'worker-smart';
@@ -133,40 +138,17 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             return;
         }
 
-        $this->code = $this->extractCode($this->ai(
-            "A senior reviewer rejected the workflow you wrote. Problems to fix:\n{$verdict}\n\n"
-            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-            . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
-            [],
-            'worker-smart',
-        ));
+        $this->code = $this->reviseCode("A senior reviewer rejected the workflow you wrote. Problems to fix:\n{$verdict}");
     }
 
     #[Step]
     protected function save(): void
     {
-        $name = (string) $this->param('solverName');
-
-        // tool() no longer throws on a validator rejection; the saved-confirmation contains "saved as",
-        // a rejection returns the validator's complaint. Hand that complaint back for one repair pass.
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
-        if (str_contains($result, 'saved as')) {
-            return;
-        }
-
-        $this->code = $this->extractCode($this->ai(
-            "The workflow class you wrote was rejected: {$result}\n\n"
-            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-            . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
-            [],
-            'worker-smart',
-        ));
-
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->code, 'shared' => true]);
-        if (!str_contains($result, 'saved as')) {
-            // A second failure surfaces to the run-path, which marks the run failed.
-            throw new WorkflowException($result);
-        }
+        $this->code = $this->saveGeneratedWorkflow(
+            (string) $this->param('solverName'),
+            $this->code,
+            fn (string $rejection): string => $this->reviseCode("The workflow class you wrote was rejected: {$rejection}"),
+        );
     }
 
     /** The issue's title and description as a compact task brief — shared by the planning steps. */
@@ -277,14 +259,18 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         return $docs === [] ? implode(', ', $names) : implode("\n", $docs);
     }
 
-    /** Strip a ``` ... ``` fence if the model wrapped the code in one. */
-    private function extractCode(string $text): string
+    /**
+     * One strong-tier revision pass: fold the rejection reason back into the original draft
+     * constraints and re-extract the corrected source. Shared by {@see review()} and {@see save()}.
+     */
+    private function reviseCode(string $reason): string
     {
-        $text = trim($text);
-        if (preg_match('/```(?:php)?\s*(.+?)\s*```/s', $text, $m) === 1) {
-            return trim($m[1]);
-        }
-
-        return $text;
+        return $this->extractCode($this->ai(
+            "{$reason}\n\n"
+            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
+            . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
+            [],
+            'worker-smart',
+        ));
     }
 }

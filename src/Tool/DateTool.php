@@ -10,7 +10,7 @@ use Claw\Exceptions\ToolException;
  * Return the current date and time. Safe (read-only). Useful because the model
  * has no clock of its own.
  */
-final class DateTool implements ToolInterface
+final readonly class DateTool implements ToolInterface
 {
     public function name(): string
     {

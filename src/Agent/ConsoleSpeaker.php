@@ -28,7 +28,7 @@ final class ConsoleSpeaker implements SpeakerInterface
         return SpeakerRole::Human;
     }
 
-    public function reply(string $incoming): string
+    public function reply(string $incoming): ?string
     {
         if (\is_resource($this->output)) {
             fwrite($this->output, "\n" . $incoming . "\nRequest> ");
@@ -36,6 +36,9 @@ final class ConsoleSpeaker implements SpeakerInterface
 
         $line = \is_resource($this->input) ? fgets($this->input) : false;
 
-        return $line === false ? '' : rtrim($line, "\r\n");
+        // EOF / closed input is "no one is there to answer" (null = pass it up), distinct from a
+        // deliberately blank line (''), which is a real empty answer. Returning '' on EOF would make
+        // the turn loop treat absence as an answer and churn empty user turns until the next cap.
+        return $line === false ? null : rtrim($line, "\r\n");
     }
 }

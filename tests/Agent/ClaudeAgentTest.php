@@ -16,6 +16,7 @@ use Claw\Agent\ToolSpec;
 use Claw\Agent\ToolUseBlock;
 use Claw\Exceptions\AgentException;
 use Claw\Exceptions\HttpException;
+use Claw\Exceptions\TransportException;
 use Claw\Http\HttpResponse;
 use Testo\Assert;
 use Testo\Test;
@@ -182,6 +183,32 @@ final class ClaudeAgentTest
         }
 
         Assert::true($threw);
+    }
+
+    #[Test]
+    public function malformed2xxBodySurfacesAsAgentExceptionNotHttpException(): void
+    {
+        // A 200 with an unparseable body makes HttpResponse::json() throw
+        // HttpException; send() must normalize it to a typed AgentException
+        // rather than let the raw HttpException leak past the retry contract.
+        $http = new FakeHttpClient(new HttpResponse(200, 'not json at all'));
+        $agent = new ClaudeAgent(
+            $http,
+            'sk-test',
+            retryPolicy: new BackoffAgentRetryPolicy(maxAttempts: 1),
+        );
+
+        $caught = null;
+        try {
+            $agent->send(new AgentRequest('m', [Message::userText('x')]));
+        } catch (\Throwable $e) {
+            $caught = $e;
+        }
+
+        // The raw HttpException from json() is normalized to a typed AgentException
+        // (specifically the transport-mapped one), never leaked as an HttpException.
+        Assert::true($caught instanceof AgentException);
+        Assert::true($caught instanceof TransportException);
     }
 
     #[Test]

@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace Claw\Workflow;
 
 /**
- * The default {@see WorkflowStateStore}: keeps each run's latest snapshot in a map and hands out
+ * The default {@see WorkflowStateStoreInterface}: keeps each run's latest snapshot in a map and hands out
  * sequential ids, all in process memory. Self-consistent within a process lifetime (ids unique,
  * progress restorable) with no external dependency; what it does NOT give is durability across
  * process boundaries — restart and the map is empty. The SQLite store (a later phase) is the
  * durable drop-in.
  */
-final class InMemoryStateStore implements WorkflowStateStore
+final class InMemoryStateStore implements WorkflowStateStoreInterface
 {
     /** @var array<string, array{state: array<string, mixed>, done: list<string>}> latest snapshot per run */
     private array $runs = [];

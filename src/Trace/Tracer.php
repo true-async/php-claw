@@ -53,20 +53,34 @@ final class Tracer
         return $this->open(new TraceEvent('turn', Level::Debug, ['number' => $number, 'model' => $model]));
     }
 
-    /** Close a span (and any still-open children, defensively). A null id is a no-op. */
+    /** Close a span (and any still-open children, defensively). A null/unknown id is a no-op. */
     public function exit(?int $id): void
     {
         if ($id === null) {
             return;
         }
 
-        while ($this->stack !== [] && $this->top() !== $id) {
-            array_pop($this->stack);
-        }
-        if ($this->stack !== []) {
-            array_pop($this->stack);
+        // An id we don't hold open (double exit, foreign id) must NOT unwind the
+        // whole stack — just drop any stray level and bail.
+        if (!\in_array($id, $this->stack, true)) {
+            unset($this->spanLevel[$id]);
+
+            return;
         }
 
+        // Close still-open children first, then the target — every opened span gets
+        // a matching exit, so the persisted trace stays balanced (an unbalanced enter
+        // makes the reader's stepBounds() run away) and spanLevel can't leak.
+        while ($this->top() !== $id) {
+            $this->closeTop();
+        }
+        $this->closeTop();
+    }
+
+    /** Pop the current span and emit its matching 'exit', inheriting the level its 'enter' had. */
+    private function closeTop(): void
+    {
+        $id = (int) array_pop($this->stack);
         $level = $this->spanLevel[$id] ?? Level::Info;   // a close is shown exactly when its open was
         unset($this->spanLevel[$id]);
         $this->emit('exit', $id, new TraceEvent('end', $level));

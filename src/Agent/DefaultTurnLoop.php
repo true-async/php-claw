@@ -30,12 +30,13 @@ final class DefaultTurnLoop implements TurnLoopInterface
     private const string QUESTION_MARKER = '[question]';
 
     /**
-     * Soft cap on model turns in ONE exchange. A step can legitimately take many turns (running a test
-     * gate, retrying), so this is generous — but a runaway loop (the same failing command over and
-     * over) should not churn forever. Every MAX_TURNS turns the loop pauses to ask the ask channel
-     * whether to keep going; with no one to ask it stops and returns what it has, rather than run away.
+     * How often (in model turns) the loop pauses to ask the ask channel whether to keep going — a
+     * recurring checkpoint, NOT a hard cap. A step can legitimately take many turns (running a test
+     * gate, retrying), so the loop runs on; but a runaway loop (the same failing command over and over)
+     * should not churn forever. Every interval the loop checks in; with no one to ask, or any answer
+     * other than "continue", it stops and returns what it has. The only hard bound is the Budget.
      */
-    private const int MAX_TURNS = 50;
+    private const int TURN_CHECKPOINT_INTERVAL = 50;
 
     /** Appended to the system prompt when an ask channel is present, teaching that marker. */
     private const string ASK_INSTRUCTION = "\n\nIf you need input or a decision from a person to "
@@ -85,9 +86,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 throw new ContextLengthException("History reached the configured limit of {$this->maxHistory} messages");
             }
 
-            // Every MAX_TURNS turns, pause and ask whether to keep going — a runaway loop should not
+            // Every checkpoint interval, pause and ask whether to keep going — a runaway loop should not
             // churn forever. With no one to ask, stop here and return the last answer we have.
-            if ($turnNo > 0 && $turnNo % self::MAX_TURNS === 0 && !$this->keepGoing($turnNo)) {
+            if ($turnNo > 0 && $turnNo % self::TURN_CHECKPOINT_INTERVAL === 0 && !$this->keepGoing($turnNo)) {
                 return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput));
             }
 
@@ -190,8 +191,8 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
     /**
      * The model's question for the ask channel when its turn carries the {@see QUESTION_MARKER},
-     * else null (a normal final answer). The marker is stripped; an empty remainder falls back to
-     * the whole text, so a bare marker still asks something.
+     * else null (a normal final answer). The marker is stripped; a bare marker with no question
+     * falls back to a real prompt rather than echoing the literal "[question]" at the channel.
      */
     private function extractQuestion(string $text): ?string
     {
@@ -201,6 +202,6 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
         $question = trim(str_replace(self::QUESTION_MARKER, '', $text));
 
-        return $question === '' ? trim($text) : $question;
+        return $question === '' ? 'The worker paused for input but gave no question.' : $question;
     }
 }

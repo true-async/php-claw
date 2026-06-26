@@ -13,7 +13,7 @@ use Claw\Exceptions\WorkflowFinished;
  * passes it through untouched (only {@see \Claw\Exceptions\ToolException} becomes a tool result).
  * Safe — it ends work, it does not perform any.
  */
-final class FinishTool implements ToolInterface
+final readonly class FinishTool implements ToolInterface
 {
     public function name(): string
     {

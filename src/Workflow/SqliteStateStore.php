@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Claw\Workflow;
 
 /**
- * The durable {@see WorkflowStateStore}: snapshots a run's state into the project db, so a run that
+ * The durable {@see WorkflowStateStoreInterface}: snapshots a run's state into the project db, so a run that
  * was killed mid-flight resumes after a restart — the next instance for the same run id loads the
  * saved fields + completed steps and re-runs only the unfinished tail. The in-memory store is the
  * drop-in for tests / single-process runs; this is the production one.
@@ -15,7 +15,7 @@ namespace Claw\Workflow;
  * one — kept apart from the state snapshot because the two are saved at different moments. Leaf-call
  * ids come from a monotonic table so they stay unique across restarts, not just within a process.
  */
-final readonly class SqliteStateStore implements WorkflowStateStore
+final readonly class SqliteStateStore implements WorkflowStateStoreInterface
 {
     public function __construct(private \PDO $pdo)
     {
@@ -99,9 +99,14 @@ final readonly class SqliteStateStore implements WorkflowStateStore
 
     public function nextId(): string
     {
+        // AUTOINCREMENT (via sqlite_sequence) hands out a fresh, never-reused id even across restarts.
+        // The inserted rows have no other purpose, so reclaim the spent ones — the counter table can
+        // never grow unboundedly, it holds just the latest row.
         $this->pdo->exec('INSERT INTO state_seq DEFAULT VALUES');
+        $id = (string) $this->pdo->lastInsertId();
+        $this->pdo->exec('DELETE FROM state_seq WHERE id < ' . (int) $id);
 
-        return (string) $this->pdo->lastInsertId();
+        return $id;
     }
 
     /** @return array<string, mixed> */

@@ -27,30 +27,6 @@ final class TraceReader
     }
 
     /**
-     * Recent runs (newest first), from the ledger — for the header and for picking one.
-     *
-     * @return list<array{id: string, issue: string, workflow: string, status: string}>
-     */
-    public function runs(int $limit = 20): array
-    {
-        $stmt = $this->pdo->prepare('SELECT id, issue_id, workflow, status FROM runs ORDER BY id DESC LIMIT :n');
-        $stmt->bindValue('n', $limit, \PDO::PARAM_INT);
-        $stmt->execute();
-
-        $runs = [];
-        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
-            $runs[] = [
-                'id' => $this->str($row, 'id'),
-                'issue' => $this->str($row, 'issue_id'),
-                'workflow' => $this->str($row, 'workflow'),
-                'status' => $this->str($row, 'status'),
-            ];
-        }
-
-        return $runs;
-    }
-
-    /**
      * The run's trace as an indented tree: ▶ opens a span, ◀ closes it, · is a point event. Rows
      * below $threshold are dropped, so the same density knob as the live console applies to history;
      * the default shows everything that was recorded.
@@ -114,9 +90,9 @@ final class TraceReader
 
         $lines = [];
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
-            $data = json_decode($this->str($row, 'data'), true);
+            $data = json_decode(TraceFormat::str($row, 'data'), true);
             $data = \is_array($data) ? $data : [];
-            $lines[] = '- ' . $this->str($data, 'label') . ' (' . $this->str($data, 'kind') . '): ' . $this->str($data, 'value');
+            $lines[] = '- ' . TraceFormat::str($data, 'label') . ' (' . TraceFormat::str($data, 'kind') . '): ' . TraceFormat::str($data, 'value');
         }
 
         return $lines === [] ? 'No artifacts have been recorded in this workflow yet.' : implode("\n", $lines);
@@ -128,15 +104,16 @@ final class TraceReader
         $wf = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = :r AND type = 'workflow' AND phase = 'enter' ORDER BY seq LIMIT 1");
         $wf->execute(['r' => $runId]);
         $row = $wf->fetch(\PDO::FETCH_ASSOC);
-        $data = $row === false ? [] : (json_decode($this->str($row, 'data'), true) ?: []);
-        $name = \is_array($data) ? $this->str($data, 'name') : '';
+        $decoded = $row === false ? [] : json_decode(TraceFormat::str($row, 'data'), true);
+        $data = \is_array($decoded) ? $decoded : [];
+        $name = TraceFormat::str($data, 'name');
 
         $steps = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = :r AND type = 'step' AND phase = 'enter' ORDER BY seq");
         $steps->execute(['r' => $runId]);
         $names = [];
         foreach ($steps->fetchAll(\PDO::FETCH_ASSOC) as $stepRow) {
-            $decoded = json_decode($this->str($stepRow, 'data'), true);
-            $stepName = \is_array($decoded) ? $this->str($decoded, 'name') : '';
+            $decoded = json_decode(TraceFormat::str($stepRow, 'data'), true);
+            $stepName = \is_array($decoded) ? TraceFormat::str($decoded, 'name') : '';
             if ($stepName !== '' && !\in_array($stepName, $names, true)) {
                 $names[] = $stepName;
             }
@@ -188,29 +165,15 @@ final class TraceReader
             }
 
             $depth = (int) ($row['depth'] ?? 0);
-            $type = $this->str($row, 'type');
-            $decoded = json_decode($this->str($row, 'data'), true);
+            $type = TraceFormat::str($row, 'type');
+            $decoded = json_decode(TraceFormat::str($row, 'data'), true);
             $data = \is_array($decoded) ? $decoded : [];
 
-            $glyph = match ($this->str($row, 'phase')) {
-                'enter' => '▶',
-                'exit' => '◀',
-                default => '·',
-            };
-
             // Same one-line renderer as the live console, so history and live can never diverge.
-            $head = $glyph . ' ' . trim($type . ' ' . TraceFormat::summary($type, $data));
+            $head = TraceFormat::line(TraceFormat::str($row, 'phase'), $type, $data);
             $lines[] = str_repeat('  ', $depth) . TraceFormat::paint($type, $head, $color);
         }
 
         return implode("\n", $lines);
-    }
-
-    /** @param array<array-key, mixed> $row */
-    private function str(array $row, string $key): string
-    {
-        $value = $row[$key] ?? '';
-
-        return \is_scalar($value) ? (string) $value : '';
     }
 }

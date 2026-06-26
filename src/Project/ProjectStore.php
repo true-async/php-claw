@@ -152,16 +152,20 @@ final class ProjectStore
     /** Load one issue (with the ids of the runs spawned for it). @throws ClawException */
     public function loadIssue(string $issueId): Issue
     {
-        $stmt = $this->pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
-        $stmt->execute(['id' => $issueId]);
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-        if (!\is_array($row)) {
-            throw new ClawException("issue #{$issueId} not found in project {$this->project->id}");
-        }
+        try {
+            $stmt = $this->pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
+            $stmt->execute(['id' => $issueId]);
+            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+            if (!\is_array($row)) {
+                throw new ClawException("issue #{$issueId} not found in project {$this->project->id}");
+            }
 
-        $rs = $this->pdo->prepare('SELECT id FROM runs WHERE issue_id = :id ORDER BY id');
-        $rs->execute(['id' => $issueId]);
-        $runs = array_values(array_map(static fn (mixed $r): string => (string) $r, $rs->fetchAll(\PDO::FETCH_COLUMN)));
+            $rs = $this->pdo->prepare('SELECT id FROM runs WHERE issue_id = :id ORDER BY id');
+            $rs->execute(['id' => $issueId]);
+            $runs = array_values(array_map(static fn (mixed $r): string => (string) $r, $rs->fetchAll(\PDO::FETCH_COLUMN)));
+        } catch (\PDOException $e) {
+            throw new ClawException("ProjectStore: cannot load issue #{$issueId}: " . $e->getMessage(), 0, $e);
+        }
 
         return new Issue(
             $issueId,
@@ -174,34 +178,59 @@ final class ProjectStore
     }
 
     /** Record a run spawned for an issue and return its store-assigned id. */
-    public function recordRun(string $issueId, string $workflow, string $status = 'running'): string
+    public function recordRun(string $issueId, string $workflow, RunStatus $status = RunStatus::Running): string
     {
         $stmt = $this->pdo->prepare(
             'INSERT INTO runs (issue_id, workflow, status, created_at)
              VALUES (:issue, :workflow, :status, :created_at)',
         );
-        $stmt->execute(['issue' => $issueId, 'workflow' => $workflow, 'status' => $status, 'created_at' => time()]);
+        $stmt->execute(['issue' => $issueId, 'workflow' => $workflow, 'status' => $status->value, 'created_at' => time()]);
 
         return (string) $this->pdo->lastInsertId();
     }
 
-    public function setRunStatus(string $runId, string $status): void
+    public function setRunStatus(string $runId, RunStatus $status): void
     {
         $stmt = $this->pdo->prepare('UPDATE runs SET status = :status WHERE id = :id');
-        $stmt->execute(['status' => $status, 'id' => $runId]);
+        $stmt->execute(['status' => $status->value, 'id' => $runId]);
     }
 
     /**
-     * The id of an interrupted run (still 'running') for this issue's workflow, newest first, or
-     * null — a run only stays 'running' if the process was killed before it finished or failed, so
-     * this is exactly what a re-run should resume.
+     * Recent runs from the ledger, newest first — for the `claw log` header and for picking one. The
+     * `runs` table is this store's own, so its reads live here rather than in the trace reader.
+     *
+     * @return list<array{id: string, issue: string, workflow: string, status: string}>
+     */
+    public function recentRuns(int $limit = 20): array
+    {
+        $stmt = $this->pdo->prepare('SELECT id, issue_id, workflow, status FROM runs ORDER BY id DESC LIMIT :n');
+        $stmt->bindValue('n', $limit, \PDO::PARAM_INT);
+        $stmt->execute();
+
+        $runs = [];
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $runs[] = [
+                'id' => (string) ($row['id'] ?? ''),
+                'issue' => (string) ($row['issue_id'] ?? ''),
+                'workflow' => (string) ($row['workflow'] ?? ''),
+                'status' => (string) ($row['status'] ?? ''),
+            ];
+        }
+
+        return $runs;
+    }
+
+    /**
+     * The id of an interrupted run (still {@see RunStatus::Running}) for this issue's workflow, newest
+     * first, or null — a run only stays Running if the process was killed before it finished or failed,
+     * so this is exactly what a re-run should resume.
      */
     public function resumableRun(string $issueId, string $workflow): ?string
     {
         $stmt = $this->pdo->prepare(
-            "SELECT id FROM runs WHERE issue_id = :issue AND workflow = :workflow AND status = 'running' ORDER BY id DESC LIMIT 1",
+            'SELECT id FROM runs WHERE issue_id = :issue AND workflow = :workflow AND status = :status ORDER BY id DESC LIMIT 1',
         );
-        $stmt->execute(['issue' => $issueId, 'workflow' => $workflow]);
+        $stmt->execute(['issue' => $issueId, 'workflow' => $workflow, 'status' => RunStatus::Running->value]);
         $id = $stmt->fetchColumn();
 
         return $id === false ? null : (string) $id;

@@ -72,6 +72,48 @@ final class TracerTest
     }
 
     #[Test]
+    public function closingAParentEmitsMatchingExitsForStillOpenChildren(): void
+    {
+        $sink = new ArrayTraceSink();
+        $tracer = new Tracer('r1', $sink);
+
+        $wf = $tracer->enterWorkflow('demo');
+        $step = $tracer->enterStep('s1');
+        $ai = $tracer->enterAi('worker', 'm');   // Debug — left open on purpose
+        $tracer->exit($step);                    // must also close the orphaned ai span
+        $tracer->exit($wf);
+
+        // Every opened span has exactly one matching exit — no unbalanced enter.
+        $opened = [];
+        $closed = [];
+        foreach ($sink->records as $rec) {
+            if ($rec->phase() === 'enter') {
+                $opened[] = $rec->id();
+            } elseif ($rec->phase() === 'exit') {
+                $closed[] = $rec->id();
+            }
+        }
+        sort($opened);
+        sort($closed);
+        Assert::same($opened, $closed);
+
+        // The orphaned child was closed before its parent, inheriting its own level.
+        $aiExit = null;
+        foreach ($sink->records as $rec) {
+            if ($rec->phase() === 'exit' && $rec->id() === $ai) {
+                $aiExit = $rec;
+            }
+        }
+        Assert::true($aiExit !== null);
+        Assert::same($aiExit->event()->level, Level::Debug);
+
+        // A second exit on the already-closed span is a harmless no-op.
+        $before = count($sink->records);
+        $tracer->exit($ai);
+        Assert::same(count($sink->records), $before);
+    }
+
+    #[Test]
     public function traceStorePersistsEveryRecord(): void
     {
         $pdo = new \PDO('sqlite::memory:');

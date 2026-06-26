@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
-use Claw\Exceptions\WorkflowException;
-
 /**
  * The supervisor's run-level CODE REPAIR: when a generated solver crashes at runtime, this takes its
  * source and the error and writes a FIXED version under a NEW class name (via the supervisor role and
@@ -35,28 +33,17 @@ final class SuperviseWorkflow extends WorkflowAbstract
     #[Step]
     protected function save(): void
     {
-        $name = (string) $this->param('fixedName');
-
-        // tool() no longer throws on a rejection; a save returns "saved as", a rejection the validator's
-        // complaint. Hand that complaint back to the supervisor for one repair pass, then retry.
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->fixed, 'shared' => true]);
-        if (str_contains($result, 'saved as')) {
-            return;
-        }
-
-        $this->fixed = $this->extractCode($this->ai(
-            "The corrected class was rejected: {$result}\n\n"
-            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-            . $this->repairPrompt() . "\n\nThe code you produced was:\n\n" . $this->fixed,
-            [],
-            'supervisor',
-        ));
-
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $this->fixed, 'shared' => true]);
-        if (!str_contains($result, 'saved as')) {
-            // A second failure surfaces to the run-path, which gives up on this repair attempt.
-            throw new WorkflowException($result);
-        }
+        $this->fixed = $this->saveGeneratedWorkflow(
+            (string) $this->param('fixedName'),
+            $this->fixed,
+            fn (string $rejection): string => $this->extractCode($this->ai(
+                "The corrected class was rejected: {$rejection}\n\n"
+                . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
+                . $this->repairPrompt() . "\n\nThe code you produced was:\n\n" . $this->fixed,
+                [],
+                'supervisor',
+            )),
+        );
     }
 
     private function repairPrompt(): string
@@ -95,16 +82,5 @@ final class SuperviseWorkflow extends WorkflowAbstract
 
             Return ONLY the corrected PHP source — no prose, no markdown fences.
             PROMPT;
-    }
-
-    /** Strip a ``` ... ``` fence if the model wrapped the code in one. */
-    private function extractCode(string $text): string
-    {
-        $text = trim($text);
-        if (preg_match('/```(?:php)?\s*(.+?)\s*```/s', $text, $m) === 1) {
-            return trim($m[1]);
-        }
-
-        return $text;
     }
 }

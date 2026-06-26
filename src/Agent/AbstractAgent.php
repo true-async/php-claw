@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Claw\Agent;
 
 use Claw\Exceptions\AgentException;
+use Claw\Exceptions\HttpException;
+use Claw\Http\HttpClientInterface;
 
 /**
  * Base agent: one model round-trip is `attempt()` (provider-specific); `send()`
@@ -14,6 +16,7 @@ use Claw\Exceptions\AgentException;
 abstract class AbstractAgent implements AgentInterface
 {
     public function __construct(
+        private readonly HttpClientInterface $http,
         private readonly AgentRetryPolicyInterface $retryPolicy = new BackoffAgentRetryPolicy(),
     ) {
     }
@@ -38,4 +41,28 @@ abstract class AbstractAgent implements AgentInterface
      * One model round-trip. Throws a typed AgentException on failure.
      */
     abstract protected function attempt(AgentRequest $request): AgentResponse;
+
+    /**
+     * Shared transport for the concrete agents: POST the encoded body and return
+     * the decoded JSON. Every failure exits as a typed AgentException — transport
+     * faults and a malformed-but-2xx body (json() throws HttpException) both map
+     * via AgentErrors, so nothing leaks past send()'s AgentException-only retry.
+     *
+     * @param array<int, string> $headers raw header lines ("Name: value")
+     *
+     * @return array<string, mixed>
+     */
+    protected function postJson(string $url, string $body, array $headers): array
+    {
+        try {
+            $response = $this->http->post($url, $body, $headers);
+            if (!$response->isOk()) {
+                throw AgentErrors::fromResponse($response);
+            }
+
+            return $response->json();
+        } catch (HttpException $e) {
+            throw AgentErrors::fromTransport($e);
+        }
+    }
 }

@@ -8,6 +8,7 @@ use Claw\Agent\AbstractAgent;
 use Claw\Agent\AgentRequest;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\AgentRetryPolicyInterface;
+use Claw\Http\HttpResponse;
 
 /**
  * A concrete AbstractAgent whose single attempt() returns preset outcomes
@@ -28,7 +29,9 @@ final class ScriptedRetryAgent extends AbstractAgent
     {
         $this->outcomes = $outcomes;
 
-        parent::__construct($policy);
+        // attempt() is overridden and never touches transport, so a throwaway
+        // client satisfies the base contract without a network.
+        parent::__construct(new FakeHttpClient(new HttpResponse(200, '{}')), $policy);
     }
 
     protected function attempt(AgentRequest $request): AgentResponse

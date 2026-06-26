@@ -17,12 +17,12 @@ use Claw\Trace\TraceReader;
  * back. Read-only and safe. Registered per run by the composition root, so it is in every run's tool
  * palette automatically.
  */
-final class RecallTool implements ToolInterface
+final readonly class RecallTool implements ToolInterface
 {
     public function __construct(
-        private readonly TraceReader $journal,
-        private readonly string $runId,
-        private readonly string $task = '',   // the issue/task brief this run was started for
+        private TraceReader $journal,
+        private string $runId,
+        private string $task = '',   // the issue/task brief this run was started for
     ) {
     }
 
@@ -81,7 +81,7 @@ final class RecallTool implements ToolInterface
             'tool' => $name === ''
                 ? throw new ToolException("recall what='tool' needs a 'name' (the tool to recall)")
                 : $this->journal->toolHistory($this->runId, $name),
-            default => throw new ToolException("recall: unknown what '{$what}' (use workflow|step|tool|artifacts)"),
+            default => throw new ToolException("recall: unknown what '{$what}' (use task|workflow|step|tool|artifacts)"),
         };
     }
 }

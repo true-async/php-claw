@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claw · quest board</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="rune">✦</span><b>claw</b><small>quest board</small></div>
+  <div class="project-pill">home/edmond/php-claw <span class="chev">▾</span></div>
+  <div class="legend">
+    <span><i style="background:var(--open)"></i>Open</span>
+    <span><i style="background:var(--active)"></i>In Progress</span>
+    <span><i style="background:var(--wait)"></i>Waiting · Human</span>
+    <span><i style="background:var(--done)"></i>Done</span>
+    <span><i style="background:var(--closed)"></i>Closed</span>
+  </div>
+</header>
+
+<main class="board" id="board"></main>
+
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <div>
+      <h2 id="d-title">—</h2>
+      <div class="sub" id="d-sub"></div>
+    </div>
+    <div class="x" onclick="closeDrawer()">esc ✕</div>
+  </div>
+  <div class="runs" id="d-runs"></div>
+  <div class="journal">
+    <div class="journal-title">trace · spans (workflow → step → ai → tool)</div>
+    <div id="d-journal"></div>
+  </div>
+</aside>
+
+<div class="hint">клик по карточке → <b>журнал</b> · карточки <b>тикают</b> в реальном времени</div>
+
+<script>
+const STEPS = ["validate","design","review","implement","test","changelog","deliver"];
+const COLS = [
+  {k:"open",       label:"Open",            c:"--open"},
+  {k:"inprogress", label:"In Progress",     c:"--active"},
+  {k:"waiting",    label:"Waiting · Human",  c:"--wait"},
+  {k:"done",       label:"Done",            c:"--done"},
+  {k:"closed",     label:"Closed",          c:"--closed"},
+];
+const RUNE = {open:"◇", inprogress:"⚔", waiting:"⚑", done:"✓", closed:"·"};
+
+// ----- domain state (mirrors claw: issue → runs → workflow steps → trace) -----
+let issues = [
+  {id:1, title:"Fix date parser off-by-one", status:"inprogress", done:3, live:true,
+   runs:[{n:1,st:"failed"},{n:2,st:"running",from:1}], tin:18200, tout:3100},
+  {id:2, title:"Add WAL + busy_timeout to SQLite stores", status:"inprogress", done:1, live:true,
+   runs:[{n:1,st:"running"}], tin:5400, tout:900},
+  {id:3, title:"Supervisor escalation ladder", status:"waiting", done:0,
+   runs:[{n:1,st:"generated"}], tin:2100, tout:700, gate:"solver сгенерирован — нужно твоё «ок»"},
+  {id:4, title:"Tint trace tree by event type", status:"done", done:7,
+   runs:[{n:1,st:"done"}], tin:22800, tout:4300},
+  {id:5, title:"Refactor TraceReader render path", status:"open"},
+  {id:6, title:"Telegram webhook retry/backoff", status:"open"},
+  {id:7, title:"Document durable handoff", status:"closed", done:7, runs:[{n:1,st:"done"}], tin:9100, tout:1500},
+];
+
+let selectedId = null;
+
+// ----- trace journal synthesis (OTel-style waterfall) -----
+const TOOLS = {
+  validate:[["read_file · composer.json","grep · #[Step]"]],
+  design:[["read_file · ARCHITECTURE.md"]],
+  review:[["grep · TraceReader"]],
+  implement:[["edit_file · DateTool.php","run_tests"]],
+  test:[["run_tests","run_tests · --filter Date"]],
+  changelog:[["edit_file · README.md"]],
+  deliver:[["git_status"]],
+};
+const HANDOFF = {
+  validate:"объём ясен, 2 кейса", design:"план: сдвиг индекса в parseDay()",
+  review:"подход ок, риски учтены", implement:"патч готов, тесты зелёные",
+  test:"14 passed", changelog:"запись добавлена", deliver:"готово к merge",
+};
+
+function genJournal(issue){
+  const spans=[]; let t=0;
+  const add=(label,type,depth,dur,live)=>{const s={label,type,depth,start:t,dur,live};spans.push(s);return s;};
+  const wf=add("workflow · solver","workflow",0,0);
+  const full = issue.done;
+  for(let i=0;i<full;i++){
+    const name=STEPS[i], s0=t;
+    const step=add("step · "+name,"step",1,0);
+    t+=0.12; const a0=t; const ai=add("ai · turn 1","ai",2,0);
+    for(const t1 of (TOOLS[name]?.[0]||[])){
+      t+=0.04; const d=0.18+ (t1.includes("test")?0.5:0.15);
+      add("tool · "+t1,"tool",3,d); t+=d;
+      add("← ok","result",3,0.05); t+=0.05;
+    }
+    ai.dur=t-a0;
+    if(name==="implement"){ // hierarchy: supervisor sub-workflow repairs a wobble
+      const w0=t; const sw=add("sub-workflow · supervisor","workflow",2,0);
+      t+=0.08; add("step · diagnose","step",3,0.22); t+=0.22;
+      add("step · patch","step",3,0.30); t+=0.30; sw.dur=t-w0;
+    }
+    step.dur=t-s0;
+    add("handoff → "+(HANDOFF[name]||""),"handoff",1,0.04,false); t+=0.10;
+  }
+  if(issue.live && issue.done<STEPS.length){
+    const name=STEPS[issue.done], s0=t;
+    const step=add("step · "+name+"  ◀ running","step",1,0,true); step._open=s0;
+    t+=0.12; add("ai · turn 1","ai",2,0.6,true); t+=0.6;
+    step.dur=t-s0;
+  }
+  wf.dur=t || 0.1;
+  return spans;
+}
+
+// ----- render -----
+function render(){
+  const board=document.getElementById("board");
+  board.innerHTML="";
+  for(const col of COLS){
+    const list=issues.filter(i=>i.status===col.k);
+    const el=document.createElement("div"); el.className="col";
+    el.innerHTML=`<div class="col-head"><span class="dotc" style="background:var(${col.c})"></span>${col.label}<span class="count">${list.length}</span></div>`;
+    const body=document.createElement("div"); body.className="col-body";
+    list.forEach(i=>body.appendChild(card(i)));
+    el.appendChild(body); board.appendChild(el);
+  }
+  if(selectedId!=null){ const i=issues.find(x=>x.id===selectedId); if(i) fillDrawer(i); }
+}
+
+function card(i){
+  const el=document.createElement("div");
+  el.className=`card s-${i.status}` + (i.live?" live":"") + (i.id===selectedId?" sel":"");
+  el.onclick=()=>openDrawer(i.id);
+
+  let inner=`<span class="rune">${RUNE[i.status]}</span>
+    <div class="cid">ISSUE-${i.id}</div>
+    <div class="title">${i.title}</div>`;
+
+  if(i.status==="inprogress"){
+    const cur=STEPS[i.done];
+    inner+=`<div class="stepline"><span class="dot"></span>step · <b>${cur}</b><span class="frac">${i.done}/${STEPS.length}</span></div>`;
+    inner+=bar(i.done);
+    inner+=foot(i);
+  } else if(i.status==="waiting"){
+    inner+=`<div class="stepline"><span class="dot"></span>${i.done}/${STEPS.length} · ожидание</div>`;
+    inner+=bar(i.done);
+    if(i.gate) inner+=`<div class="gate">${i.gate}</div>`;
+  } else if(i.status==="done"){
+    inner+=`<div class="stepline"><span class="dot"></span><b>завершено</b><span class="frac">${STEPS.length}/${STEPS.length}</span></div>`;
+    inner+=bar(STEPS.length);
+    inner+=foot(i);
+  } else if(i.status==="closed"){
+    inner+=`<div class="stepline"><span class="dot"></span>архив</div>`;
+  } else { // open
+    inner+=`<div class="stepline"><span class="dot"></span>не запущено</div>
+      <div class="foot"><span style="color:var(--php-lt)">▸ Начать</span></div>`;
+  }
+  el.innerHTML=inner;
+  return el;
+}
+
+function bar(done){
+  let s='<div class="bar">';
+  for(let k=0;k<STEPS.length;k++){
+    const cls = k<done ? "on" : (k===done?"cur":"");
+    s+=`<i class="${cls}"></i>`;
+  }
+  return s+"</div>";
+}
+function foot(i){
+  const r=i.runs?.[i.runs.length-1];
+  let badge="";
+  if(r) badge=`<span class="runbadge ${r.from?"resumed":""}">run #${r.n}${r.from?` ← #${r.from}`:""}</span>`;
+  return `<div class="foot"><span class="mana">${(i.tin/1000).toFixed(1)}k in</span><span>${(i.tout/1000).toFixed(1)}k out</span>${badge}</div>`;
+}
+
+// ----- drawer -----
+function openDrawer(id){ selectedId=id; document.getElementById("drawer").classList.add("open"); render(); }
+function closeDrawer(){ selectedId=null; document.getElementById("drawer").classList.remove("open"); render(); }
+document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeDrawer(); });
+
+function fillDrawer(i){
+  document.getElementById("d-title").textContent=`ISSUE-${i.id} · ${i.title}`;
+  const r=i.runs?.[i.runs.length-1];
+  document.getElementById("d-sub").textContent =
+    `${i.status}` + (r?` · run #${r.n} (${r.st})`:"") + (i.done!=null?` · ${i.done}/${STEPS.length} шагов`:"");
+
+  const runs=document.getElementById("d-runs"); runs.innerHTML="";
+  (i.runs||[]).forEach(run=>{
+    const c=document.createElement("span");
+    c.className="runchip "+(run.st==="failed"?"failed":(run.st==="running"?"active":""));
+    c.textContent=`run #${run.n} · ${run.st}`+(run.from?` (↻ from #${run.from})`:"");
+    runs.appendChild(c);
+  });
+
+  const j=document.getElementById("d-journal"); j.innerHTML="";
+  if(i.done==null){ j.innerHTML='<div class="span-label" style="color:var(--ink-faint);padding:8px 4px">— ещё не запускалось —</div>'; return; }
+  const spans=genJournal(i);
+  const total=Math.max(...spans.map(s=>s.start+s.dur), 0.1);
+  spans.forEach(s=>{
+    if(s.type==="handoff"){
+      const n=document.createElement("div"); n.className="handoff-note"; n.textContent=s.label; j.appendChild(n); return;
+    }
+    const row=document.createElement("div"); row.className="span"+(s.live?" live":"");
+    const pad="&nbsp;".repeat(s.depth*2);
+    const left=(s.start/total*100), w=Math.max(s.dur/total*100, 0.8);
+    row.innerHTML=`<div class="span-label"><span class="tw">${pad}${treeGlyph(s.depth)}</span> ${s.label}</div>
+      <div class="span-track">
+        <div class="span-bar tt-${s.type}" style="left:${left}%;width:${w}%"></div>
+        <span class="span-dur" style="left:calc(${left}% + ${w}%)">${s.dur>=0.05?s.dur.toFixed(2)+"s":""}</span>
+      </div>`;
+    j.appendChild(row);
+  });
+}
+function treeGlyph(d){ return d===0?"▾":(d===1?"▾":"·"); }
+
+// ----- the real-time pulse: advance live runs -----
+let beat=0;
+function tick(){
+  beat++;
+  issues.forEach(i=>{
+    if(!i.live) return;
+    i.tin += 300 + (beat%3)*120;
+    i.tout += 60 + (beat%2)*40;
+    // every ~3 beats, finish the current step
+    if(beat % 3 === 0){
+      i.done++;
+      if(i.done>=STEPS.length){
+        i.done=STEPS.length; i.live=false; i.status="done";
+        if(i.runs?.length) i.runs[i.runs.length-1].st="done";
+      }
+    }
+  });
+  render();
+}
+render();
+setInterval(tick, 1700);
+</script>
+</body>
+</html>

@@ -4,57 +4,107 @@
 [![Built on PHP TrueAsync](https://img.shields.io/badge/built%20on-PHP%20TrueAsync-8892BF?logo=php&logoColor=white)](https://github.com/true-async/)
 [![Tested with Testo](https://img.shields.io/badge/tested%20with-Testo-2ea44f)](https://github.com/php-testo/testo)
 
-A minimal personal AI agent in the spirit of [OpenClaw](https://github.com/openclaw/openclaw) /
-[NanoClaw](https://github.com/nanocoai/nanoclaw), built **entirely on PHP
-[TrueAsync](https://github.com/true-async/)**. You chat with it; it runs a Claude (or
-DeepSeek / any OpenAI-compatible) agent loop that can take real actions on the host (run
-shell commands, read and write files) and replies in the same conversation. "Claude Code
-whose terminal is your chat."
+An **agent-orchestration system** built **entirely on PHP
+[TrueAsync](https://github.com/true-async/)**. You give it an issue; it does not
+answer it directly — it **generates a solver _workflow_ tailored to that issue**, you
+approve the generated code, and then it runs that workflow as a **supervised hierarchy of
+agent steps**. Each step is its own ReAct turn loop with a scoped tool palette, a **critic**
+that reviews the step's work against a rubric, and a **supervisor** that unblocks a stuck
+step or escalates to you. Every run is **durable** (resumes from a snapshot after a crash or
+kill) and **fully traced** (a tinted tree you can replay).
 
-> **This is a learning project.** Its purpose is to teach, and to show off, asynchronous
-> PHP built into the engine (TrueAsync): a whole agent (concurrent HTTP, subprocesses, timers)
-> in one process, with plain-looking code that never blocks. It is intentionally small and
-> readable, not a production product. Not affiliated with Anthropic, OpenClaw or NanoClaw.
+It runs on a single thread: all the I/O — model HTTP, `bash` subprocesses, file and DB
+access — is `await`ed under TrueAsync, so many agents, turns and tool calls overlap with no
+callbacks and no blocking.
 
-The design is documented step by step in [`ARCHITECTURE.md`](ARCHITECTURE.md) and, as a
-narrative tutorial, in [`tutorial/ru/`](tutorial/ru) (Russian).
+## The orchestration model
 
-## How it works
+```
+project ──▶ issue ──▶ run
+                       │
+                       ├─ 1. generate a solver workflow for the issue   (define_workflow)
+                       ├─ 2. critic + human approve the generated code
+                       └─ 3. run the solver in the project's real folder
+                              step ─▶ ai turn loop ─▶ tool calls
+                                 ├─ critic reviews the step (rework until it passes)
+                                 ├─ supervisor unblocks / escalates when a step is stuck
+                                 ├─ budget caps tokens & time
+                                 └─ snapshot + handoff persisted after each step  (durable)
+```
 
-The core is the **agentic loop (ReAct)**: a user message goes to the agent; the agent either
-replies with text or asks to run tools; tools run, their results go back to the agent, and it
-continues until a final answer. Everything the agent does is I/O-bound (HTTP to the model,
-HTTP to the chat, `bash` subprocesses), so under TrueAsync it all `await`s and costs no CPU
-while suspended: hundreds of conversations run concurrently in a single thread, no callbacks.
+- **Project / Issue / Run ledger.** `claw -c` registers a project (its own SQLite state
+  db), `claw -i` opens an issue, `claw run <id>` starts a run. Projects resolve like a git
+  repo — from the current directory up to the nearest registered one.
+- **Generate, don't hardcode.** The default workflow (`GenerateIssueWorkflow`) sizes the
+  issue, drafts a solver workflow as PHP source, has a critic review it, validates it
+  (`WorkflowValidator` blocks dangerous code), and saves it via the `define_workflow` tool.
+  A solver already generated for an issue is reused — the project's growing *procedural
+  memory*.
+- **Human in the loop.** The generated solver is shown for approval before it ever touches
+  the real folder. An autonomous run is opt-in, not the default.
+- **Supervised steps.** A workflow is written as a small DSL on `WorkflowAbstract`:
+  `step()`, `ai()`, `tool()`, `ask()`, `artifact()`, `handoff()`. A step can carry a
+  **critic rubric** (the step reworks until the critic passes or a round cap is hit) and the
+  **supervisor** settles in-run escalations (`accept` / `stop` / one more concrete attempt)
+  or defers to the person via the **ask channel**.
+- **Durable & resumable.** State, completed steps and the **handoff** carried between them
+  are snapshotted (`SqliteStateStore`). Kill a run mid-flight and `claw run` resumes it,
+  re-running only the unfinished tail. A crashing solver is repaired-and-resumed by
+  `SuperviseWorkflow` up to a small cap.
+- **Traced.** Every workflow → step → ai → turn → tool is recorded by the `Tracer` to live
+  and stored sinks; `claw log [<id>]` replays the run as an indented, type-tinted tree
+  (`NO_COLOR` or a pipe turns it plain).
 
-Layers: **Chat** (the messenger; a console gateway today), **Agent** (decides the next move;
-pluggable backend with cause-aware retries), **Tool** (runs real actions, gated later by a
-security layer), and the **Session** that glues them with the loop.
+The agents reach the host through a **tool layer** — `define_workflow`, `finish`,
+`handoff`, `recall` (read back what a sibling step/tool/artifact did) plus `bash`,
+`read_file`, `write_file`, `list_files`, `date`, `php_eval`, `schedule` — and every tool
+call passes through a middleware chain (permission gatekeeper, audit log, per-tool timeout).
+
+## Architecture at a glance
+
+| Layer | What it does |
+| --- | --- |
+| **Cli** | `claw` front door: parse argv, pick a mode (`WorkflowMode` default, `SessionMode` for `--session`). |
+| **Workflow** | The orchestration core: `WorkflowAbstract` DSL, `Environment`/`EnvKey` scope, generation + supervision, `WorkflowValidator`, state store. |
+| **Agent** | Decides the next move: pluggable backend (Claude / any OpenAI-compatible) with cause-aware retry, the ReAct `DefaultTurnLoop`, the ask-channel speakers. |
+| **Tool** | Real actions behind a typed registry, run through a security/audit/timeout middleware chain. |
+| **Trace** | One `Tracer` per run → live console + stored sinks; `TraceReader` replays history. |
+| **Project** | The per-project ledger: projects, issues, runs. |
+| **Chat / Session** | The older interactive path (`--session`): console + Telegram gateway over the same agent loop. |
+
+The design is documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requirements
 
 - A PHP **TrueAsync** build (PHP 8.6+) with the `true_async`, `curl` and `pdo` extensions.
 - Composer (for the dev tooling and autoloader).
 
-## Quick start (console)
+## Quick start
 
 ```bash
 composer install
-cp .env.example .env       # then set an API key (e.g. DeepSeek or Anthropic) and CLAW_ALLOWED_CHATS
-php bin/claw --session     # interactive chat — type a message, Ctrl+D to exit
+cp .env.example .env             # set an API key (DeepSeek or Anthropic) and the workspace dir
+
+php bin/claw -c                  # register the current folder as a project
+php bin/claw -i "Add a --version flag"   # open an issue (prints its id)
+php bin/claw run 1               # generate a solver workflow, approve it, run it
+php bin/claw log                 # replay the last run's trace tree
 ```
 
-`claw` runs the **workflow** mode by default: `claw -c` registers a project, `claw -i` opens
-an issue, `claw run <id>` generates and runs a solver workflow for it, and `claw log [<id>] [-v]`
-prints that run's trace tree — tinted by event type on a terminal (`NO_COLOR` or a pipe turns
-it plain). A run is **durable**: killed mid-flight, `claw run` resumes it from a snapshot of its
-state, its completed steps, and the handoff carried between them, re-running only the unfinished
-tail. Run `claw` with no command for the full list. The interactive chat is the older
-**session** mode, reached with `--session`.
+Commands (`claw` is `php bin/claw` from a source checkout):
 
-`.env` configures the backend (`CLAW_AGENT` = `claude` | `openai-compatible` | `gemini`), the
-model, the API key, and the sandbox working directory. Secrets stay in memory and are never
-exposed to the `bash` tool's environment.
+| Command | Does |
+| --- | --- |
+| `claw -c [folder]` | register a project (state db in the app home) |
+| `claw -i "<title>"` | open an issue in the current project |
+| `claw run <id>` | generate (or reuse) and run the solver workflow for an issue |
+| `claw log [<id>] [-v]` | replay a run's recorded trace (`-v` raises the density) |
+| `claw --session` | the older interactive chat (console / Telegram) |
+
+`.env` selects the backend (`CLAW_AGENT` = `claude` | `openai-compatible`), the model, the
+API key and the workspace directory. `openai-compatible` covers DeepSeek, Groq, Mistral,
+Qwen, Ollama, OpenRouter and OpenAI — they differ only by base URL, model and key. Secrets
+stay in memory and are never exposed to the `bash` tool's environment.
 
 ## Run with Docker
 
@@ -70,8 +120,7 @@ docker run --rm -it \
 ```
 
 The `.env` holds your secrets and is never baked into the image, so mount it at run time.
-Mounting `workspace` is optional; it lets the file and `bash` tools act on a directory you
-can see on the host.
+Mounting `workspace` lets the file and `bash` tools act on a directory you can see on the host.
 
 ## Development
 
@@ -88,10 +137,13 @@ Composer shortcuts: `composer test`, `composer analyse`, `composer cs`, `compose
 
 ## Status
 
-Console + Telegram agent that runs end to end: Config, async HTTP with cause-aware retry,
-Claude & DeepSeek backends, the tool set (`bash`, `read_file`, `write_file`, `list_files`,
-`date`, `php_eval`, `schedule`), the session loop, a tool-execution middleware chain
-(permission gatekeeper with confirm + persisted "always" rules, audit log, per-tool
-timeout), per-conversation SQLite persistence (history survives restarts), `/stop` to cancel
-a running turn, and a Telegram channel (chat-id allowlist, long-poll, "typing…" indicator,
-inline approval buttons). Next: skills, and OS-level sandboxing of the `bash` tool.
+End-to-end on a single TrueAsync thread: project/issue/run ledger, per-issue solver
+generation with critic + human approval, supervised step execution (critic rubric,
+supervisor escalation ladder, token/time budgets), durable snapshot-and-resume with a
+repair loop, a full trace (`claw log`), the tool layer (`define_workflow`, `finish`,
+`handoff`, `recall`, `bash`, `read_file`, `write_file`, `list_files`, `date`, `php_eval`,
+`schedule`) behind a permission/audit/timeout middleware chain, and the older session path
+(console + Telegram, per-conversation SQLite history, `/stop`, inline approvals). Next:
+hardening the autonomous-run permission policy and OS-level sandboxing of the `bash` tool.
+
+Not affiliated with Anthropic, OpenClaw or NanoClaw.

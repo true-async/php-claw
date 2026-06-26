@@ -40,13 +40,7 @@ final class ConsoleTraceSink implements TraceSinkInterface
             return;
         }
 
-        $glyph = match ($record->phase()) {
-            'enter' => '▶',
-            'exit' => '◀',
-            default => '·',
-        };
-
-        $head = $glyph . ' ' . trim($event->type . ' ' . TraceFormat::summary($event->type, $event->data));
+        $head = TraceFormat::line($record->phase(), $event->type, $event->data);
 
         fwrite($this->stream, str_repeat('  ', $record->depth()) . TraceFormat::paint($event->type, $head, $this->color) . "\n");
     }

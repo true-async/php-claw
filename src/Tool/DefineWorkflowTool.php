@@ -14,11 +14,11 @@ use Claw\Workflow\WorkflowValidator;
  * and saved. Dangerous by definition (it writes code that will later execute), so
  * the permission layer gates it.
  */
-final class DefineWorkflowTool implements ToolInterface
+final readonly class DefineWorkflowTool implements ToolInterface
 {
     public function __construct(
-        private readonly WorkflowStore $store,
-        private readonly WorkflowValidator $validator,
+        private WorkflowStore $store,
+        private WorkflowValidator $validator,
     ) {
     }
 
@@ -72,7 +72,7 @@ final class DefineWorkflowTool implements ToolInterface
 
             return "Workflow '{$name}' saved as {$class}.";
         } catch (WorkflowException $e) {
-            throw new ToolException($e->getMessage());
+            throw new ToolException($e->getMessage(), 0, $e);
         }
     }
 }

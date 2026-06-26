@@ -47,8 +47,8 @@ final class Status
     }
 
     /**
-     * Text for the terminal thread: animated statuses skip the SpinnerBlock
-     * (the thread animates its own spinner), static statuses return the full render.
+     * Text for the renderer: animated statuses skip the SpinnerBlock (the renderer animates its own
+     * spinner coroutine), static statuses return the full render.
      */
     public function label(): string
     {

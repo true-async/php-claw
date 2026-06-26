@@ -7,7 +7,9 @@ namespace Claw\Chat\Status;
 final class SpinnerBlock implements StatusBlockInterface
 {
     private static int $frame = 0;
-    private const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+    /** The braille spinner frames — the single source for any spinner animation (also the async console's). */
+    public const array FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
     public function render(): string
     {

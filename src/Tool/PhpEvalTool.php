@@ -12,7 +12,7 @@ use Claw\Exceptions\ToolException;
  * Dangerous: this runs arbitrary PHP in-process. It is gated by the permission
  * layer; intended for quick calculations like `strtoupper("hi")` or `gmdate(...)`.
  */
-final class PhpEvalTool implements ToolInterface
+final readonly class PhpEvalTool implements ToolInterface
 {
     public function name(): string
     {
