@@ -57,6 +57,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private string $currentStep = '';
 
     /**
+     * The baton between steps: the value the PREVIOUS step returned, automatically fed into the next
+     * step's model context (its summary of what it did + what to watch for). Selective carry-over, not
+     * the whole prior context. Set at each step's end from its return value; transient.
+     */
+    private string $incomingHandoff = '';
+
+    /**
      * Artifacts produced this run, kept per step so PRIOR steps' outputs are not lost — only the
      * current step's slot is reset on a critic re-run (it regenerates them). Transient: not part of
      * resume state (the journal is the durable copy a resumed run reads back).
@@ -149,6 +156,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // or the budget runs out.
             $round = 0;
             $maxRounds = $this->stepMaxRounds($name);
+            $result = '';
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $raw = $this->{$name}();
@@ -174,6 +182,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $this->critique = null;
             $this->currentStep = $previousStep;
             $tracer?->exit($span);
+        }
+
+        // The step's return value IS the baton: it becomes the next step's incoming context, fed into
+        // its model automatically. Journaled so the relay shows in `claw log`.
+        $this->incomingHandoff = $result;
+        if ($result !== '') {
+            $tracer?->handoff($result);
         }
 
         $this->done[] = $name;
@@ -269,10 +284,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterAi($agent ?? 'worker', $scope->findModelId());
         $tracer?->prompt($prompt, $exposed);
 
-        // Spell the available tools into the system prompt too — the model gets them in the API tool
-        // list, but naming them up front makes it reliably reach for the right one (recall, done, ...)
-        // instead of only sometimes noticing them.
-        $system = $scope->findSystemPrompt() . $this->toolBriefing($palette);
+        // The baton from the previous step (its return value) is fed in automatically — the selective
+        // context carry-over — plus the available tools named up front so the model reliably reaches
+        // for the right one (recall, done, ...) instead of only sometimes noticing them.
+        $system = $scope->findSystemPrompt() . $this->handoffContext() . $this->toolBriefing($palette);
 
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
@@ -298,6 +313,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
         } finally {
             $tracer?->exit($span);
         }
+    }
+
+    /** The previous step's baton as a context block for the system prompt, or '' for the first step. */
+    private function handoffContext(): string
+    {
+        if ($this->incomingHandoff === '') {
+            return '';
+        }
+
+        return "\n\nThe previous step handed this to you (what it did and what to watch for):\n" . $this->incomingHandoff;
     }
 
     /** A one-line-per-tool briefing appended to the system prompt, or '' when the call has no tools. */

@@ -24,7 +24,7 @@ final class TraceFormat
             'reply' => self::reply($data),
             'note' => trim(self::str($data, 'action') . ' ' . self::str($data, 'message')),
             'artifact' => self::str($data, 'label') . ' (' . self::str($data, 'kind') . ')  ' . self::oneLine(self::str($data, 'value'), 60),
-            'handoff' => self::oneLine(self::str($data, 'summary'), 70),
+            'handoff' => self::oneLine(self::str($data, 'text'), 70),
             default => '',
         };
     }

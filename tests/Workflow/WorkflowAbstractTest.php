@@ -560,6 +560,35 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aStepsReturnValueIsHandedToTheNextStepAsContext(): void
+    {
+        $worker = new ScriptedAgent($this->answer('done'));   // only the second step calls ai()
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'relay';
+            }
+
+            #[Step]
+            public function first(): string
+            {
+                return 'I added subtract(); the next step should run the tests';
+            }
+
+            #[Step]
+            public function second(): void
+            {
+                $this->ai('carry on');
+            }
+        };
+
+        $wf->run();
+
+        // the first step's RETURN is auto-fed into the second step's model context
+        Assert::true(str_contains($worker->requests[0]->system, 'I added subtract()'));
+    }
+
+    #[Test]
     public function theDoneToolFinishesTheRunAndSkipsRemainingSteps(): void
     {
         // The model calls `done` in the first step; the workflow finishes and the second step never runs.

@@ -17,7 +17,6 @@ use Claw\Project\ProjectStore;
 use Claw\Tool\BashTool;
 use Claw\Tool\DefineWorkflowTool;
 use Claw\Tool\FinishTool;
-use Claw\Tool\HandoffTool;
 use Claw\Tool\ListFilesTool;
 use Claw\Tool\ReadFileTool;
 use Claw\Tool\RecallTool;
@@ -233,7 +232,6 @@ final class WorkflowMode
         $env->set(EnvKey::Tracer, $tracer);
         $taskBrief = "Title: {$issue->title}\n\nDescription: {$issue->description}";
         $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));   // recall this run's own journal + task
-        $registry->add(new HandoffTool($tracer));   // a step hands the baton (summary+findings) to the next
         if ($resuming) {
             fwrite(STDOUT, "Resuming run #{$runId} for issue #{$issue->id}…\n");
         }
