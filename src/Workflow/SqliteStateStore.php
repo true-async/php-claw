@@ -61,6 +61,7 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
         $stmt = $this->pdo->prepare('SELECT state, done FROM workflow_state WHERE run_id = :run');
         $stmt->execute(['run' => $runId]);
         $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
         if (!\is_array($row)) {
             return ['state' => [], 'done' => []];
         }
@@ -87,6 +88,7 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
         $stmt = $this->pdo->prepare('SELECT from_step, handoff FROM workflow_handoff WHERE run_id = :run');
         $stmt->execute(['run' => $runId]);
         $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
         if (!\is_array($row)) {
             return ['from' => '', 'handoff' => ''];
         }
@@ -114,6 +116,7 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
     {
         $decoded = json_decode(\is_string($json) ? $json : '', true);
         $state = [];
+
         if (\is_array($decoded)) {
             foreach ($decoded as $key => $value) {
                 $state[(string) $key] = $value;
@@ -128,6 +131,7 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
     {
         $decoded = json_decode(\is_string($json) ? $json : '', true);
         $done = [];
+
         if (\is_array($decoded)) {
             foreach ($decoded as $value) {
                 if (\is_string($value)) {

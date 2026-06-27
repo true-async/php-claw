@@ -41,6 +41,7 @@ final class ConsoleChatTest
     private function memoryStream()
     {
         $stream = fopen('php://memory', 'r+');
+
         if ($stream === false) {
             throw new \RuntimeException('cannot open memory stream');
         }

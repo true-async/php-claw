@@ -26,6 +26,7 @@ final class DateToolTest
     public function rejectsInvalidTimezone(): void
     {
         $threw = false;
+
         try {
             new DateTool()->handle(['timezone' => 'Nowhere/Bad']);
         } catch (ToolException $e) {

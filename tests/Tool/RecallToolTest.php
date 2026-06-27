@@ -49,6 +49,7 @@ final class RecallToolTest
         $tool = new RecallTool(new TraceReader($pdo), '1');
 
         $threw = false;
+
         try {
             $tool->handle(['what' => 'step']);   // no name
         } catch (\Claw\Exceptions\ToolException) {

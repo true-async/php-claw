@@ -166,6 +166,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         // A re-run after the critic rejected the draft: the model still holds its previous attempt in the
         // continued conversation, so don't re-state the whole brief — just hand it the findings to fix.
         $critique = $this->critique();
+
         if ($critique !== null) {
             return "A reviewer REJECTED the workflow you just wrote:\n\n{$critique}\n\n"
                 . 'Rewrite the FULL class fixing exactly those problems, keeping the rest. Reply with only the PHP code.';
@@ -249,11 +250,13 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $names = \is_array($tools) ? array_map(strval(...), $tools) : ['read_file', 'write_file', 'list_files', 'bash'];
 
         $registry = $this->find(EnvKey::Registry);
+
         if (!$registry instanceof Registry) {
             return implode(', ', $names);
         }
 
         $docs = [];
+
         foreach ($names as $name) {
             if (!$registry->has($name)) {
                 continue;

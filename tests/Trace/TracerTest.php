@@ -86,6 +86,7 @@ final class TracerTest
         // Every opened span has exactly one matching exit — no unbalanced enter.
         $opened = [];
         $closed = [];
+
         foreach ($sink->records as $rec) {
             if ($rec->phase() === 'enter') {
                 $opened[] = $rec->id();
@@ -99,6 +100,7 @@ final class TracerTest
 
         // The orphaned child was closed before its parent, inheriting its own level.
         $aiExit = null;
+
         foreach ($sink->records as $rec) {
             if ($rec->phase() === 'exit' && $rec->id() === $ai) {
                 $aiExit = $rec;
@@ -124,6 +126,7 @@ final class TracerTest
         $tracer->exit($wf);
 
         $stmt = $pdo->query('SELECT run_id, phase, type, data FROM trace ORDER BY seq');
+
         if ($stmt === false) {
             throw new \RuntimeException('trace query failed');
         }

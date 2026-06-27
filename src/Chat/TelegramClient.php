@@ -39,16 +39,19 @@ final readonly class TelegramClient
         ]);
 
         $data = $this->http->get($url)->json();
+
         if (($data['ok'] ?? false) !== true) {
             throw new HttpException('Telegram getUpdates failed: ' . json_encode($data['description'] ?? $data));
         }
 
         $result = $data['result'] ?? [];
+
         if (!\is_array($result)) {
             return [];
         }
 
         $updates = [];
+
         foreach ($result as $item) {
             if (\is_array($item)) {
                 /** @var array<string, mixed> $item */
@@ -65,6 +68,7 @@ final readonly class TelegramClient
     public function sendMessage(int $chatId, string $text, ?array $replyMarkup = null): void
     {
         $payload = ['chat_id' => $chatId, 'text' => $text];
+
         if ($replyMarkup !== null) {
             $payload['reply_markup'] = $replyMarkup;
         }
@@ -95,6 +99,7 @@ final readonly class TelegramClient
         // (message too long, chat blocked, bad markup). Check ok like getUpdates so a failed write does
         // not silently look like success.
         $data = $this->http->post($this->base . $method, $body, ['Content-Type: application/json'])->json();
+
         if (($data['ok'] ?? false) !== true) {
             throw new HttpException("Telegram {$method} failed: " . json_encode($data['description'] ?? $data));
         }

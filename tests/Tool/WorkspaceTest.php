@@ -56,6 +56,7 @@ final class WorkspaceTest
     private function assertRejected(callable $fn): void
     {
         $threw = false;
+
         try {
             $fn();
         } catch (ToolException $e) {

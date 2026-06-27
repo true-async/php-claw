@@ -53,6 +53,7 @@ final class SessionMode
             mkdir($config->workspace, 0o775, true);
         }
         $workspaceDir = realpath($config->workspace);
+
         if ($workspaceDir === false) {
             fwrite(STDERR, "Cannot resolve workspace: {$config->workspace}\n");
 
@@ -63,6 +64,7 @@ final class SessionMode
         $http = new CurlHttpClient();
 
         $agent = AgentFactory::make($config, $http);   // agents retry internally (cause-aware)
+
         if ($agent === null) {
             fwrite(STDERR, "Agent '{$config->agent}' is not wired yet.\n");
 
@@ -82,6 +84,7 @@ final class SessionMode
             ),
             default => null,
         };
+
         if ($chat === null) {
             fwrite(STDERR, "Channel '{$config->channel}' is not wired yet.\n");
 
@@ -90,6 +93,7 @@ final class SessionMode
 
         // One SQLite file per conversation (keyed by its id), so history survives restarts.
         $sessionsDir = $workspaceDir . '/sessions';
+
         if (!is_dir($sessionsDir)) {
             mkdir($sessionsDir, 0o775, true);
         }
@@ -124,6 +128,7 @@ final class SessionMode
         if ($chat instanceof TelegramChat) {
             // Many chats: long-poll in the background, then one Session per authorized chat.
             spawn($chat->poll(...));
+
             for (;;) {
                 $conversation = $chat->accept();
                 spawn(static fn () => $runSession($conversation));

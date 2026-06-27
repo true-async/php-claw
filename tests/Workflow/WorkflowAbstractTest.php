@@ -272,6 +272,7 @@ final class WorkflowAbstractTest
             public function c(): void
             {
                 $this->trail .= 'c';
+
                 if ($this->backs === 0) {
                     ++$this->backs;                       // once, so the run terminates
                     $this->back('a', 'redo from a');      // send the run back to step a
@@ -303,6 +304,7 @@ final class WorkflowAbstractTest
         $wf->callLog('did-thing', 'the details');
 
         $notes = [];
+
         foreach ($sink->records as $record) {
             if ($record->event()->type === 'note') {
                 $notes[] = $record->event()->data;
@@ -352,6 +354,7 @@ final class WorkflowAbstractTest
         $wf = new ProbeWorkflow($this->config(), 'r1');   // no EnvKey::Ask set
 
         $threw = false;
+
         try {
             $wf->callAsk('anyone?');
         } catch (WorkflowException) {
@@ -369,6 +372,7 @@ final class WorkflowAbstractTest
         $wf = new ProbeWorkflow($this->config()->set(EnvKey::Budget, $budget), 'r1');
 
         $threw = false;
+
         try {
             $wf->callAi('hi');
         } catch (WorkflowException) {
@@ -386,6 +390,7 @@ final class WorkflowAbstractTest
         $wf = new ProbeWorkflow($this->config()->set(EnvKey::Budget, $budget), 'r1');
 
         $threw = false;
+
         try {
             $wf->callStep('alpha');
         } catch (WorkflowException) {
@@ -445,6 +450,7 @@ final class WorkflowAbstractTest
         $wf = new ProbeWorkflow($env, 'r1');
 
         $threw = false;
+
         try {
             $wf->callAi('hi');
         } catch (WorkflowException) {
@@ -473,6 +479,7 @@ final class WorkflowAbstractTest
         };
 
         $threw = false;
+
         try {
             $wf->run();
         } catch (\LogicException) {
@@ -568,6 +575,7 @@ final class WorkflowAbstractTest
         $wf->run();
 
         $artifacts = [];
+
         foreach ($sink->records as $record) {
             if ($record->event()->type === 'artifact') {
                 $artifacts[] = $record->event()->data['label'] . ':' . $record->event()->data['kind'];
@@ -603,6 +611,7 @@ final class WorkflowAbstractTest
         };
 
         $threw = false;
+
         try {
             $wf->run();
         } catch (WorkflowException) {
@@ -905,8 +914,10 @@ final class WorkflowAbstractTest
     private function stepNames(ArrayTraceSink $sink): array
     {
         $names = [];
+
         foreach ($sink->records as $record) {
             $event = $record->event();
+
             if ($event->type === 'step') {
                 $names[] = (string) ($event->data['name'] ?? '');
             }

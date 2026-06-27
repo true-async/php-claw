@@ -30,6 +30,7 @@ final class ScriptedAgent implements AgentInterface
         $this->requests[] = $request;
 
         $next = array_shift($this->outcomes);
+
         if ($next === null) {
             throw new \RuntimeException('ScriptedAgent: no more outcomes');
         }

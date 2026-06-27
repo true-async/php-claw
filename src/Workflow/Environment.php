@@ -68,6 +68,7 @@ final class Environment
     public function findWorker(): AgentInterface
     {
         $worker = $this->find(EnvKey::Worker);
+
         if (!$worker instanceof AgentInterface) {
             throw new WorkflowException('environment has no worker agent');
         }
@@ -98,6 +99,7 @@ final class Environment
     public function findRegistry(): Registry
     {
         $registry = $this->find(EnvKey::Registry);
+
         if (!$registry instanceof Registry) {
             throw new WorkflowException('environment has no tool registry');
         }
@@ -108,6 +110,7 @@ final class Environment
     public function findStore(): WorkflowStateStoreInterface
     {
         $store = $this->find(EnvKey::Store);
+
         if (!$store instanceof WorkflowStateStoreInterface) {
             throw new WorkflowException('environment has no state store');
         }

@@ -49,6 +49,7 @@ final class TraceReader
     public function stepHistory(string $runId, string $name): string
     {
         $bounds = $this->stepBounds($runId, $name);
+
         if ($bounds === null) {
             return "No step '{$name}' has run in this workflow yet.";
         }
@@ -77,6 +78,7 @@ final class TraceReader
     {
         if ($step !== '') {
             $bounds = $this->stepBounds($runId, $step);
+
             if ($bounds === null) {
                 return "No step '{$step}' has run in this workflow yet.";
             }
@@ -89,6 +91,7 @@ final class TraceReader
         }
 
         $lines = [];
+
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
             $data = json_decode(TraceFormat::str($row, 'data'), true);
             $data = \is_array($data) ? $data : [];
@@ -111,9 +114,11 @@ final class TraceReader
         $steps = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = :r AND type = 'step' AND phase = 'enter' ORDER BY seq");
         $steps->execute(['r' => $runId]);
         $names = [];
+
         foreach ($steps->fetchAll(\PDO::FETCH_ASSOC) as $stepRow) {
             $decoded = json_decode(TraceFormat::str($stepRow, 'data'), true);
             $stepName = \is_array($decoded) ? TraceFormat::str($decoded, 'name') : '';
+
             if ($stepName !== '' && !\in_array($stepName, $names, true)) {
                 $names[] = $stepName;
             }
@@ -136,6 +141,7 @@ final class TraceReader
         );
         $enter->execute(['r' => $runId, 'n' => $name]);
         $row = $enter->fetch(\PDO::FETCH_ASSOC);
+
         if ($row === false) {
             return null;
         }
@@ -159,6 +165,7 @@ final class TraceReader
     private function renderRows(array $rows, bool $color = false): string
     {
         $lines = [];
+
         foreach ($rows as $row) {
             if (!\is_array($row)) {
                 continue;

@@ -18,6 +18,7 @@ final readonly class Workspace
     public function __construct(string $root)
     {
         $real = realpath($root);
+
         if ($real === false) {
             throw new ToolException("Workspace directory does not exist: {$root}");
         }
@@ -34,6 +35,7 @@ final readonly class Workspace
     public function resolveExisting(string $path): string
     {
         $real = realpath($this->join($path));
+
         if ($real === false) {
             throw new ToolException("No such file: {$path}");
         }
@@ -49,6 +51,7 @@ final readonly class Workspace
         $full = $this->join($path);
 
         $parent = realpath(\dirname($full));
+
         if ($parent === false) {
             throw new ToolException("Directory does not exist for: {$path}");
         }

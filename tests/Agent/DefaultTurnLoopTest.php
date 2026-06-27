@@ -351,6 +351,7 @@ final class DefaultTurnLoopTest
         $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', maxHistory: 4);
 
         $threw = false;
+
         try {
             $loop->run([Message::userText('go')]);
         } catch (ContextLengthException) {

@@ -39,6 +39,7 @@ final class ScriptedHttpClient implements HttpClientInterface
         $this->calls++;
 
         $outcome = array_shift($this->outcomes);
+
         if ($outcome === null) {
             throw new \RuntimeException('ScriptedHttpClient: no more outcomes');
         }

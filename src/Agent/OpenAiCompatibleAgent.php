@@ -49,6 +49,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
     public static function encodeRequest(AgentRequest $request): array
     {
         $messages = [];
+
         if ($request->system !== '') {
             $messages[] = ['role' => 'system', 'content' => $request->system];
         }
@@ -98,6 +99,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
         $text = null;
 
         $contentText = $message['content'] ?? null;
+
         if (is_string($contentText) && $contentText !== '') {
             $content[] = new TextBlock($contentText);
             $text = $contentText;
@@ -151,6 +153,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
         if ($message->role === Role::Assistant) {
             $text = '';
             $toolCalls = [];
+
             foreach ($message->content as $block) {
                 if ($block instanceof TextBlock) {
                     $text .= $block->text;
@@ -170,6 +173,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
             }
 
             $encoded = ['role' => 'assistant', 'content' => $text === '' ? null : $text];
+
             if ($toolCalls !== []) {
                 $encoded['tool_calls'] = $toolCalls;
             }
@@ -178,6 +182,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
         }
 
         $text = '';
+
         foreach ($message->content as $block) {
             if ($block instanceof TextBlock) {
                 $text .= $block->text;

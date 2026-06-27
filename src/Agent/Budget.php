@@ -70,6 +70,7 @@ final class Budget
         if ($this->tokenLimit > 0 && $this->tokens >= $this->tokenLimit) {
             return true;
         }
+
         if ($this->secondsLimit > 0.0 && $this->elapsed() >= $this->secondsLimit) {
             return true;
         }
@@ -83,6 +84,7 @@ final class Budget
         if ($this->tokenLimit > 0 && $this->tokens >= $this->tokenLimit) {
             return "token budget exhausted ({$this->tokens}/{$this->tokenLimit})";
         }
+
         if ($this->secondsLimit > 0.0 && $this->elapsed() >= $this->secondsLimit) {
             return 'time budget exhausted (' . round($this->elapsed(), 1) . "s/{$this->secondsLimit}s)";
         }

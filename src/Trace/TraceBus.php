@@ -41,6 +41,7 @@ final class TraceBus
 
         $unsubscribe = function () use ($runId, $id): void {
             unset($this->subscribers[$runId][$id]);
+
             if (($this->subscribers[$runId] ?? []) === []) {
                 unset($this->subscribers[$runId]);
             }

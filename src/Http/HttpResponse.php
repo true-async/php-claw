@@ -33,6 +33,7 @@ final class HttpResponse
     public function json(): array
     {
         $data = json_decode($this->body, true);
+
         // A top-level JSON list (e.g. "[1,2,3]") is also an array but violates the
         // string-keyed contract callers rely on; reject it like any non-object.
         if (!is_array($data) || (array_is_list($data) && $data !== [])) {

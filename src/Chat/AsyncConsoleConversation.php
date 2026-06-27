@@ -139,6 +139,7 @@ final class AsyncConsoleConversation implements ConversationInterface
 
             if ($line === false) {
                 $this->eof = true;   // EOF (Ctrl-D / closed stdin)
+
                 return;
             }
 
@@ -231,6 +232,7 @@ final class AsyncConsoleConversation implements ConversationInterface
         if ($status === null) {
             $this->statusLabel = '';
             $this->writeStatus('');
+
             return;
         }
 
@@ -410,9 +412,11 @@ final class AsyncConsoleConversation implements ConversationInterface
         $height = $this->chatRows - $this->chatStart + 1;
 
         $lines = $this->history;
+
         foreach ($this->deferred as $line) {
             $lines[] = self::C_DIM . 'User: ' . $line . self::C_RESET . "\n";
         }
+
         if ($this->warning !== null) {
             $lines[] = $this->warning . "\n";   // its own block, below the dim deferred area
         }
@@ -450,6 +454,7 @@ final class AsyncConsoleConversation implements ConversationInterface
     private function syncSize(): void
     {
         [$rows, $cols] = self::detectSize();
+
         if ($rows !== $this->rows || $cols !== $this->cols) {
             $this->rows = $rows;
             $this->cols = $cols;
@@ -489,6 +494,7 @@ final class AsyncConsoleConversation implements ConversationInterface
         // readline_info (static here), this refreshes on every resize.
         if (PHP_OS_FAMILY === 'Windows') {
             $size = self::winConsoleSize();
+
             if ($size !== null) {
                 return $size;
             }
@@ -501,6 +507,7 @@ final class AsyncConsoleConversation implements ConversationInterface
         // Linux/macOS: `stty size` prints "rows cols" for the tty — live on resize.
         if (($rows < 4 || $cols < 20) && PHP_OS_FAMILY !== 'Windows') {
             $out = @shell_exec('stty size 2>/dev/null');
+
             if (is_string($out) && preg_match('/^(\d+)\s+(\d+)/', trim($out), $m)) {
                 $rows = (int) $m[1];
                 $cols = (int) $m[2];
@@ -548,11 +555,13 @@ final class AsyncConsoleConversation implements ConversationInterface
                 );
             }
             $info = $k->new('CONSOLE_SCREEN_BUFFER_INFO');
+
             if (!$k->GetConsoleScreenBufferInfo($k->GetStdHandle(0xFFFFFFF5), \FFI::addr($info))) {
                 return null;   // STD_OUTPUT_HANDLE = (DWORD)-11
             }
             $cols = $info->w->Right - $info->w->Left + 1;
             $rows = $info->w->Bottom - $info->w->Top + 1;
+
             return ($cols < 20 || $rows < 4) ? null : [$rows, $cols];
         } catch (\Throwable) {
             return null;

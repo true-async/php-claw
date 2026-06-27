@@ -45,6 +45,7 @@ final readonly class WriteFileTool implements ToolInterface
     public function handle(array $input): string
     {
         $path = (string) ($input['path'] ?? '');
+
         if ($path === '') {
             throw new ToolException('write_file: "path" is required');
         }

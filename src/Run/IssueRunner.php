@@ -116,6 +116,7 @@ final readonly class IssueRunner
         // resuming reuses it: the solver restores its saved state and re-runs only the unfinished tail.
         $runId = $this->store->resumableRun($issue->id, $solverName);
         $resuming = $runId !== null;
+
         if ($runId === null) {
             $runId = $this->store->recordRun($issue->id, $solverName);
         }
@@ -134,6 +135,7 @@ final readonly class IssueRunner
 
         $taskBrief = "Title: {$issue->title}\n\nDescription: {$issue->description}";
         $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));
+
         if ($resuming) {
             $this->frontend->report("Resuming run #{$runId} for issue #{$issue->id}…", false);
         }
@@ -151,6 +153,7 @@ final readonly class IssueRunner
         );
 
         $early = $this->ensureSolver($ctx);
+
         if ($early !== null) {
             return $early;   // generation failed, or the solver was saved without running it
         }
@@ -166,6 +169,7 @@ final readonly class IssueRunner
     private function ensureSolver(RunContext $ctx): ?int
     {
         $solverPath = $ctx->workflowStore->path($ctx->solverName, true);
+
         if (is_file($solverPath)) {
             $this->frontend->report("Reusing solver {$ctx->solverClass}.", false);
 
@@ -175,6 +179,7 @@ final readonly class IssueRunner
         $this->frontend->report("Generating a solver workflow for issue #{$ctx->issue->id}…", false);
 
         $gen = $ctx->tracer->enterWorkflow('generate-issue-workflow');
+
         try {
             new GenerateIssueWorkflow($ctx->env, $ctx->runId . '-gen', [
                 'solverName' => $ctx->solverName,
@@ -218,13 +223,16 @@ final readonly class IssueRunner
         $solverSpan = $ctx->tracer->enterWorkflow($ctx->solverName);
         $currentClass = $ctx->solverClass;
         $attempt = 0;
+
         while (true) {
             try {
                 $solver = new $currentClass($ctx->env, $ctx->runId, [], $ctx->issue, $ctx->project);
+
                 if (!$solver instanceof WorkflowAbstract) {
                     throw new ClawException("{$currentClass} is not a workflow");
                 }
                 $solver->run();
+
                 break;
             } catch (WorkflowFinished) {
                 break;   // the solver called `done`: a clean finish, not a crash to repair
@@ -244,6 +252,7 @@ final readonly class IssueRunner
 
                 $this->frontend->report("Run hit an error; repairing (attempt {$attempt})…", false);
                 $fixed = $this->repairSolver($ctx, $currentClass, $e->getMessage(), $attempt);
+
                 if ($fixed === null) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
@@ -313,6 +322,7 @@ final readonly class IssueRunner
         $brokenCode = is_file($brokenPath) ? (string) file_get_contents($brokenPath) : '';
 
         $span = $ctx->tracer->enterWorkflow('supervise-run');
+
         try {
             new SuperviseWorkflow($ctx->env, $ctx->runId . '-fix' . $attempt, [
                 'brokenName' => $brokenShort,

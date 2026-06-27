@@ -34,6 +34,7 @@ final class TelegramClientTest
         );
 
         $threw = false;
+
         try {
             $client->getUpdates(0);
         } catch (HttpException $e) {

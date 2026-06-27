@@ -44,6 +44,7 @@ final class TraceStore implements TraceSinkInterface
     private static function ensureColumn(\PDO $pdo, string $column, string $decl): void
     {
         $info = $pdo->query('PRAGMA table_info(trace)');
+
         if ($info === false) {
             return;
         }

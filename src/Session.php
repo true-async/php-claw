@@ -92,6 +92,7 @@ final class Session
             new AuditMiddleware($this->store),
             new PermissionMiddleware($this->policy, $this->tools, $this->conversation, $this->store),
         ];
+
         if ($this->toolTimeoutMs > 0) {
             $middlewares[] = new TimeoutMiddleware($this->toolTimeoutMs);   // innermost: bound each tool run
         }
@@ -278,6 +279,7 @@ final class Session
             }
 
             $results = [];
+
             foreach ($response->toolCalls as $call) {
                 $this->conversation->updateStatus(Status::toolCall($call->name));
                 $results[] = $this->execute($call);
@@ -295,6 +297,7 @@ final class Session
         }
 
         $new = \array_slice($this->history, $this->persisted);
+
         if ($new !== []) {
             $this->store->append(...$new);
             $this->persisted = \count($this->history);

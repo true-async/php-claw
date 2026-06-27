@@ -38,6 +38,7 @@ final class ProjectStore
     public static function init(string $projectsDir, string $projectPath): Project
     {
         $abs = realpath($projectPath);
+
         if ($abs === false || !is_dir($abs)) {
             throw new ClawException("project folder does not exist: {$projectPath}");
         }
@@ -48,11 +49,13 @@ final class ProjectStore
 
         $id = self::keyFor($abs);
         $dbPath = self::dbPath($projectsDir, $id);
+
         if (is_file($dbPath)) {
             throw new ClawException("project already initialized: {$abs} ({$dbPath})");
         }
 
         $name = basename($abs);
+
         try {
             $pdo = self::open($dbPath);
             self::ensureSchema($pdo);
@@ -88,16 +91,19 @@ final class ProjectStore
     public static function discover(string $projectsDir, string $startDir): ?self
     {
         $dir = realpath($startDir);
+
         if ($dir === false) {
             return null;
         }
 
         while (true) {
             $dbPath = self::dbPath($projectsDir, self::keyFor($dir));
+
             if (is_file($dbPath)) {
                 return self::openHandle($dbPath);
             }
             $parent = \dirname($dir);
+
             if ($parent === $dir) {   // reached the filesystem root without a match
                 return null;
             }
@@ -126,6 +132,7 @@ final class ProjectStore
     public function addIssue(string $title, string $description = ''): Issue
     {
         $title = trim($title);
+
         if ($title === '') {
             throw new ClawException('issue title must not be empty');
         }
@@ -156,6 +163,7 @@ final class ProjectStore
             $stmt = $this->pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
             $stmt->execute(['id' => $issueId]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
             if (!\is_array($row)) {
                 throw new ClawException("issue #{$issueId} not found in project {$this->project->id}");
             }
@@ -208,6 +216,7 @@ final class ProjectStore
         $stmt->execute();
 
         $runs = [];
+
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
             $runs[] = [
                 'id' => (string) ($row['id'] ?? ''),
@@ -256,6 +265,7 @@ final class ProjectStore
 
         $stmt = $pdo->query('SELECT id, name, path, description FROM project LIMIT 1');
         $row = $stmt === false ? false : $stmt->fetch(\PDO::FETCH_ASSOC);
+
         if (!\is_array($row)) {
             throw new ClawException("project has no metadata: {$dbPath}");
         }

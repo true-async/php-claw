@@ -28,6 +28,7 @@ final class AgentErrorsTest
 
         $rateLimited = AgentErrors::classify(429, 'rate_limit_error', 'x', 2000);
         Assert::same($rateLimited::class, RateLimitException::class);
+
         if ($rateLimited instanceof RateLimitException) {
             Assert::same($rateLimited->retryAfterMs, 2000);
         }

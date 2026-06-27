@@ -56,6 +56,7 @@ final class ConsoleConversation implements ConversationInterface
             }
 
             $line = trim($line);
+
             if ($line !== '') {
                 return $line;
             }

@@ -52,6 +52,7 @@ final class WorkflowMode
         if (\in_array('-c', $args, true) || \in_array('--create', $args, true)) {
             return $this->createProject($args);
         }
+
         if (\in_array('-i', $args, true) || \in_array('--issue', $args, true)) {
             return $this->createIssue($args, $projectDir);
         }
@@ -75,6 +76,7 @@ final class WorkflowMode
     {
         $host = '127.0.0.1';
         $port = 8787;
+
         foreach ($args as $i => $arg) {
             if ($arg === '--host' && isset($args[$i + 1])) {
                 $host = $args[$i + 1];
@@ -109,6 +111,7 @@ final class WorkflowMode
     private function createProject(array $args): int
     {
         $target = Cli::firstPositional($args) ?? getcwd();
+
         if ($target === false) {
             fwrite(STDERR, "claw -c: cannot determine the project folder\n");
 
@@ -139,6 +142,7 @@ final class WorkflowMode
     private function createIssue(array $args, ?string $projectDir): int
     {
         $title = Cli::firstPositional($args);
+
         if ($title === null) {
             fwrite(STDERR, "claw -i: an issue title is required (usage: claw -i \"title\")\n");
 
@@ -173,6 +177,7 @@ final class WorkflowMode
     private function runIssue(array $args, ?string $projectDir, ?Level $verbosity): int
     {
         $issueId = Cli::firstPositional($args);
+
         if ($issueId === null) {
             fwrite(STDERR, "claw run: an issue id is required (usage: claw run <id>)\n");
 
@@ -190,6 +195,7 @@ final class WorkflowMode
         }
 
         $agent = AgentFactory::make($config, new CurlHttpClient());
+
         if ($agent === null) {
             fwrite(STDERR, "claw run: agent '{$config->agent}' is not wired yet.\n");
 
@@ -219,6 +225,7 @@ final class WorkflowMode
         $reader = new TraceReader($store->pdo());
 
         $runs = $store->recentRuns();
+
         if ($runs === []) {
             fwrite(STDOUT, "No runs yet for this project.\n");
 
@@ -229,6 +236,7 @@ final class WorkflowMode
 
         fwrite(STDOUT, "Runs:\n");
         $header = null;
+
         foreach ($runs as $run) {
             if ($run['id'] === $runId) {
                 $header = $run;
@@ -280,11 +288,13 @@ final class WorkflowMode
     private function resolve(?string $projectDir): ProjectStore
     {
         $start = $projectDir ?? (getenv('CLAW_PROJECT') ?: getcwd());
+
         if ($start === false) {
             throw new ClawException('cannot determine the project folder');
         }
 
         $store = ProjectStore::discover($this->projectsDir(), $start);
+
         if ($store === null) {
             throw new ClawException("not inside a registered project: {$start} (run: claw -c)");
         }
@@ -304,15 +314,20 @@ final class WorkflowMode
     {
         $rest = [];
         $dir = null;
+
         for ($i = 0, $n = \count($args); $i < $n; ++$i) {
             $arg = $args[$i];
+
             if ($arg === '--project' || $arg === '-C') {
                 $dir = $args[$i + 1] ?? null;   // value is the next token
                 ++$i;                            // consume it
+
                 continue;
             }
+
             if (str_starts_with($arg, '--project=')) {
                 $dir = substr($arg, \strlen('--project='));
+
                 continue;
             }
             $rest[] = $arg;
@@ -334,6 +349,7 @@ final class WorkflowMode
     {
         $rest = [];
         $level = null;
+
         foreach ($args as $arg) {
             if ($arg === '-q' || $arg === '--quiet') {
                 $level = Level::Notice;

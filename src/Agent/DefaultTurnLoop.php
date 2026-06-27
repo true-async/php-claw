@@ -122,6 +122,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
             // is spent, stop the exchange here and return what we have, not another round-trip.
             if ($this->turnBudget !== null) {
                 $this->turnBudget->spend($response->usage->inputTokens + $response->usage->outputTokens);
+
                 if ($this->turnBudget->isExhausted()) {
                     $this->tracer?->exit($turn);
 
@@ -143,8 +144,10 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 // the answer as the next user turn, and continue the same loop (context stays whole).
                 if ($this->ask !== null) {
                     $question = $this->extractQuestion($response->text ?? '');
+
                     if ($question !== null) {
                         $answer = $this->ask->reply($question);
+
                         if ($answer !== null) {                       // null = the chain passed up, no one answered
                             $history[] = Message::userText($answer);
 
@@ -157,6 +160,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
             }
 
             $results = [];
+
             foreach ($response->toolCalls as $call) {
                 $this->tracer?->toolCall($call->name, $call->input);
                 $result = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));

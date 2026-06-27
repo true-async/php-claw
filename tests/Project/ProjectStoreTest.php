@@ -42,6 +42,7 @@ final class ProjectStoreTest
             ProjectStore::init($projectsDir, $folder);
 
             $threw = false;
+
             try {
                 ProjectStore::init($projectsDir, $folder);
             } catch (ClawException $e) {
@@ -62,6 +63,7 @@ final class ProjectStoreTest
 
         try {
             $threw = false;
+
             try {
                 ProjectStore::init($projectsDir, $projectsDir . '/does-not-exist');
             } catch (ClawException $e) {
@@ -87,6 +89,7 @@ final class ProjectStoreTest
             mkdir($sub, 0o775, true);
 
             $store = ProjectStore::discover($projectsDir, $sub);   // started deep inside the tree
+
             if (!$store instanceof ProjectStore) {
                 throw new \RuntimeException('discover() returned null for a subdirectory of a project');
             }
@@ -132,6 +135,7 @@ final class ProjectStoreTest
             $pdo = new \PDO('sqlite:' . $projectsDir . '/' . $store->project()->id . '.db');
             $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
             $stmt = $pdo->query('SELECT title, description, status FROM issues WHERE id = 1');
+
             if ($stmt === false) {
                 throw new \RuntimeException('issues query failed');
             }
@@ -155,6 +159,7 @@ final class ProjectStoreTest
             $store = self::openProject($projectsDir, $folder);
 
             $threw = false;
+
             try {
                 $store->addIssue('   ');
             } catch (ClawException $e) {
@@ -219,6 +224,7 @@ final class ProjectStoreTest
     {
         ProjectStore::init($projectsDir, $folder);
         $store = ProjectStore::discover($projectsDir, $folder);
+
         if (!$store instanceof ProjectStore) {
             throw new \RuntimeException('discover() returned null for a just-initialized project');
         }

@@ -152,6 +152,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // simply gets none, as it would have had the crash struck a moment earlier.
         $saved = $store->loadHandoff($runId);
         $lastDone = $this->done === [] ? null : $this->done[array_key_last($this->done)];
+
         if ($saved['from'] !== '' && $saved['from'] === $lastDone) {
             $this->incomingHandoff = $saved['handoff'];
         }
@@ -171,6 +172,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         try {
             $names = $this->stepMethods();
             $index = 0;
+
             while ($index < \count($names)) {
                 $this->step($names[$index]);
                 $index = $this->backTo === null ? $index + 1 : $this->rewindTo($names, $index);
@@ -210,9 +212,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $target = (string) $this->backTo;
         $this->backTo = null;
         $to = array_search($target, $names, true);
+
         if ($to === false || $to > $from) {
             throw new \LogicException("back('{$target}') must name an EARLIER step");
         }
+
         for ($k = $to; $k <= $from; ++$k) {
             $this->done = array_values(array_filter($this->done, static fn (string $d): bool => $d !== $names[$k]));
         }
@@ -264,12 +268,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $result = '';
             $workHistory = [];
             $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
+
             if ($this->reentryStep === $name) {
                 $resume = $this->stepHistory[$name] ?? [];   // a back() into this step continues its prior conversation
                 $this->critique = $this->reentryReason;        // the back() reason is its first-attempt guidance
                 $this->reentryStep = null;
                 $this->reentryReason = '';
             }
+
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
@@ -277,16 +283,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $raw = $this->{$name}();
                 $result = \is_string($raw) ? $raw : '';
                 $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
+
                 if ($rubric === null) {
                     break;
                 }
 
                 $findings = $this->critic($name, $result, $rubric, $this->artifacts[$name]);
+
                 if ($findings === null) {
                     break;   // the critic is satisfied
                 }
 
                 $guidance = $this->superviseStep($name, $result, $findings, ++$round, $maxRounds);
+
                 if ($guidance === null) {
                     break;   // the supervisor accepted the work as-is
                 }
@@ -453,6 +462,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $scope = $this->env->child()->set(EnvKey::Registry, $palette);
 
         $model = $agent !== null ? $this->agentModel($agent) : null;
+
         if ($model !== null) {
             $scope->set(EnvKey::ModelId, $model);   // route this call to the role's model
         }
@@ -492,6 +502,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function formPendingHandoff(): void
     {
         $pending = $this->pendingHandoff;
+
         if ($pending === null) {
             return;
         }
@@ -530,6 +541,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function toolBriefing(Registry $palette): string
     {
         $tools = $palette->all();
+
         if ($tools === []) {
             return '';
         }
@@ -555,14 +567,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function withLocalTools(Registry $registry): Registry
     {
         $local = $this->localTools();
+
         if ($local === []) {
             return $registry;
         }
 
         $combined = new Registry();
+
         foreach ($registry->all() as $tool) {
             $combined->add($tool);
         }
+
         foreach ($local as $tool) {
             $combined->add($tool);
         }
@@ -583,8 +598,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         $tools = [];
+
         foreach (new \ReflectionClass($this)->getMethods() as $method) {
             $attributes = $method->getAttributes(Tool::class);
+
             if ($attributes !== []) {
                 $tools[] = new MethodTool($this, $method, $attributes[0]->newInstance());
             }
@@ -597,6 +614,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function agentModel(string $agent): ?string
     {
         $agents = $this->env->find(EnvKey::Agents);
+
         if (\is_array($agents) && isset($agents[$agent]) && \is_string($agents[$agent]) && $agents[$agent] !== '') {
             return $agents[$agent];
         }
@@ -622,6 +640,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $seconds = $this->numEnv(EnvKey::TurnTimeLimit);
 
         $workflow = $this->budget();
+
         if ($workflow !== null) {
             return $workflow->child($tokens, $seconds);
         }
@@ -640,16 +659,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function enforceBudget(): void
     {
         $budget = $this->budget();
+
         if ($budget === null || !$budget->isExhausted()) {
             return;
         }
 
         if ($this->budgetPolicy() === BudgetPolicy::Ask) {
             $channel = $this->env->find(EnvKey::Ask);
+
             if ($channel instanceof SpeakerInterface) {
                 $extra = $this->parseExtraTokens($channel->reply(
                     "Budget spent: {$budget->reason()}. Enter extra tokens to continue, or nothing to stop.",
                 ));
+
                 if ($extra > 0) {
                     $budget->raise($extra);
                     $this->tracer()?->log('budget', "raised by {$extra} tokens", [], Level::Notice);
@@ -702,11 +724,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function criticRubric(?Step $step, string $name): ?string
     {
         $critic = $step?->critic;
+
         if ($critic === null || $critic === '') {
             return null;
         }
 
         $rules = $this->criticRules()[$critic] ?? null;
+
         if ($rules === null || trim($rules) === '') {
             throw new \LogicException("Step '{$name}' names critic '{$critic}', but criticRules() has no rules for it.");
         }
@@ -814,6 +838,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.";
 
         $reply = $channel->reply($prompt);
+
         if ($reply === null) {
             if ($stuck) {
                 throw new WorkflowException("step '{$name}' still failed review after {$round} rounds");
@@ -824,9 +849,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $answer = trim($reply);
         $lower = strtolower($answer);
+
         if ($answer === '' || str_starts_with($lower, 'accept')) {
             return null;   // accept the work as-is
         }
+
         if (str_starts_with($lower, 'stop')) {
             throw new WorkflowException("run stopped at step '{$name}' by the supervisor");
         }
@@ -851,6 +878,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $result = $this->env->executor()->call(new ToolCall($this->env->findStore()->nextId(), $name, $params));
 
         $tracer?->toolResult($name, $result->content, $result->isError);
+
         if ($result->isError) {
             return "tool '{$name}' failed: " . $result->content;
         }
@@ -865,6 +893,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function extractCode(string $text): string
     {
         $text = trim($text);
+
         if (preg_match('/```(?:php)?\s*(.+?)\s*```/s', $text, $m) === 1) {
             return trim($m[1]);
         }
@@ -892,12 +921,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function saveGeneratedWorkflow(string $name, string $code, callable $revise): string
     {
         $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
+
         if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
             return $code;
         }
 
         $code = $revise($result);
         $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
+
         if (!str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
             throw new WorkflowException($result);   // a second failure surfaces to the run-path
         }
@@ -916,6 +947,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function ask(string $question): string
     {
         $channel = $this->env->find(EnvKey::Ask);
+
         if (!$channel instanceof SpeakerInterface) {
             throw new WorkflowException('the workflow asked for input but no ask channel is configured');
         }
@@ -948,6 +980,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function stepMethods(): array
     {
         $names = [];
+
         foreach (new \ReflectionClass($this)->getMethods() as $method) {
             if ($method->getAttributes(Step::class) !== []) {
                 $names[] = $method->getName();
@@ -966,12 +999,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function captureState(): array
     {
         $state = [];
+
         foreach ($this->stateProperties() as $property) {
             if (!$property->isInitialized($this)) {
                 continue;
             }
 
             $value = $property->getValue($this);
+
             // The snapshot is JSON-persisted; a closure or resource is not durable state and would
             // corrupt the store or fail opaquely later. Fail loud here, naming the offending field.
             if ($value instanceof \Closure || \is_resource($value)) {
@@ -1015,6 +1050,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     {
         $properties = [];
         $class = new \ReflectionClass($this);
+
         while ($class !== false && $class->getName() !== self::class) {
             foreach ($class->getProperties() as $property) {
                 if (!$property->isStatic()) {

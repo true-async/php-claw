@@ -107,6 +107,7 @@ final class Server
 
                     return;
                 }
+
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $matches)) {
                     $this->answer($req, $res, $matches[1], $matches[2]);
 
@@ -116,6 +117,7 @@ final class Server
 
                 return;
             }
+
             if ($method !== 'GET') {
                 $res->json(['error' => 'method not allowed'], 405);
 
@@ -127,32 +129,38 @@ final class Server
 
                 return;
             }
+
             if ($path === '/api/projects') {
                 $res->json($this->projects());
 
                 return;
             }
+
             if (\preg_match('#^/api/projects/([^/]+)/issues/stream$#', $path, $matches)) {
                 $this->issuesStream($res, $matches[1]);
 
                 return;
             }
+
             if (\preg_match('#^/api/projects/([^/]+)/issues$#', $path, $matches)) {
                 $res->json($this->issues($matches[1]));
 
                 return;
             }
+
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/stream$#', $path, $matches)) {
                 $this->stream($req, $res, $matches[1], $matches[2]);
 
                 return;
             }
+
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/trace$#', $path, $matches)) {
                 $since = (int) $req->getQueryParam('since', 0);
                 $res->json($this->trace($this->pdo($matches[1]), $matches[2], $since));
 
                 return;
             }
+
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/artifacts$#', $path, $matches)) {
                 $res->json($this->artifacts($this->pdo($matches[1]), $matches[2]));
 
@@ -169,6 +177,7 @@ final class Server
     private function projects(): array
     {
         $projects = [];
+
         foreach (\glob($this->projectsDir . '/*.db') ?: [] as $file) {
             try {
                 $statement = $this->open($file)->prepare('SELECT name, path FROM project LIMIT 1');
@@ -177,6 +186,7 @@ final class Server
             } catch (\Exception) {
                 continue;   // not a project db
             }
+
             if (\is_array($row)) {
                 $projects[] = [
                     'key' => \basename($file, '.db'),
@@ -203,6 +213,7 @@ final class Server
         $issueRows = $statement->fetchAll(\PDO::FETCH_ASSOC);
 
         $issues = [];
+
         foreach ($issueRows as $issueRow) {
             $runsStatement = $pdo->prepare('SELECT id, workflow, status FROM runs WHERE issue_id = ? ORDER BY id');
             $runsStatement->execute([(string) $issueRow['id']]);
@@ -213,6 +224,7 @@ final class Server
             $tokensIn = 0;
             $tokensOut = 0;
             $artifacts = [];
+
             if ($latestRun !== null) {
                 $runId = (string) $latestRun['id'];
                 $doneCount = $this->doneCount($pdo, $runId);
@@ -251,6 +263,7 @@ final class Server
         } catch (\Exception) {
             return 0;   // table not created on this db yet
         }
+
         if (!\is_string($doneJson)) {
             return 0;
         }
@@ -280,8 +293,10 @@ final class Server
         $statement->execute([$runId]);
 
         $artifacts = [];
+
         foreach ($statement->fetchAll(\PDO::FETCH_COLUMN) as $artifactJson) {
             $artifact = \json_decode((string) $artifactJson, true);
+
             if (!\is_array($artifact)) {
                 continue;
             }
@@ -311,6 +326,7 @@ final class Server
         $statement->execute([$runId, $since]);
 
         $rows = [];
+
         foreach ($statement->fetchAll(\PDO::FETCH_ASSOC) as $row) {
             $rows[] = [
                 'seq' => (int) $row['seq'],
@@ -354,6 +370,7 @@ final class Server
         // Subscribe BEFORE the replay so nothing published mid-replay is lost; the seq check de-dupes the
         // overlap. The unsubscribe MUST run on every exit, so the topic does not leak.
         [$channel, $unsubscribe] = $this->bus->subscribe($runId);
+
         try {
             foreach ($this->trace($pdo, $runId, $since) as $row) {   // 1) replay the journal gap
                 $this->sseRow($res, $row);
@@ -374,6 +391,7 @@ final class Server
                 if ($seq <= $since) {
                     continue;   // already sent during the replay/overlap
                 }
+
                 if ($seq > $since + 1) {
                     // a dropped event left a gap — heal it from the durable journal, in order
                     foreach ($this->trace($pdo, $runId, $since) as $gapRow) {
@@ -383,6 +401,7 @@ final class Server
 
                     continue;
                 }
+
                 if (!$res->sendable()) {
                     continue;   // slow client: skip; a later gap-heal or a reconnect replays it
                 }
@@ -455,15 +474,19 @@ final class Server
 
         $sentSnapshots = [];   // issue id → the json it was last sent as
         $idleTicks = 0;
+
         try {
             while (!$res->isClosed()) {
                 $changed = false;
+
                 foreach ($this->issues($key) as $issue) {
                     $id = (string) $issue['id'];
                     $snapshot = \json_encode($issue, self::JSON);
+
                     if (($sentSnapshots[$id] ?? null) === $snapshot) {
                         continue;
                     }
+
                     if (!$res->sendable()) {
                         continue;   // slow client: leave it unseen so the next tick retries
                     }
@@ -511,6 +534,7 @@ final class Server
 
         $config = Config::load($this->root . '/.env');
         $agent = AgentFactory::make($config, new CurlHttpClient());
+
         if ($agent === null) {
             $res->json(['error' => "agent '{$config->agent}' is not wired"], 500);
 
@@ -545,6 +569,7 @@ final class Server
     private function answer(HttpRequest $req, HttpResponse $res, string $key, string $issueId): void
     {
         $channel = $this->gates[$issueId] ?? null;
+
         if ($channel === null) {
             $res->json(['error' => 'no run is waiting for an answer on this issue'], 409);
 
@@ -560,6 +585,7 @@ final class Server
 
             return;
         }
+
         if ($status !== IssueStatus::WaitingHuman->name) {
             $res->json(['error' => 'the run is not waiting for an answer right now'], 409);
 
@@ -581,11 +607,13 @@ final class Server
     {
         $statement = $this->pdo($key)->query('SELECT path FROM project LIMIT 1');
         $path = $statement === false ? false : $statement->fetchColumn();
+
         if (!\is_string($path)) {
             throw new \RuntimeException("unknown project: {$key}");
         }
 
         $store = ProjectStore::discover($this->projectsDir, $path);
+
         if ($store === null) {
             throw new \RuntimeException("cannot open project: {$key}");
         }
@@ -596,6 +624,7 @@ final class Server
     private function pdo(string $key): \PDO
     {
         $file = $this->projectsDir . '/' . \basename($key) . '.db';
+
         if (!\is_file($file)) {
             throw new \RuntimeException("unknown project: {$key}");
         }
