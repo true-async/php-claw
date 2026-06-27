@@ -95,17 +95,17 @@ final class Server
     }
 
     /** Route one request. Both args come straight from the server extension's handler. */
-    public function handle(HttpRequest $req, HttpResponse $res): void
+    public function handle(HttpRequest $request, HttpResponse $response): void
     {
-        $path = \parse_url((string) $req->getUri(), PHP_URL_PATH) ?: '/';
-        $method = (string) $req->getMethod();
+        $path = \parse_url((string) $request->getUri(), PHP_URL_PATH) ?: '/';
+        $method = (string) $request->getMethod();
 
         // permissive CORS so the local dev UI (vite :5173) can call this directly
-        $res->setHeader('Access-Control-Allow-Origin', '*')
+        $response->setHeader('Access-Control-Allow-Origin', '*')
             ->setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
         if ($method === 'OPTIONS') {
-            $res->setStatusCode(204)->end();
+            $response->setStatusCode(204)->end();
 
             return;
         }
@@ -113,76 +113,76 @@ final class Server
         try {
             if ($method === 'POST') {
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/start$#', $path, $matches)) {
-                    $this->start($res, $matches[1], $matches[2]);
+                    $this->start($response, $matches[1], $matches[2]);
 
                     return;
                 }
 
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $matches)) {
-                    $this->answer($req, $res, $matches[1], $matches[2]);
+                    $this->answer($request, $response, $matches[1], $matches[2]);
 
                     return;
                 }
-                $res->json(['error' => 'not found', 'path' => $path], 404);
+                $response->json(['error' => 'not found', 'path' => $path], 404);
 
                 return;
             }
 
             if ($method !== 'GET') {
-                $res->json(['error' => 'method not allowed'], 405);
+                $response->json(['error' => 'method not allowed'], 405);
 
                 return;
             }
 
             if ($path === '/api/health') {
-                $res->json(['ok' => true]);
+                $response->json(['ok' => true]);
 
                 return;
             }
 
             if ($path === '/api/projects') {
-                $res->json($this->projects());
+                $response->json($this->projects());
 
                 return;
             }
 
             if (\preg_match('#^/api/projects/([^/]+)/issues/stream$#', $path, $matches)) {
-                $this->issuesStream($res, $matches[1]);
+                $this->issuesStream($response, $matches[1]);
 
                 return;
             }
 
             if (\preg_match('#^/api/projects/([^/]+)/issues$#', $path, $matches)) {
-                $res->json($this->issues($matches[1]));
+                $response->json($this->issues($matches[1]));
 
                 return;
             }
 
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/stream$#', $path, $matches)) {
-                $this->stream($req, $res, $matches[1], $matches[2]);
+                $this->stream($request, $response, $matches[1], $matches[2]);
 
                 return;
             }
 
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/trace$#', $path, $matches)) {
-                $since = (int) $req->getQueryParam('since', 0);
-                $res->json($this->reader($matches[1])->tail($matches[2], $since));
+                $since = (int) $request->getQueryParam('since', 0);
+                $response->json($this->reader($matches[1])->tail($matches[2], $since));
 
                 return;
             }
 
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/artifacts$#', $path, $matches)) {
-                $res->json($this->reader($matches[1])->artifactRecords($matches[2]));
+                $response->json($this->reader($matches[1])->artifactRecords($matches[2]));
 
                 return;
             }
 
-            $res->json(['error' => 'not found', 'path' => $path], 404);
+            $response->json(['error' => 'not found', 'path' => $path], 404);
         } catch (\Exception $e) {
             // A streaming route may have already committed its SSE headers; a JSON 500 over that is
             // impossible, so only answer with one when nothing has been sent yet.
-            if (!$res->isHeadersSent()) {
-                $res->json(['error' => $e->getMessage()], 500);
+            if (!$response->isHeadersSent()) {
+                $response->json(['error' => $e->getMessage()], 500);
             }
         }
     }
@@ -275,18 +275,18 @@ final class Server
      * re-checks for client disconnect. A dropped live event shows up as a seq gap and is healed from the
      * db on the spot.
      */
-    private function stream(HttpRequest $req, HttpResponse $res, string $key, string $runId): void
+    private function stream(HttpRequest $request, HttpResponse $response, string $key, string $runId): void
     {
         try {
             $reader = $this->reader($key);
         } catch (\Exception $e) {
-            $res->json(['error' => $e->getMessage()], 404);   // pre-stream: a normal JSON error is fine
+            $response->json(['error' => $e->getMessage()], 404);   // pre-stream: a normal JSON error is fine
 
             return;
         }
 
-        $since = (int) ($req->getHeader('Last-Event-ID') ?? $req->getQueryParam('since', 0));
-        $res->sseStart();   // commit text/event-stream headers now, so the browser's onopen fires
+        $since = (int) ($request->getHeader('Last-Event-ID') ?? $request->getQueryParam('since', 0));
+        $response->sseStart();   // commit text/event-stream headers now, so the browser's onopen fires
 
         // Subscribe BEFORE the replay so nothing published mid-replay is lost; the seq check de-dupes the
         // overlap. The unsubscribe MUST run on every exit, so the topic does not leak.
@@ -294,18 +294,18 @@ final class Server
 
         try {
             foreach ($reader->tail($runId, $since) as $row) {   // 1) replay the journal gap
-                $this->sseRow($res, $row);
+                $this->sseRow($response, $row);
                 $since = (int) $row['seq'];
             }
 
-            while (!$res->isClosed()) {   // 2) live: pushed by the run's LiveTraceSink, no poll
+            while (!$response->isClosed()) {   // 2) live: pushed by the run's LiveTraceSink, no poll
                 try {
                     // block for the next pushed [record, seq]; the timeout token cancels the recv after
                     // ~10s so we can heartbeat. recv throws OperationCanceledException when the token fires
                     // (Channel::recv @throws). Any other cancellation isn't caught here, so it propagates.
                     [$record, $seq] = $channel->recv(\Async\timeout(10000));
                 } catch (OperationCanceledException) {
-                    $res->sseComment();   // no event in ~10s: heartbeat, then re-check the connection
+                    $response->sseComment();   // no event in ~10s: heartbeat, then re-check the connection
 
                     continue;
                 }
@@ -317,17 +317,17 @@ final class Server
                 if ($seq > $since + 1) {
                     // a dropped event left a gap — heal it from the durable journal, in order
                     foreach ($reader->tail($runId, $since) as $gapRow) {
-                        $this->sseRow($res, $gapRow);
+                        $this->sseRow($response, $gapRow);
                         $since = (int) $gapRow['seq'];
                     }
 
                     continue;
                 }
 
-                if (!$res->sendable()) {
+                if (!$response->sendable()) {
                     continue;   // slow client: skip; a later gap-heal or a reconnect replays it
                 }
-                $this->sseRow($res, $this->liveRow($record, $seq));
+                $this->sseRow($response, $this->liveRow($record, $seq));
                 $since = $seq;
             }
         } catch (HttpServerException) {
@@ -343,9 +343,9 @@ final class Server
      *
      * @param array<string, mixed> $row
      */
-    private function sseRow(HttpResponse $res, array $row): void
+    private function sseRow(HttpResponse $response, array $row): void
     {
-        $res->sseEvent(
+        $response->sseEvent(
             data: \json_encode($row, self::JSON),
             event: 'trace',
             id: (string) $row['seq'],
@@ -383,23 +383,23 @@ final class Server
      * connect (and on reconnect) every issue is emitted once, since the seen-set starts empty; the client
      * keeps an id→issue map and applies each event.
      */
-    private function issuesStream(HttpResponse $res, string $key): void
+    private function issuesStream(HttpResponse $response, string $key): void
     {
         try {
             $this->readStore($key);   // resolve/validate the project before committing the stream
         } catch (\Exception $e) {
-            $res->json(['error' => $e->getMessage()], 404);
+            $response->json(['error' => $e->getMessage()], 404);
 
             return;
         }
 
-        $res->sseStart();
+        $response->sseStart();
 
         $sentSnapshots = [];   // issue id → the json it was last sent as
         $idleTicks = 0;
 
         try {
-            while (!$res->isClosed()) {
+            while (!$response->isClosed()) {
                 $changed = false;
 
                 foreach ($this->issues($key) as $issue) {
@@ -410,18 +410,18 @@ final class Server
                         continue;
                     }
 
-                    if (!$res->sendable()) {
+                    if (!$response->sendable()) {
                         continue;   // slow client: leave it unseen so the next tick retries
                     }
                     $sentSnapshots[$id] = $snapshot;
-                    $res->sseEvent(data: $snapshot, event: 'issue');
+                    $response->sseEvent(data: $snapshot, event: 'issue');
                     $changed = true;
                 }
 
                 if ($changed) {
                     $idleTicks = 0;
                 } elseif (++$idleTicks >= 5) {   // ~10s of a still board → heartbeat past proxy idle timeouts
-                    $res->sseComment();   // empty SSE comment = the canonical keepalive
+                    $response->sseComment();   // empty SSE comment = the canonical keepalive
                     $idleTicks = 0;
                 }
 
@@ -438,19 +438,19 @@ final class Server
      * final status. At most one active run per issue (a concurrent start is rejected 409), and the run's
      * gate parks on a per-issue answer channel that {@see answer()} feeds.
      */
-    private function start(HttpResponse $res, string $key, string $issueId): void
+    private function start(HttpResponse $response, string $key, string $issueId): void
     {
         try {
             $store = $this->storeFor($key);
             $issue = $store->loadIssue($issueId);
         } catch (\Exception $e) {
-            $res->json(['error' => $e->getMessage()], 404);
+            $response->json(['error' => $e->getMessage()], 404);
 
             return;
         }
 
         if (isset($this->active[$issue->id])) {
-            $res->json(['error' => 'a run for this issue is already active'], 409);
+            $response->json(['error' => 'a run for this issue is already active'], 409);
 
             return;
         }
@@ -459,7 +459,7 @@ final class Server
         $agent = AgentFactory::make($config, new CurlHttpClient());
 
         if ($agent === null) {
-            $res->json(['error' => "agent '{$config->agent}' is not wired"], 500);
+            $response->json(['error' => "agent '{$config->agent}' is not wired"], 500);
 
             return;
         }
@@ -481,7 +481,7 @@ final class Server
             }
         });
 
-        $res->json(['ok' => true], 202);
+        $response->json(['ok' => true], 202);
     }
 
     /**
@@ -489,12 +489,12 @@ final class Server
      * while the issue is WaitingHuman (a gate is actually open); otherwise there is nothing to answer and
      * the unbuffered send would hang, so we reject with 409.
      */
-    private function answer(HttpRequest $req, HttpResponse $res, string $key, string $issueId): void
+    private function answer(HttpRequest $request, HttpResponse $response, string $key, string $issueId): void
     {
         $channel = $this->gates[$issueId] ?? null;
 
         if ($channel === null) {
-            $res->json(['error' => 'no run is waiting for an answer on this issue'], 409);
+            $response->json(['error' => 'no run is waiting for an answer on this issue'], 409);
 
             return;
         }
@@ -502,22 +502,22 @@ final class Server
         try {
             $issue = $this->readStore($key)->loadIssue($issueId);
         } catch (\Exception $e) {
-            $res->json(['error' => $e->getMessage()], 404);
+            $response->json(['error' => $e->getMessage()], 404);
 
             return;
         }
 
         if ($issue->status !== IssueStatus::WaitingHuman) {
-            $res->json(['error' => 'the run is not waiting for an answer right now'], 409);
+            $response->json(['error' => 'the run is not waiting for an answer right now'], 409);
 
             return;
         }
 
-        $payload = \json_decode($req->getBody(), true);
+        $payload = \json_decode($request->getBody(), true);
         $text = \is_array($payload) && isset($payload['text']) ? (string) $payload['text'] : '';
 
         $channel->send($text);   // wake the parked run; unbuffered, so this returns once the run takes it
-        $res->json(['ok' => true], 202);
+        $response->json(['ok' => true], 202);
     }
 
     /**
