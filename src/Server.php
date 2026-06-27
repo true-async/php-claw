@@ -10,6 +10,7 @@ use Async\OperationCanceledException;
 use function Async\spawn;
 
 use Claw\Agent\AgentFactory;
+use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\IssueStatus;
 use Claw\Project\Project;
@@ -112,6 +113,12 @@ final class Server
 
         try {
             if ($method === 'POST') {
+                if ($path === '/api/projects') {
+                    $this->createProject($request, $response);
+
+                    return;
+                }
+
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/start$#', $path, $matches)) {
                     $this->start($response, $matches[1], $matches[2]);
 
@@ -198,6 +205,36 @@ final class Server
             ],
             ProjectStore::all($this->projectsDir),
         );
+    }
+
+    /**
+     * POST /api/projects — register an existing folder as a project (the dashboard's equivalent of
+     * `claw -c <folder>`): it creates the project's state db, it does not create the folder. The folder
+     * must already exist on the server's filesystem; an unknown/duplicate path is a 400 with the reason.
+     */
+    private function createProject(HttpRequest $request, HttpResponse $response): void
+    {
+        $payload = \json_decode($request->getBody(), true);
+        $folder = \is_array($payload) && isset($payload['path']) ? (string) $payload['path'] : '';
+
+        if ($folder === '') {
+            $response->json(['error' => 'a project folder path is required'], 400);
+
+            return;
+        }
+
+        try {
+            $project = ProjectStore::init($this->projectsDir, $folder);
+        } catch (ClawException $e) {
+            $response->json(['error' => $e->getMessage()], 400);
+
+            return;
+        }
+
+        // Drop any cached miss so the new project is readable on the next request.
+        unset($this->readStores[$project->id], $this->readers[$project->id]);
+
+        $response->json(['key' => $project->id, 'name' => $project->name, 'path' => $project->path], 201);
     }
 
     /**
