@@ -851,8 +851,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private function renderArtifacts(array $artifacts): string
     {
+        // No artifact does NOT mean "nothing to review": the critic is a real AI with every tool, so it
+        // verifies the step's effect by inspecting the project (reading the files it changed, running
+        // `php -l`/the tests). A genuinely empty step is for the critic to judge against the rubric, not
+        // for the engine to pre-fail.
         return $artifacts === []
-            ? '(the step recorded NO artifact — it produced nothing to review; that itself is a failure)'
+            ? '(this step recorded no artifact — verify its effect yourself: read the files it changed and run `php -l` / the tests)'
             : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
     }
 
