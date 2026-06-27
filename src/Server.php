@@ -24,6 +24,7 @@ use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
+use TrueAsync\HttpServerException;
 
 /**
  * JSON + SSE API over the project state databases, for the php-claw-ui dashboard.
@@ -178,7 +179,11 @@ final class Server
 
             $res->json(['error' => 'not found', 'path' => $path], 404);
         } catch (\Exception $e) {
-            $res->json(['error' => $e->getMessage()], 500);
+            // A streaming route may have already committed its SSE headers; a JSON 500 over that is
+            // impossible, so only answer with one when nothing has been sent yet.
+            if (!$res->isHeadersSent()) {
+                $res->json(['error' => $e->getMessage()], 500);
+            }
         }
     }
 
@@ -325,8 +330,9 @@ final class Server
                 $this->sseRow($res, $this->liveRow($record, $seq));
                 $since = $seq;
             }
-        } catch (\Exception) {
-            // The client vanished mid-write — the connection is gone.
+        } catch (HttpServerException) {
+            // The client vanished mid-write — the connection is gone. Only the server's own write
+            // failures are swallowed here; a real bug in the loop still propagates.
         } finally {
             $unsubscribe();
         }
@@ -421,8 +427,8 @@ final class Server
 
                 \Async\delay(2000);
             }
-        } catch (\Exception) {
-            // The client vanished mid-write — the connection is gone.
+        } catch (HttpServerException) {
+            // The client vanished mid-write — the connection is gone. A real bug still propagates.
         }
     }
 
