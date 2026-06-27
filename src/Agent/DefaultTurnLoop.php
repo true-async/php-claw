@@ -38,6 +38,17 @@ final class DefaultTurnLoop implements TurnLoopInterface
      */
     private const int TURN_CHECKPOINT_INTERVAL = 50;
 
+    /**
+     * Circuit-breaker for a wedged tool: if the SAME tool returns the SAME error this many times over
+     * the exchange, the model is not making progress on it (it keeps re-sending a call the tool keeps
+     * rejecting identically) — stop the exchange instead of grinding it to the turn cap / the budget.
+     * Identical (tool, error) is the signal: a tool failing with DIFFERENT errors is the model iterating
+     * toward a fix and is left alone; the same error repeating is a stuck loop. Small on purpose — three
+     * identical rejections is already "it isn't learning". The step's critic/supervisor handle the
+     * unfinished work from there.
+     */
+    private const int STUCK_TOOL_REPEAT = 3;
+
     /** Appended to the system prompt when an ask channel is present, teaching that marker. */
     private const string ASK_INSTRUCTION = "\n\nIf you need input or a decision from a person to "
         . 'proceed, do not guess: end your turn with no tool call and a line beginning "[question]" '
@@ -73,6 +84,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
         $totalOutput = 0;
         $turnNo      = 0;
         $lastText    = null;
+
+        /** @var array<string, int> identical (tool, error) → how many times it has failed this exchange */
+        $toolFailures = [];
 
         // With an ask channel present, teach the worker the [question] marker so it can pause for
         // input instead of finishing; without one the system prompt is untouched (headless).
@@ -160,16 +174,35 @@ final class DefaultTurnLoop implements TurnLoopInterface
             }
 
             $results = [];
+            $stuckTool = null;
 
             foreach ($response->toolCalls as $call) {
                 $this->tracer?->toolCall($call->name, $call->input);
                 $result = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
                 $this->tracer?->toolResult($call->name, $result->content, $result->isError);
                 $results[] = $result;
+
+                // Track identical failures across the exchange: the same tool rejecting with the same
+                // message, over and over, is a wedged model, not progress.
+                if ($result->isError) {
+                    $key = $call->name . "\0" . $result->content;
+                    $toolFailures[$key] = ($toolFailures[$key] ?? 0) + 1;
+
+                    if ($toolFailures[$key] >= self::STUCK_TOOL_REPEAT) {
+                        $stuckTool = $call->name;
+                    }
+                }
             }
 
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
+
+            // A tool wedged (same error STUCK_TOOL_REPEAT times): stop the exchange rather than burn it
+            // to the turn cap / budget. The results are in the history, so the step's critic/supervisor
+            // see the failure and decide; returning is the same graceful stop as the checkpoint/budget.
+            if ($stuckTool !== null) {
+                return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput));
+            }
         }
     }
 

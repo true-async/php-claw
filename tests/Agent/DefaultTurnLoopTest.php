@@ -82,6 +82,61 @@ final class DefaultTurnLoopTest
     }
 
     #[Test]
+    public function aWedgedToolStopsTheExchangeAfterRepeatedIdenticalErrors(): void
+    {
+        // The model keeps calling the same tool, which keeps failing with the SAME error. The circuit-
+        // breaker stops the exchange after a few identical failures — not at the far 50-turn cap.
+        $agent = new class () implements AgentInterface {
+            public int $calls = 0;
+
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $this->calls++;
+                $use = new ToolUseBlock('t' . $this->calls, 'wedged', []);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $executor = new RecordingExecutor(
+            static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'same error every time', true),
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');   // no ask channel
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::same($agent->calls, 3);   // stopped at STUCK_TOOL_REPEAT, not the 50-turn cap
+    }
+
+    #[Test]
+    public function aToolFailingWithDifferentErrorsIsLeftToKeepIterating(): void
+    {
+        // A tool failing with a DIFFERENT error each time is the model iterating toward a fix — the
+        // circuit-breaker must NOT trip on that; only the far turn cap stops it.
+        $agent = new class () implements AgentInterface {
+            public int $calls = 0;
+
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $this->calls++;
+                $use = new ToolUseBlock('t' . $this->calls, 'probe', []);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $n = 0;
+        $executor = new RecordingExecutor(
+            static function (ToolCall $call) use (&$n): ToolResultBlock {
+                return new ToolResultBlock($call->id, 'error #' . (++$n), true);   // distinct every time
+            },
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::same($agent->calls, 50);   // distinct errors do not trip the breaker; only the turn cap stops it
+    }
+
+    #[Test]
     public function runsToolThreadsResultBackThenAnswers(): void
     {
         $toolUse = new ToolUseBlock('t1', 'echo', ['msg' => 'hi']);
