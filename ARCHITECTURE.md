@@ -26,10 +26,11 @@ there is **one process, one reactor, a coroutine per unit of work — no ThreadP
 
 - `claw run` is a single foreground run on the reactor.
 - `claw serve` boots `TrueAsync\HttpServer`; **every request handler is a coroutine**
-  on the one event loop. `POST .../start` spawns the run as a *detached coroutine in
-  a long-lived `Async\Scope`*, so it outlives the request and a crash is contained.
-  Because runs, SSE streams, and the human gate all share one loop, the trace bus and
-  the gate are plain in-process `Async\Channel`s — no thread boundary.
+  on the one event loop. `POST .../start` `Async\spawn`s the run as a *detached
+  coroutine*, so it outlives the request; the handler returns 202 at once and the run
+  records its own final status. Because runs, SSE streams, and the human gate all share
+  one loop, the trace bus and the gate are plain in-process `Async\Channel`s — no thread
+  boundary.
 
 `Tracer` is synchronous and single-stack; parallel sub-workflows (a per-coroutine
 span stack) are a known limitation.
@@ -71,7 +72,7 @@ Tables (the source of truth is the code that creates them):
 Cross-cutting: `--project <dir>` / `-C` (also `CLAW_PROJECT`), `-q`/`-v` verbosity.
 `--session` reaches the legacy chat mode.
 
-## The run pipeline (`Claw\Cli\IssueRunner`)
+## The run pipeline (`Claw\Run\IssueRunner`)
 
 `IssueRunner` is the shared headless engine behind **both** `claw run` and the
 server's `POST start`. `IssueRunner::run(Issue)`:
@@ -90,18 +91,18 @@ server's `POST start`. `IssueRunner::run(Issue)`:
    snapshot (finished steps skipped), bounded by `MAX_REPAIRS = 2`. Success → run +
    issue `Done`.
 
-The pipeline holds no I/O opinion — four **seams** are injected, so console vs server
-differ only here:
+The pipeline holds no I/O opinion — it takes one **`RunFrontendInterface`** (in
+`Claw\Run`), so console vs server differ only in which frontend is injected:
 
-| seam | type | console (`claw run`) | server (`POST start`) |
-|---|---|---|---|
-| `$human` | `\Closure(Tracer): SpeakerInterface` | `ConsoleSpeaker` | `HttpGateSpeaker` |
-| `$approve` | `\Closure(path, code): bool` | show + `confirm` | auto-`true` |
-| `$report` | `\Closure(msg, isError): void` | STDOUT/STDERR | discard (dashboard reads the journal) |
-| `$liveSink` | `?TraceSinkInterface` | `ConsoleTraceSink` | `LiveTraceSink` |
+| method | console — `ConsoleRunFrontend` | server — `HttpRunFrontend` |
+|---|---|---|
+| `human(Tracer): SpeakerInterface` | `ConsoleSpeaker` | `HttpGateSpeaker` (parks on the answer `Channel`) |
+| `approveSolver(path, code): bool` | show + `confirm` | auto-`true` |
+| `report(msg, isError): void` | STDOUT/STDERR | discard (dashboard reads the journal) |
+| `traceSinks(\PDO): array` | `ConsoleTraceSink` | `LiveTraceSink` (publishes to the `TraceBus`) |
 
-The human tier is a *factory* because the HTTP gate records through the run's tracer,
-which only exists after the environment is built.
+`human` takes the run's `Tracer` because the HTTP gate records through it, and the tracer
+only exists once the environment is built.
 
 ## Workflows (`Claw\Workflow`)
 
@@ -151,7 +152,7 @@ before saving; `DefineWorkflowTool` is the `define_workflow` door.
   suspending via `Async\delay`. `CurlHttpClient` is a single request (no retry).
 - Concrete: **`ClaudeAgent`** (Anthropic Messages) and **`OpenAiCompatibleAgent`** (Chat
   Completions — DeepSeek / Groq / Mistral / Qwen / Ollama / OpenRouter / OpenAI). A
-  `gemini` config value is accepted but **not yet wired** in `Cli::makeAgent`.
+  `gemini` config value is accepted but **not yet wired** in `AgentFactory::make`.
 - **Role tiers** differ only by model. `SpeakerRole`: `Worker, Reviewer, Supervisor,
   Planner, Human`, plus `*-smart` tiers. `CLAW_AGENT_<ROLE>=<model>` → `Config::$agents`
   → `EnvKey::Agents`; `ai(…, agent: 'reviewer')` routes by name, an unknown role falls
@@ -204,12 +205,14 @@ Sinks: `TraceStore` (durable `trace` table), `ConsoleTraceSink` (live stderr tre
 ## Dashboard server (`src/Server.php`)
 
 Boots `TrueAsync\HttpServer` and routes every request through one `handle()` coroutine
-(permissive CORS, `OPTIONS`→204). It holds a long-lived `Async\Scope`, a `TraceBus`,
-an `$active` double-start guard, and `$gates` (issue id → answer `Channel`).
+(permissive CORS, `OPTIONS`→204). It holds a `TraceBus`, an `$active` double-start
+guard, `$gates` (issue id → answer `Channel`), and per-project caches of reused read
+handles (`$readStores` / `$readers`) so a stream does not re-open the db each tail.
 
 ```
 GET  /api/health
 GET  /api/projects
+POST /api/projects                                      {path} — register a folder (201; `claw -c`)
 GET  /api/projects/{key}/issues
 GET  /api/projects/{key}/issues/stream                  SSE — board (an `issue` event per change)
 GET  /api/projects/{key}/runs/{id}/stream               SSE — live trace, keyed by seq
@@ -232,7 +235,8 @@ re-derives the issue snapshot every ~2s and emits an `issue` event per issue who
 changed. Only the hot per-record path (the run stream) needed push.
 
 **Start / gate.** `start` rejects a concurrent run for the same issue (409), then
-`scope->spawn`s the `IssueRunner` detached, with `HttpGateSpeaker` as the human tier.
+`Async\spawn`s the `IssueRunner` detached, with `HttpRunFrontend` wiring `HttpGateSpeaker`
+as the human tier.
 When the supervisor escalates, the gate writes a `question` trace row, flips the issue
 to `WaitingHuman`, and **parks the run coroutine** on the answer channel; `answer`
 (valid only while `WaitingHuman`) sends the reply, the gate writes an `answer` row and
@@ -261,7 +265,9 @@ subprocesses do not inherit them.
 
 ```
 Config.php  Server.php  HttpGateSpeaker.php  Session.php(legacy)
-Cli/        Cli.php  WorkflowMode.php  IssueRunner.php  RunContext.php  SessionMode.php
+Cli/        Cli.php  WorkflowMode.php  SessionMode.php
+Run/        IssueRunner.php  RunContext.php  RunFrontendInterface.php
+            ConsoleRunFrontend.php  HttpRunFrontend.php
 Workflow/   WorkflowAbstract.php  WorkflowInterface.php  Step.php  Tool.php  MethodTool.php
             Environment.php  EnvKey.php  GenerateIssueWorkflow.php  SuperviseWorkflow.php
             WorkflowStore.php  WorkflowValidator.php  SqliteStateStore.php
