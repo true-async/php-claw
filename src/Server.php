@@ -297,14 +297,12 @@ final class Server
                 try {
                     // block for the next pushed [record, seq]; the timeout token cancels the recv after
                     // ~10s so we can heartbeat. recv throws OperationCanceledException when the token fires
-                    // (Channel::recv @throws); a real coroutine cancellation is rethrown to propagate.
+                    // (Channel::recv @throws). Any other cancellation isn't caught here, so it propagates.
                     [$record, $seq] = $channel->recv(\Async\timeout(10000));
                 } catch (OperationCanceledException) {
                     $res->sseComment();   // no event in ~10s: heartbeat, then re-check the connection
 
                     continue;
-                } catch (\Cancellation $cancellation) {
-                    throw $cancellation;
                 }
 
                 if ($seq <= $since) {
