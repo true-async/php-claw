@@ -41,12 +41,14 @@ use Claw\Trace\Tracer;
 abstract class WorkflowAbstract implements WorkflowInterface
 {
     /**
-     * Default soft cap on critic rework rounds for a step: once a step has failed review this many
-     * times, stop auto-retrying and escalate — ask the supervisor whether to accept, try once more, or
-     * stop. A step overrides it per case via `#[Step(maxRounds: N)]`. A checkpoint, not a hard kill;
-     * the budget is still the ultimate backstop.
+     * Default soft cap on critic rework rounds for a step — deliberately SMALL. A critic exists to catch
+     * a step and let it fix itself once or twice; if two rounds do not close the findings, the problem is
+     * usually a mismatch (the step's prompt vs the critic's rubric) or a task that truly needs a human, not
+     * "one more try" — so we escalate rather than churn dozens of rounds burning tokens. A step that
+     * legitimately churns (e.g. a test gate) raises it per case via `#[Step(maxRounds: N)]`. A checkpoint,
+     * not a hard kill; the budget is still the ultimate backstop.
      */
-    private const int DEFAULT_MAX_ROUNDS = 50;
+    private const int DEFAULT_MAX_ROUNDS = 2;
 
     /** @var list<string> step methods already completed (restored from the store) — skipped on re-run */
     private array $done;
@@ -259,13 +261,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $rubric = $this->criticRubric($step, $name);
             $this->critique = null;
 
-            // Run the step; if it declares a critic, judge its RESULT (the return value) and the
-            // ARTIFACTS it produced, and while the critic is unhappy let the supervisor guide a re-run
-            // — until the critic passes, the supervisor accepts/stops, the soft round cap escalates,
-            // or the budget runs out.
+            // Run the step; if it declares a critic, judge the ARTIFACTS it produced (its reviewable
+            // output — the return value is NOT a channel), and while the critic is unhappy let the
+            // supervisor guide a re-run — until the critic passes, the supervisor accepts/stops, the
+            // soft round cap escalates, or the budget runs out.
             $round = 0;
             $maxRounds = $this->maxRounds($step);
-            $result = '';
             $workHistory = [];
             $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
 
@@ -280,21 +281,21 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
                 $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
-                $raw = $this->{$name}();
-                $result = \is_string($raw) ? $raw : '';
+                $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
                 $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
 
                 if ($rubric === null) {
                     break;
                 }
 
-                $findings = $this->critic($name, $result, $rubric, $this->artifacts[$name]);
+                $output = $this->renderArtifacts($this->artifacts[$name]);   // what the critic/supervisor judge
+                $findings = $this->critic($name, $rubric, $output);
 
                 if ($findings === null) {
                     break;   // the critic is satisfied
                 }
 
-                $guidance = $this->superviseStep($name, $result, $findings, ++$round, $maxRounds);
+                $guidance = $this->superviseStep($name, $output, $findings, ++$round, $maxRounds);
 
                 if ($guidance === null) {
                     break;   // the supervisor accepted the work as-is
@@ -762,23 +763,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * Judge a step's work against its rubric on the reviewer role: null = it passes, else the findings.
      * The critic is an ORDINARY ai — it gets every tool, so it can actually verify (read the files the
      * step wrote, run `php -l` or the tests) rather than judge a blurb. Its standing role, prepended
-     * here, is to REVIEW only: inspect and report, never do or fix the work itself. It is handed the
-     * step's reported result and the artifacts it produced.
-     *
-     * @param list<Artifact> $artifacts
+     * here, is to REVIEW only: inspect and report, never do or fix the work itself. It judges the step's
+     * reviewable output — its rendered artifacts (`$output`, see {@see renderArtifacts()}).
      */
-    private function critic(string $name, string $result, string $rubric, array $artifacts): ?string
+    private function critic(string $name, string $rubric, string $output): ?string
     {
-        $rendered = $artifacts === []
-            ? '(the step recorded no artifacts)'
-            : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
-
         $verdict = trim($this->ai(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
-            . "What the step reports it did:\n{$result}\n\n"
-            . "Artifacts the step produced:\n{$rendered}\n\n"
+            . "The step's output to review — its artifact(s):\n{$output}\n\n"
             . "If the work fully satisfies the rubric, reply with exactly: OK\n"
             . 'Otherwise reply with the concrete problems that must be fixed.',
             null,   // every tool — a critic is a normal AI and must be able to verify, not just read
@@ -786,6 +780,21 @@ abstract class WorkflowAbstract implements WorkflowInterface
         ));
 
         return strtoupper($verdict) === 'OK' ? null : $verdict;
+    }
+
+    /**
+     * Render a step's artifacts as the reviewable output handed to the critic and the supervisor — the
+     * step's TWO output channels are artifact and handoff, never its return value, so this is the work
+     * they judge. No artifact at all means the step has nothing to show for itself, which is a finding in
+     * its own right (a critic'd step must record at least one artifact).
+     *
+     * @param list<Artifact> $artifacts
+     */
+    private function renderArtifacts(array $artifacts): string
+    {
+        return $artifacts === []
+            ? '(the step recorded NO artifact — it produced nothing to review; that itself is a failure)'
+            : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
     }
 
     /**
@@ -814,7 +823,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      *
      * @throws WorkflowException when the supervisor says to stop, or the cap is hit with no one to ask
      */
-    private function superviseStep(string $name, string $result, string $findings, int $round, int $maxRounds): ?string
+    private function superviseStep(string $name, string $work, string $findings, int $round, int $maxRounds): ?string
     {
         $stuck = $round >= $maxRounds;
         $channel = $this->env->find(EnvKey::Ask);
@@ -829,12 +838,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return $findings;   // no supervisor/human -> self-correct using the critic's findings
         }
 
+        // $work is the step's reviewable output (its rendered artifacts) — the same thing the critic
+        // judged — so the supervisor decides on the actual work, not on an empty/stale return value.
         $prompt = $stuck
             ? "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
-                . "Latest findings:\n{$findings}\n\nThe work:\n{$result}\n\n"
+                . "Latest findings:\n{$findings}\n\nThe work (the step's artifacts):\n{$work}\n\n"
                 . "Is this OK? Reply 'accept' to keep it as is, 'stop' to abort, or guidance for one more try."
             : "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
-                . "The work:\n{$result}\n\n"
+                . "The work (the step's artifacts):\n{$work}\n\n"
                 . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.";
 
         $reply = $channel->reply($prompt);

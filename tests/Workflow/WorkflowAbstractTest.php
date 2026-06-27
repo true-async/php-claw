@@ -788,12 +788,11 @@ final class WorkflowAbstractTest
             }
 
             #[Step(critic: 'must be good')]
-            public function make(): string
+            public function make(): void
             {
                 $this->runs++;
                 $this->work = $this->ai('do it');
-
-                return $this->work;
+                $this->artifact('work', $this->work);   // the critic judges this artifact, not a return value
             }
         };
 
@@ -844,13 +843,12 @@ final class WorkflowAbstractTest
             }
 
             #[Step(critic: 'must be tested')]
-            public function make(): string
+            public function make(): void
             {
                 $this->runs++;
                 $this->sawCritique = $this->critique();
                 $this->work = $this->ai('do it');
-
-                return $this->work;
+                $this->artifact('work', $this->work);   // the critic AND the supervisor judge this artifact
             }
         };
 
@@ -860,6 +858,8 @@ final class WorkflowAbstractTest
         Assert::same($wf->runs, 2);                             // one re-run
         Assert::same($wf->sawCritique, 'add the missing test'); // the re-run saw the supervisor's guidance
         Assert::true($supervisor->heard !== null);              // the supervisor was consulted on the rejection
+        // the supervisor judged the ACTUAL work — the rejected attempt's artifact ('v1'), not an empty result
+        Assert::true(str_contains((string) $supervisor->heard, 'v1'));
     }
 
     /** A two-step relay workflow whose steps each make one ai() call — for handoff/resume cases. */

@@ -118,7 +118,11 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         // [] = the model returns the class CODE, it does not act with tools
         $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));
 
-        return $this->code;   // the critic judges this; a rejection re-runs draft with the findings
+        // The generated class IS this step's output — record it as the artifact the critic judges. (A
+        // codegen step produces no run artifacts, and that is correct; the artifact is the source itself.)
+        $this->artifact('solver-class', $this->code);
+
+        return $this->code;   // a rejection re-runs draft with the findings
     }
 
     #[Step]
@@ -140,13 +144,19 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     protected function criticRules(): array
     {
         return [
-            'solverReview' => 'Judge the workflow code in the step result: will it ACTUALLY solve the task '
-                . 'below — not whether it is valid PHP (the validator covers that). REJECT it if any step '
-                . 'just returns a placeholder string instead of doing real work via $this->tool()/$this->ai(); '
-                . "if a `#[Step(critic: '<name>')]` has no matching entry in criticRules(); if any step calls "
-                . "`done`/\$this->tool('done') before the deliverable is actually built (e.g. `done` hardcoded "
-                . 'in validate/design ends the run having done NOTHING — `done` means the whole task is solved, '
-                . 'not that a step finished); or if the recipe is not genuinely carried out.'
+            'solverReview' => "You are reviewing the GENERATED SOURCE of a solver class (the step's artifact). "
+                . 'This code is NOT executed now — it RUNS LATER against the project. So do NOT reject it for '
+                . "'no artifacts were produced' or 'the tests were not run': there are no run artifacts at "
+                . 'generation time, and that is correct — the artifact under review IS the source itself. '
+                . 'Judge ONLY whether this class, when run, will ACTUALLY solve the task below (not whether it '
+                . 'is valid PHP — the validator covers that). A step body that calls $this->ai("…", [...]) or '
+                . '$this->tool(…) IS real work — the model does the work inside that call, so such a step is '
+                . "NOT a placeholder; 'placeholder' means ONLY a bare literal return (e.g. return 'TODO';) with "
+                . 'no $this->ai()/$this->tool() call at all. REJECT only if: a step is a true placeholder (no '
+                . "ai()/tool() call); a `#[Step(critic: '<name>')]` has no matching entry in criticRules(); "
+                . "`done`/\$this->tool('done') is called before the deliverable is built (`done` = the whole "
+                . 'task is solved, not that a step finished); or the recipe is plainly not carried out. '
+                . 'Otherwise reply exactly: OK.'
                 . "\n\nThe task:\n{$this->taskSummary()}",
         ];
     }
@@ -214,11 +224,12 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - implement `public function name(): string`
             - keep state in plain typed properties
             - write each step as a `protected` method marked `#[Step]` (NOT public, NOT private — the base run() drives them and the code is rejected otherwise); the default run() runs them in declaration order
-            - to have a step's result reviewed automatically, mark it `#[Step(critic: '<name>')]`, make that method RETURN its result as a string, and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for the SOLID-review (step 3) and test&accept (step 5) steps
-            - record what a step produced with `\$this->artifact('<label>', text: '<summary>')` or `\$this->artifact('<label>', file: '<path it wrote>')`. Artifacts show up in the run log AND are handed to that step's critic — so a critic step MUST emit the artifacts its rubric is judged against (the changed file, the test output), or the critic has nothing concrete to check
+            - a step's OUTPUT goes into one of TWO channels — NEVER its return value (the engine ignores what a step returns): (a) `\$this->artifact('<label>', text|file: ...)` — the GLOBAL channel, visible to every later step (via recall) AND to this step's critic; (b) the handoff — the automatic baton to the NEXT step only (below). Do not stash results in fields to pass them on; use these channels.
+            - to have a step reviewed automatically, mark it `#[Step(critic: '<name>')]` and have it RECORD its output as an artifact — the critic judges that artifact, not any return value — and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for the SOLID-review (step 3) and test&accept (step 5) steps
+            - record what a step produced with `\$this->artifact('<label>', text: '<summary>')` or `\$this->artifact('<label>', file: '<path it wrote>')`. Artifacts show up in the run log AND are the thing this step's critic judges — so a critic step MUST emit the artifacts its rubric checks (the changed file, the test output); a critic step that records no artifact has produced nothing to review and fails
             - the critic is a REAL reviewer AI with every tool: it will OPEN the file artifacts, run `php -l`/the tests itself, and judge — it does not just read your summary. So make the work actually correct; a confident summary over a broken file will be caught
             - the critic name is just a key: for EVERY name you use you MUST define its actual rules by overriding `protected function criticRules(): array`, returning `['<name>' => '<the concrete criteria the reviewer checks>', ...]` — the reviewer is judged ONLY against this text, so spell the criteria out in full; a name with no rules makes the run fail
-            - a critic step re-runs until it passes; after a soft cap of rework rounds (default 50) the run escalates to a supervisor. Tune it per step with `#[Step(critic: '<name>', maxRounds: <n>)]` — raise it for a step that legitimately churns (running a test gate), lower it for a cheap one
+            - a critic step re-runs until it passes; after a SMALL soft cap of rework rounds (default 2) the run escalates to a supervisor — a critic is meant to bounce a step once or twice, not churn dozens of rounds. Tune it per step with `#[Step(critic: '<name>', maxRounds: <n>)]` — raise it only for a step that legitimately churns (a test gate that iterates), keep it low elsewhere
             - reach the model with `\$this->ai(string \$prompt, ?array \$tools = null, ?string \$agent = null)` and tools with `\$this->tool(string \$name, array \$params)`
             - by DEFAULT `\$this->ai(\$prompt)` exposes EVERY tool to the model — that is the norm, let a step use whatever it needs; pass an explicit list ONLY to deliberately restrict, or `[]` for a pure-reasoning call that must not act
             - you may give THIS workflow its own bespoke tools: mark a method `#[\\Claw\\Workflow\\Tool(description: '<what it does>')]` and it becomes a tool the model can call inside your `ai()` steps (named after the method in snake_case; its typed params become the input schema). Use this to let the model check and FIX its own work — e.g. a `validate()` tool that runs `php -l` / the test gate via `\$this->tool('bash', ...)` and returns OK or the error, so a step can call it, see the failure, and correct itself in the same exchange instead of failing the run
@@ -233,7 +244,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - a tool error does NOT throw — `\$this->tool(...)` returns the failure as a string starting `tool '<name>' failed: ...`; check for that and recover (e.g. a wrong path: call list_files and retry) or fold the message into the next `\$this->ai(...)` so the model fixes it, rather than blindly using a failed result
             - `done` ENDS THE WHOLE RUN, it does NOT mark a step complete. A step completes by RETURNING; calling `done` stops the entire workflow on the spot and skips every remaining step. So `done` means "the task's actual deliverable now exists and has been verified" — NEVER "this phase is finished". NEVER put `\$this->tool('done', ...)` in an early step (validate/design/assess) or in a PHP branch: that aborts the run before the implement step ever creates anything (e.g. a validate that calls `done` when "no conflict" finishes having done NOTHING). The only legitimate `done` is the model deciding, INSIDE an `ai()` exchange AFTER it has produced and verified the change, that the task is fully solved and the rest is redundant — so offer it by listing `done` among that step's tools, do not hardcode it. When unsure, just `return` and let the next step run.
             - each step's `ai()` starts fresh — it does NOT see earlier steps, and the engine carries NOTHING between steps automatically. YOU decide, per step, what prior context it needs and have it pulled in. The door is the `recall` tool the step's model can call: `recall(what='task')` re-reads the issue brief, `what='workflow'` lists the steps so far, `what='step', name='design'` returns a sibling step's history, `what='artifacts', name='design'` its artifacts, `what='tool', name='bash'` a tool's calls. So when a step builds on an earlier one, say so in its prompt (e.g. "first call recall(what='artifacts', name='implement') to see what was changed, then ...") — do not assume the earlier work is visible, and do not re-derive what a prior step already produced
-            - THE BATON IS AUTOMATIC: after each step the engine EXPLICITLY asks the model to form a handoff (a summary of what the step did + the findings the next step must watch for), and feeds it into the next step's context as "the previous step handed this to you". You do NOT write handoff code — just make each step do its work well and `return` what it produced (so the engine has good material to form the handoff from). The next step can rely on that incoming context being present
+            - THE BATON IS AUTOMATIC: after each step the engine EXPLICITLY asks the model — continuing that step's OWN ai() conversation — to form a handoff (a summary of what the step did + the findings the next step must watch for), and feeds it into the next step's context as "the previous step handed this to you". You do NOT write handoff code, and it is NOT your return value — it is formed from the step's ai() work. So make each step do its work through `\$this->ai(...)`/tools and record key outputs as artifacts; the next step can rely on the incoming handoff being present (and can pull any earlier artifact with recall)
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
 
             Return ONLY the PHP source — no prose, no markdown fences.
