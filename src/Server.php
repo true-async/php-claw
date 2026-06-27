@@ -13,9 +13,9 @@ use TrueAsync\HttpServerConfig;
  * Read-only JSON API over the project state databases, for the php-claw-ui dashboard.
  *
  * Runs on the TrueAsync HTTP server (true_async_server.so), so every request handler
- * is a coroutine on the event loop. There is NO SSE yet: the dashboard polls, and the
- * `trace.seq` autoincrement is the live cursor (`/runs/{id}/trace?since=<seq>`). The
- * server only ever reads — it opens the same SQLite the CLI writes, never mutating it.
+ * is a coroutine on the event loop. The `trace.seq` autoincrement is the live cursor: a
+ * run's stream replays the journal tail past `Last-Event-ID`/`?since=` then keeps the
+ * connection open. The server only reads — it opens the same SQLite the CLI writes.
  *
  *   php -d extension=/path/to/true_async_server.so bin/claw serve [--port 8787] [--host 127.0.0.1]
  *
@@ -23,10 +23,12 @@ use TrueAsync\HttpServerConfig;
  *   GET /api/health
  *   GET /api/projects
  *   GET /api/projects/{key}/issues
- *   GET /api/projects/{key}/runs/{runId}/trace?since=<seq>
+ *   GET /api/projects/{key}/runs/{runId}/stream        (SSE — live trace, keyed by seq)
+ *   GET /api/projects/{key}/runs/{runId}/trace?since=<seq>   (poll fallback for the stream)
  *   GET /api/projects/{key}/runs/{runId}/artifacts
  *
- * (SSE — a live /runs/{id}/stream — lands once the server extension grows it.)
+ * The stream currently DB-tails the trace table on a short interval; an in-process trace
+ * bus (a LiveTraceSink the run publishes to) replaces that poll with a push next.
  */
 final class Server
 {
@@ -85,6 +87,11 @@ final class Server
             }
             if (\preg_match('#^/api/projects/([^/]+)/issues$#', $path, $m)) {
                 $this->json($res, 200, $this->issues($m[1]));
+
+                return;
+            }
+            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/stream$#', $path, $m)) {
+                $this->stream($req, $res, $m[1], $m[2]);
 
                 return;
             }
@@ -262,6 +269,58 @@ final class Server
         }
 
         return $out;
+    }
+
+    /**
+     * Live trace for a run, as Server-Sent Events. Replays the journal tail past the client's
+     * cursor (`Last-Event-ID` header on an EventSource reconnect, or `?since=`), emitting one
+     * `trace` event per record with `id: <seq>` — so a dropped connection resumes with no gap.
+     *
+     * For now it DB-tails on a short interval; that inner poll is what the in-process trace bus
+     * (a push from the run's LiveTraceSink) replaces next, leaving the replay-on-connect intact.
+     */
+    private function stream(HttpRequest $req, HttpResponse $res, string $key, string $runId): void
+    {
+        try {
+            $pdo = $this->pdo($key);
+        } catch (\Throwable $e) {
+            $this->json($res, 404, ['error' => $e->getMessage()]);   // pre-stream: a normal JSON error is fine
+
+            return;
+        }
+
+        $since = (int) ($req->getHeader('Last-Event-ID') ?? $req->getQueryParam('since', 0));
+        $res->sseStart();   // commit text/event-stream headers now, so the browser's onopen fires
+
+        try {
+            $idleTicks = 0;
+            while (!$res->isClosed()) {
+                $sent = false;
+                foreach ($this->trace($pdo, $runId, $since) as $rec) {
+                    if (!$res->sendable()) {
+                        break;   // slow client: stop piling on, retry the tail next tick
+                    }
+                    $res->sseEvent(
+                        data: \json_encode($rec, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+                        event: 'trace',
+                        id: (string) $rec['seq'],
+                    );
+                    $since = (int) $rec['seq'];
+                    $sent = true;
+                }
+
+                if ($sent) {
+                    $idleTicks = 0;
+                } elseif (++$idleTicks >= 60) {   // ~15s of quiet → heartbeat past proxy idle timeouts
+                    $res->sseComment('hb');
+                    $idleTicks = 0;
+                }
+
+                \Async\delay(250);   // yields the loop; other requests run while this run is quiet
+            }
+        } catch (\Throwable) {
+            // The client vanished mid-write — the connection is gone, nothing to clean up (yet).
+        }
     }
 
     private function uiStatus(string $name): string
