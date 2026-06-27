@@ -21,25 +21,26 @@ use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 
 /**
- * Read-only JSON API over the project state databases, for the php-claw-ui dashboard.
+ * JSON + SSE API over the project state databases, for the php-claw-ui dashboard.
  *
- * Runs on the TrueAsync HTTP server (true_async_server.so), so every request handler
- * is a coroutine on the event loop. The `trace.seq` autoincrement is the live cursor: a
- * run's stream replays the journal tail past `Last-Event-ID`/`?since=` then keeps the
- * connection open. The server only reads — it opens the same SQLite the CLI writes.
+ * Runs on the TrueAsync HTTP server (true_async_server.so), so every request handler is a coroutine on
+ * the event loop. Reads open the same SQLite the CLI writes; POST .../start runs an issue's solver as a
+ * detached coroutine ({@see IssueRunner}) and POST .../answer feeds its human gate. A run pushes each
+ * trace record to an in-process {@see TraceBus}, so the run stream is live with no polling; the durable
+ * `trace.seq` autoincrement is the resume cursor (`Last-Event-ID`/`?since=`).
  *
  *   php -d extension=/path/to/true_async_server.so bin/claw serve [--port 8787] [--host 127.0.0.1]
  *
  * Endpoints:
- *   GET /api/health
- *   GET /api/projects
- *   GET /api/projects/{key}/issues
- *   GET /api/projects/{key}/runs/{runId}/stream        (SSE — live trace, keyed by seq)
- *   GET /api/projects/{key}/runs/{runId}/trace?since=<seq>   (poll fallback for the stream)
- *   GET /api/projects/{key}/runs/{runId}/artifacts
- *
- * The stream currently DB-tails the trace table on a short interval; an in-process trace
- * bus (a LiveTraceSink the run publishes to) replaces that poll with a push next.
+ *   GET  /api/health
+ *   GET  /api/projects
+ *   GET  /api/projects/{key}/issues
+ *   GET  /api/projects/{key}/issues/stream                    (SSE — board: an `issue` event per change)
+ *   GET  /api/projects/{key}/runs/{runId}/stream             (SSE — live trace, keyed by seq)
+ *   GET  /api/projects/{key}/runs/{runId}/trace?since=<seq>   (poll fallback for the run stream)
+ *   GET  /api/projects/{key}/runs/{runId}/artifacts
+ *   POST /api/projects/{key}/issues/{id}/start               (launch the solver, 202)
+ *   POST /api/projects/{key}/issues/{id}/answer              (reply to the run's open gate)
  */
 final class Server
 {
@@ -127,6 +128,11 @@ final class Server
             }
             if ($path === '/api/projects') {
                 $this->json($res, 200, $this->projects());
+
+                return;
+            }
+            if (\preg_match('#^/api/projects/([^/]+)/issues/stream$#', $path, $m)) {
+                $this->issuesStream($res, $m[1]);
 
                 return;
             }
@@ -399,6 +405,59 @@ final class Server
     }
 
     /**
+     * Live board, as Server-Sent Events: an `issue` event per issue whose snapshot changed. This is the
+     * low-frequency Kanban feed (a card moving column, a token tick, a gate opening), so unlike the run
+     * stream it polls the issue snapshot on a slow tick and emits diffs — re-deriving a handful of issues
+     * every couple of seconds is cheap, and the hot per-record path is the run stream, not this. On
+     * connect (and on reconnect) every issue is emitted once, since the seen-set starts empty; the client
+     * keeps an id→issue map and applies each event.
+     */
+    private function issuesStream(HttpResponse $res, string $key): void
+    {
+        try {
+            $this->pdo($key);   // resolve/validate the project before committing the stream
+        } catch (\Throwable $e) {
+            $this->json($res, 404, ['error' => $e->getMessage()]);
+
+            return;
+        }
+
+        $res->sseStart();
+
+        $seen = [];   // issue id → the json it was last sent as
+        $idleTicks = 0;
+        try {
+            while (!$res->isClosed()) {
+                $changed = false;
+                foreach ($this->issues($key) as $issue) {
+                    $id = (string) $issue['id'];
+                    $json = \json_encode($issue, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+                    if (($seen[$id] ?? null) === $json) {
+                        continue;
+                    }
+                    if (!$res->sendable()) {
+                        continue;   // slow client: leave it unseen so the next tick retries
+                    }
+                    $seen[$id] = $json;
+                    $res->sseEvent(data: $json, event: 'issue');
+                    $changed = true;
+                }
+
+                if ($changed) {
+                    $idleTicks = 0;
+                } elseif (++$idleTicks >= 5) {   // ~10s of a still board → heartbeat past proxy idle timeouts
+                    $res->sseComment('hb');
+                    $idleTicks = 0;
+                }
+
+                \Async\delay(2000);
+            }
+        } catch (\Throwable) {
+            // The client vanished mid-write — the connection is gone.
+        }
+    }
+
+    /**
      * POST .../issues/{id}/start — launch the issue's solver as a detached coroutine and return at once.
      * The dashboard watches progress on the run stream; the run records its own ledger row, trace and
      * final status. At most one active run per issue (a concurrent start is rejected 409), and the run's
@@ -446,7 +505,8 @@ final class Server
                     $agent,
                     fn (Tracer $tracer): SpeakerInterface => new HttpGateSpeaker($tracer, $store, $issue->id, $answers),
                     static fn (string $solverPath, string $solverCode): bool => true,   // auto-run the generated solver (pre-approval gate is later)
-                    static function (string $message, bool $isError): void {},           // progress lives in the trace journal, not a console
+                    static function (string $message, bool $isError): void {
+                    },           // progress lives in the trace journal, not a console
                     new LiveTraceSink($this->bus, $store->pdo()),                         // push each persisted record to the SSE streams
                 )->run($issue);
             } catch (\Throwable) {
