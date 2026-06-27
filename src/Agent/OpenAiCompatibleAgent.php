@@ -123,6 +123,7 @@ final class OpenAiCompatibleAgent extends AbstractAgent
             usage: new Usage(
                 (int) ($data['usage']['prompt_tokens'] ?? 0),
                 (int) ($data['usage']['completion_tokens'] ?? 0),
+                (int) ($data['usage']['prompt_tokens_details']['cached_tokens'] ?? 0),
             ),
             text: $text,
         );

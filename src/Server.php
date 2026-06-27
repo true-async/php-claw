@@ -256,14 +256,13 @@ final class Server
             $latest = $runs === [] ? null : $runs[array_key_last($runs)];
 
             $done = 0;
-            $tokensIn = 0;
-            $tokensOut = 0;
+            $tokens = ['in' => 0, 'out' => 0, 'cached' => 0, 'normalized' => 0];
             $artifacts = [];
 
             if ($latest !== null) {
                 $runId = $latest['id'];
                 $done = \count($state->load($runId)['done']);
-                [$tokensIn, $tokensOut] = $reader->tokens($runId);
+                $tokens = $reader->tokens($runId);
                 $artifacts = $reader->artifactRecords($runId);
             }
 
@@ -278,8 +277,10 @@ final class Server
                     static fn (array $run): array => ['n' => (int) $run['id'], 'status' => $run['status']],
                     $runs,
                 ),
-                'tokensIn' => $tokensIn,
-                'tokensOut' => $tokensOut,
+                'tokensIn' => $tokens['in'],
+                'tokensOut' => $tokens['out'],
+                'tokensCached' => $tokens['cached'],         // prompt-cache subset of input (cheaper)
+                'tokensNormalized' => $tokens['normalized'], // cost-weighted equivalent — the figure to show
                 'artifacts' => $artifacts,
                 'chat' => [],   // the gate conversation streams as question/answer trace events, not here
             ];

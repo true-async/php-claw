@@ -75,6 +75,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         private readonly ?Tracer $tracer = null,
         private readonly ?SpeakerInterface $ask = null,
         private readonly ?Budget $turnBudget = null,
+        private readonly ?TokenPricing $pricing = null,
     ) {
     }
 
@@ -82,8 +83,10 @@ final class DefaultTurnLoop implements TurnLoopInterface
     {
         $totalInput  = 0;
         $totalOutput = 0;
+        $totalCached = 0;
         $turnNo      = 0;
         $lastText    = null;
+        $pricing     = $this->pricing ?? TokenPricing::shared();
 
         /** @var array<string, int> identical (tool, error) → how many times it has failed this exchange */
         $toolFailures = [];
@@ -103,7 +106,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
             // Every checkpoint interval, pause and ask whether to keep going — a runaway loop should not
             // churn forever. With no one to ask, stop here and return the last answer we have.
             if ($turnNo > 0 && $turnNo % self::TURN_CHECKPOINT_INTERVAL === 0 && !$this->keepGoing($turnNo)) {
-                return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput));
+                return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput, $totalCached));
             }
 
             // The model is stateless: every call carries the FULL history (system +
@@ -121,6 +124,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
             $totalInput  += $response->usage->inputTokens;
             $totalOutput += $response->usage->outputTokens;
+            $totalCached += $response->usage->cachedTokens;
             $lastText = $response->text;
 
             $this->tracer?->reply(
@@ -128,6 +132,13 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 array_map(static fn (ToolUseBlock $c): array => ['name' => $c->name, 'input' => $c->input], $response->toolCalls),
                 $response->usage->inputTokens,
                 $response->usage->outputTokens,
+                $response->usage->cachedTokens,
+                $pricing->normalized(
+                    $response->usage->inputTokens,
+                    $response->usage->cachedTokens,
+                    $response->usage->outputTokens,
+                    $this->model,
+                ),
             );
 
             $history[] = new Message(Role::Assistant, $response->content);
@@ -140,7 +151,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 if ($this->turnBudget->isExhausted()) {
                     $this->tracer?->exit($turn);
 
-                    return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput));
+                    return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput, $totalCached));
                 }
             }
 
@@ -170,7 +181,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
                     }
                 }
 
-                return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput));
+                return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput, $totalCached));
             }
 
             $results = [];
@@ -201,7 +212,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
             // to the turn cap / budget. The results are in the history, so the step's critic/supervisor
             // see the failure and decide; returning is the same graceful stop as the checkpoint/budget.
             if ($stuckTool !== null) {
-                return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput));
+                return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput, $totalCached));
             }
         }
     }

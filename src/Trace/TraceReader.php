@@ -134,21 +134,30 @@ final class TraceReader
     }
 
     /**
-     * Input/output tokens summed over the run's model replies — the run's cost so far.
+     * Token use summed over the run's model replies. Four numbers: the raw provider counts (in/out, which
+     * re-count the resent history every turn), the cached subset of input, and the NORMALIZED total — the
+     * cost-weighted equivalent ({@see \Claw\Agent\TokenPricing}) that is the meaningful figure to show.
      *
-     * @return array{0: int, 1: int}
+     * @return array{in: int, out: int, cached: int, normalized: int}
      */
     public function tokens(string $runId): array
     {
         $stmt = $this->pdo->prepare(
-            "SELECT COALESCE(SUM(json_extract(data, '$.usage.in')), 0)  AS tokens_in,
-                    COALESCE(SUM(json_extract(data, '$.usage.out')), 0) AS tokens_out
+            "SELECT COALESCE(SUM(json_extract(data, '$.usage.in')), 0)     AS tin,
+                    COALESCE(SUM(json_extract(data, '$.usage.out')), 0)    AS tout,
+                    COALESCE(SUM(json_extract(data, '$.usage.cached')), 0) AS tcached,
+                    COALESCE(SUM(json_extract(data, '$.usage.norm')), 0)   AS tnorm
              FROM trace WHERE run_id = ? AND type = 'reply'",
         );
         $stmt->execute([$runId]);
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: ['tokens_in' => 0, 'tokens_out' => 0];
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
 
-        return [(int) $row['tokens_in'], (int) $row['tokens_out']];
+        return [
+            'in' => (int) ($row['tin'] ?? 0),
+            'out' => (int) ($row['tout'] ?? 0),
+            'cached' => (int) ($row['tcached'] ?? 0),
+            'normalized' => (int) ($row['tnorm'] ?? 0),
+        ];
     }
 
     /**

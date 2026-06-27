@@ -111,9 +111,14 @@ final class ClaudeAgent extends AbstractAgent
             content: $content,
             toolCalls: $toolCalls,
             stopReason: StopReason::fromWire($data['stop_reason'] ?? null),
+            // Anthropic splits input: input_tokens is the UNcached part, with cache reads/writes reported
+            // separately — so total input is their sum, and the cached subset is the cache READ (cheap).
             usage: new Usage(
-                (int) ($data['usage']['input_tokens'] ?? 0),
+                (int) ($data['usage']['input_tokens'] ?? 0)
+                    + (int) ($data['usage']['cache_read_input_tokens'] ?? 0)
+                    + (int) ($data['usage']['cache_creation_input_tokens'] ?? 0),
                 (int) ($data['usage']['output_tokens'] ?? 0),
+                (int) ($data['usage']['cache_read_input_tokens'] ?? 0),
             ),
             text: $texts === [] ? null : implode('', $texts),
         );

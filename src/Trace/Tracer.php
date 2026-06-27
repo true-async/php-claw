@@ -93,12 +93,20 @@ final class Tracer
     }
 
     /** @param list<array{name: string, input: array<string, mixed>}> $toolCalls */
-    public function reply(string $text, array $toolCalls, int $inTokens, int $outTokens): void
-    {
+    public function reply(
+        string $text,
+        array $toolCalls,
+        int $inTokens,
+        int $outTokens,
+        int $cachedTokens = 0,
+        int $normalizedTokens = 0,
+    ): void {
+        // usage: in/out are the provider's raw counts; cached is the prompt-cache subset of `in`; norm is
+        // the cost-weighted equivalent ({@see \Claw\Agent\TokenPricing}). All four are summed per run.
         $this->event(new TraceEvent('reply', Level::Debug, [
             'text' => $text,
             'tool_calls' => $toolCalls,
-            'usage' => ['in' => $inTokens, 'out' => $outTokens],
+            'usage' => ['in' => $inTokens, 'out' => $outTokens, 'cached' => $cachedTokens, 'norm' => $normalizedTokens],
         ]));
     }
 
