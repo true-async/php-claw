@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Claw;
 
-use Async\AsyncCancellation;
 use Async\Channel;
+use Async\OperationCanceledException;
 
 use function Async\spawn;
 
@@ -295,13 +295,16 @@ final class Server
 
             while (!$res->isClosed()) {   // 2) live: pushed by the run's LiveTraceSink, no poll
                 try {
+                    // block for the next pushed [record, seq]; the timeout token cancels the recv after
+                    // ~10s so we can heartbeat. recv throws OperationCanceledException when the token fires
+                    // (Channel::recv @throws); a real coroutine cancellation is rethrown to propagate.
                     [$record, $seq] = $channel->recv(\Async\timeout(10000));
-                } catch (AsyncCancellation) {
-                    $res->sseComment();   // heartbeat (an empty SSE comment) — ping, then re-check the connection
+                } catch (OperationCanceledException) {
+                    $res->sseComment();   // no event in ~10s: heartbeat, then re-check the connection
 
                     continue;
                 } catch (\Cancellation $cancellation) {
-                    throw $cancellation;   // a real coroutine cancellation must propagate, never be swallowed
+                    throw $cancellation;
                 }
 
                 if ($seq <= $since) {
