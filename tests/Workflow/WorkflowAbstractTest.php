@@ -592,9 +592,9 @@ final class WorkflowAbstractTest
             }
 
             #[Step(critic: 'ok')]
-            public function make(): string
+            public function make(): void
             {
-                return 'the work';
+                $this->artifact('work', 'the work');   // a result, so the critic actually runs to judge it
             }
         };
 

@@ -39,13 +39,12 @@ final class DefaultTurnLoop implements TurnLoopInterface
     private const int TURN_CHECKPOINT_INTERVAL = 50;
 
     /**
-     * Circuit-breaker for a wedged tool: if the SAME tool returns the SAME error this many times over
-     * the exchange, the model is not making progress on it (it keeps re-sending a call the tool keeps
-     * rejecting identically) — stop the exchange instead of grinding it to the turn cap / the budget.
-     * Identical (tool, error) is the signal: a tool failing with DIFFERENT errors is the model iterating
-     * toward a fix and is left alone; the same error repeating is a stuck loop. Small on purpose — three
-     * identical rejections is already "it isn't learning". The step's critic/supervisor handle the
-     * unfinished work from there.
+     * No-progress circuit-breaker: if the SAME tool returns the SAME result this many times over the
+     * exchange, the model is not making progress (it keeps re-sending a call that lands identically — a
+     * repeated error, OR a useless success like "no such tool"/"nothing found"). Identical (tool, result)
+     * is the signal: DIFFERENT results each time means the model is iterating and is left alone; the same
+     * result repeating is a stuck loop. Small on purpose — three identical rounds is already "it isn't
+     * learning". On trip the loop ESCALATES to the ask channel (supervisor/human) once, then stops.
      */
     private const int STUCK_TOOL_REPEAT = 3;
 
@@ -88,8 +87,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
         $lastText    = null;
         $pricing     = $this->pricing ?? TokenPricing::shared();
 
-        /** @var array<string, int> identical (tool, error) → how many times it has failed this exchange */
-        $toolFailures = [];
+        /** @var array<string, int> identical (tool, result) → how many times it has repeated this exchange */
+        $toolRepeats = [];
+        $stuckEscalated = false;   // escalate a wedged tool to the channel at most once, then stop
 
         // With an ask channel present, teach the worker the [question] marker so it can pause for
         // input instead of finishing; without one the system prompt is untouched (headless).
@@ -199,25 +199,40 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 $this->tracer?->toolResult($call->name, $result->content, $result->isError);
                 $results[] = $result;
 
-                // Track identical failures across the exchange: the same tool rejecting with the same
-                // message, over and over, is a wedged model, not progress.
-                if ($result->isError) {
-                    $key = $call->name . "\0" . $result->content;
-                    $toolFailures[$key] = ($toolFailures[$key] ?? 0) + 1;
+                // No-progress guard: the SAME tool returning the SAME result — an error OR a useless
+                // success ("no such tool", "nothing found") — over and over is a wedged model, not work.
+                // (DIFFERENT results each time = the model iterating, and is left alone.)
+                $key = $call->name . "\0" . $result->content;
+                $toolRepeats[$key] = ($toolRepeats[$key] ?? 0) + 1;
 
-                    if ($toolFailures[$key] >= self::STUCK_TOOL_REPEAT) {
-                        $stuckTool = $call->name;
-                    }
+                if ($toolRepeats[$key] >= self::STUCK_TOOL_REPEAT) {
+                    $stuckTool = $call->name;
                 }
             }
 
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
 
-            // A tool wedged (same error STUCK_TOOL_REPEAT times): stop the exchange rather than burn it
-            // to the turn cap / budget. The results are in the history, so the step's critic/supervisor
-            // see the failure and decide; returning is the same graceful stop as the checkpoint/budget.
+            // Wedged on a tool (same result STUCK_TOOL_REPEAT times). Do NOT just churn or silently stop:
+            // ESCALATE to the channel (supervisor/human) once — guidance resumes the exchange with a fresh
+            // slate; no one to ask, no answer, or a recurrence -> stop. The budget is still the hard cap.
             if ($stuckTool !== null) {
+                if (!$stuckEscalated && $this->ask !== null) {
+                    $stuckEscalated = true;
+                    $steer = $this->ask->reply(
+                        "This step keeps calling '{$stuckTool}' and getting the same result, making no "
+                        . 'progress — it is stuck. Reply with guidance to try a different approach, or '
+                        . 'anything else to stop here.',
+                    );
+
+                    if ($steer !== null) {
+                        $history[] = Message::userText($steer);
+                        $toolRepeats = [];   // a fresh slate after the steer
+
+                        continue;
+                    }
+                }
+
                 return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput, $totalCached));
             }
         }

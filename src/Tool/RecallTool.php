@@ -71,6 +71,12 @@ final readonly class RecallTool implements ToolInterface
         $what = \is_string($input['what'] ?? null) ? $input['what'] : '';
         $name = \is_string($input['name'] ?? null) ? trim($input['name']) : '';
 
+        // Models (esp. OpenAI) often address a tool with a namespaced id like `functions.write_file`; the
+        // recorded name is the bare `write_file`. Strip a leading `prefix.` so the lookup actually matches
+        // — without this, every `recall(what='tool', name='functions.X')` returns "no tool called yet",
+        // which a model then re-probes for in an expensive loop.
+        $name = (string) preg_replace('/^[A-Za-z_]\w*\./', '', $name);
+
         return match ($what) {
             'task' => $this->task !== '' ? $this->task : 'No task brief is attached to this run.',
             'workflow' => $this->journal->describe($this->runId),

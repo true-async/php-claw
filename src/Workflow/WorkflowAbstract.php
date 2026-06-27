@@ -303,14 +303,23 @@ abstract class WorkflowAbstract implements WorkflowInterface
                     break;
                 }
 
-                $output = $this->renderArtifacts($this->artifacts[$name]);   // what the critic/supervisor judge
-                $findings = $this->critic($name, $rubric, $output);
+                $artifacts = $this->renderArtifacts($this->artifacts[$name]);
+
+                // Deterministic guard: a critic'd step that did NOTHING — no model/tool work AND no artifact
+                // — produced no result. We see that without spending an AI critic (which would only probe the
+                // journal in circles). Report it straight instead.
+                if ($workHistory === [] && $this->artifacts[$name] === []) {
+                    $findings = "step '{$name}' produced nothing: no model/tool work and no artifact. A step "
+                        . 'must do real work and leave a result; if it needs no review, it should carry no critic.';
+                } else {
+                    $findings = $this->critic($name, $rubric, $artifacts);
+                }
 
                 if ($findings === null) {
                     break;   // the critic is satisfied
                 }
 
-                $guidance = $this->superviseStep($name, $output, $findings, ++$round, $maxRounds);
+                $guidance = $this->superviseStep($name, $artifacts, $findings, ++$round, $maxRounds);
 
                 if ($guidance === null) {
                     break;   // the supervisor accepted the work as-is
@@ -802,16 +811,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * here, is to REVIEW only: inspect and report, never do or fix the work itself. It judges the step's
      * reviewable output — its rendered artifacts (`$output`, see {@see renderArtifacts()}).
      */
-    private function critic(string $name, string $rubric, string $output): ?string
+    private function critic(string $name, string $rubric, string $artifacts): ?string
     {
         $verdict = trim($this->ai(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
-            . "The step's output to review — its artifact(s):\n{$output}\n\n"
+            . "Artifacts it recorded:\n{$artifacts}\n\n"
             . $this->renderParams($this->stepParams[$name] ?? [])
-            . "If the work fully satisfies the rubric, reply with exactly: OK\n"
-            . 'Otherwise reply with the concrete problems that must be fixed.',
+            . 'Judge it against the rubric. The artifacts and params above are your context — usually enough. '
+            . "If, and ONLY IF, that is not enough to judge, you may call recall(what='step', name='{$name}') "
+            . 'ONCE to see exactly what the step did; do not probe beyond that. You also have every tool to '
+            . 'CONFIRM a doubt (read a changed file, run `php -l`/the tests). If it satisfies the rubric, reply '
+            . 'with exactly: OK. Otherwise reply with the concrete problems that must be fixed.',
             null,   // every tool — a critic is a normal AI and must be able to verify, not just read
             'reviewer',
         ));
@@ -901,14 +913,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return $findings;   // no supervisor/human -> self-correct using the critic's findings
         }
 
-        // $work is the step's reviewable output (its rendered artifacts) — the same thing the critic
-        // judged — so the supervisor decides on the actual work, not on an empty/stale return value.
+        // $work is the step's result (its artifacts) — the same context the critic had. The supervisor is
+        // an agent with tools, so it can recall(what='step', name='…') for more if it needs to.
         $prompt = $stuck
             ? "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
-                . "Latest findings:\n{$findings}\n\nThe work (the step's artifacts):\n{$work}\n\n"
+                . "Latest findings:\n{$findings}\n\nThe step's result (artifacts):\n{$work}\n\n"
                 . "Is this OK? Reply 'accept' to keep it as is, 'stop' to abort, or guidance for one more try."
             : "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
-                . "The work (the step's artifacts):\n{$work}\n\n"
+                . "The step's result (artifacts):\n{$work}\n\n"
                 . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.";
 
         $reply = $channel->reply($prompt);

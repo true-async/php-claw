@@ -71,8 +71,12 @@ final class DefaultTurnLoopTest
                 return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
             }
         };
+        // distinct result each call, so the no-progress breaker does NOT trip — this exercises the turn cap
+        $n = 0;
         $executor = new RecordingExecutor(
-            static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'ok', false),
+            static function (ToolCall $call) use (&$n): ToolResultBlock {
+                return new ToolResultBlock($call->id, 'ok ' . (++$n), false);
+            },
         );
         $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');   // no ask channel -> stop at the cap
 
@@ -134,6 +138,53 @@ final class DefaultTurnLoopTest
         $loop->run([Message::userText('go')]);
 
         Assert::same($agent->calls, 50);   // distinct errors do not trip the breaker; only the turn cap stops it
+    }
+
+    #[Test]
+    public function aWedgedToolEscalatesToTheChannelAndResumesOnGuidance(): void
+    {
+        // The model wedges on the same failing tool. WITH an ask channel, the loop escalates (not silently
+        // stop); on guidance it resumes the exchange and finishes.
+        $ask = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'try a different path';
+            }
+        };
+        $agent = new class () implements AgentInterface {
+            public function send(AgentRequest $request): AgentResponse
+            {
+                foreach ($request->messages as $message) {
+                    foreach ($message->content as $block) {
+                        if ($block instanceof TextBlock && str_contains($block->text, 'different path')) {
+                            return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done');
+                        }
+                    }
+                }
+                $use = new ToolUseBlock('t', 'boom', []);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage());
+            }
+        };
+        $executor = new RecordingExecutor(
+            static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'same error', true),
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', ask: $ask);
+
+        $result = $loop->run([Message::userText('go')]);
+
+        Assert::same($result->text, 'done');                         // resumed past the wedge on the guidance
+        Assert::true($ask->heard !== null);                          // the channel WAS escalated to
+        Assert::true(str_contains((string) $ask->heard, 'boom'));    // told which tool wedged
     }
 
     #[Test]
