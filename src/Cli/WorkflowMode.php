@@ -4,44 +4,15 @@ declare(strict_types=1);
 
 namespace Claw\Cli;
 
-use Claw\Agent\AgentInterface;
-use Claw\Agent\AgentSpeaker;
-use Claw\Agent\Budget;
 use Claw\Agent\ConsoleSpeaker;
-use Claw\Agent\DefaultTurnLoop;
-use Claw\Agent\EscalatingSpeaker;
-use Claw\Agent\SpeakerInterface;
-use Claw\Agent\SpeakerRole;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
-use Claw\Exceptions\WorkflowFinished;
 use Claw\Http\CurlHttpClient;
-use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
-use Claw\Project\RunStatus;
-use Claw\Tool\BashTool;
-use Claw\Tool\DefineWorkflowTool;
-use Claw\Tool\FinishTool;
-use Claw\Tool\ListFilesTool;
-use Claw\Tool\ReadFileTool;
-use Claw\Tool\RecallTool;
-use Claw\Tool\Registry;
-use Claw\Tool\Workspace;
-use Claw\Tool\WriteFileTool;
+use Claw\Server;
 use Claw\Trace\ConsoleTraceSink;
 use Claw\Trace\Level;
-use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
-use Claw\Trace\TraceStore;
-use Claw\Workflow\BudgetPolicy;
-use Claw\Workflow\Environment;
-use Claw\Workflow\EnvKey;
-use Claw\Workflow\GenerateIssueWorkflow;
-use Claw\Workflow\SqliteStateStore;
-use Claw\Workflow\SuperviseWorkflow;
-use Claw\Workflow\WorkflowAbstract;
-use Claw\Workflow\WorkflowStore;
-use Claw\Workflow\WorkflowValidator;
 
 /**
  * The default mode: drive a project's issues through generated solver workflows.
@@ -62,31 +33,6 @@ use Claw\Workflow\WorkflowValidator;
  */
 final class WorkflowMode
 {
-    /** How many times the supervisor may repair-and-resume a crashing solver before giving up. */
-    private const int MAX_REPAIRS = 2;
-
-    /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
-    private const string SUPERVISOR_SYSTEM = <<<'PROMPT'
-        You are the SUPERVISOR of an autonomous coding workflow. You are consulted when a step is stuck:
-        a worker pauses with a question, or a step's work failed review and the run asks whether to keep
-        going. Your job is to UNBLOCK with the smallest sound decision, so the run does not churn.
-
-        How to answer (reply with ONLY the decision, no preamble):
-        - To resolve a "did not pass review / is this OK?" escalation, reply with exactly one of:
-          `accept` — the work is good enough as is, stop reworking;
-          `stop`   — the goal cannot be reached here (e.g. a required tool is missing, the gate is
-                     unsatisfiable in this environment) or it is looping with no progress — abort the step;
-          or a short, concrete GUIDANCE for ONE more attempt (only if a specific fix is likely to work).
-        - To answer a worker's question, give the briefest concrete answer that lets it proceed.
-
-        Bias to ending churn: if a step has failed several times for the same reason, or the blocker is
-        environmental (a missing test runner, an absent dependency) and cannot change, choose `accept`
-        (if the actual work looks correct) or `stop` — do NOT keep saying "try again".
-
-        Reply exactly `ESCALATE` only when the decision genuinely needs a human (a scope or product call
-        you must not make alone); it will then be passed up to the person.
-        PROMPT;
-
     /** @param string $root the install root: anchors the app home (state db, generated workflows). */
     public function __construct(private readonly string $root)
     {
@@ -112,8 +58,44 @@ final class WorkflowMode
         return match ($args[0] ?? null) {
             'run' => $this->runIssue(\array_slice($args, 1), $projectDir, $verbosity),
             'log' => $this->showHistory(\array_slice($args, 1), $projectDir, $verbosity),
+            'serve' => $this->serve(\array_slice($args, 1)),
             default => $this->usage(),
         };
+    }
+
+    /**
+     * Handle `claw serve [--port N] [--host H]`: start the read-only dashboard JSON API
+     * over every project's state db. Requires the TrueAsync server extension to be loaded:
+     *   php -d extension=/path/to/true_async_server.so bin/claw serve
+     *
+     * @param list<string> $args
+     */
+    private function serve(array $args): int
+    {
+        $host = '127.0.0.1';
+        $port = 8787;
+        foreach ($args as $i => $arg) {
+            if ($arg === '--host' && isset($args[$i + 1])) {
+                $host = $args[$i + 1];
+            } elseif (\str_starts_with($arg, '--host=')) {
+                $host = \substr($arg, 7);
+            } elseif ($arg === '--port' && isset($args[$i + 1])) {
+                $port = (int) $args[$i + 1];
+            } elseif (\str_starts_with($arg, '--port=')) {
+                $port = (int) \substr($arg, 7);
+            }
+        }
+
+        if (!\class_exists('TrueAsync\\HttpServer')) {
+            fwrite(STDERR, "claw serve: the TrueAsync server extension is not loaded.\n");
+            fwrite(STDERR, "  php -d extension=/path/to/true_async_server.so bin/claw serve\n");
+
+            return 1;
+        }
+
+        (new Server($this->projectsDir()))->run($host, $port);
+
+        return 0;
     }
 
     /**
@@ -198,7 +180,6 @@ final class WorkflowMode
 
         try {
             $store = $this->resolve($projectDir);
-            $project = $store->project();
             $issue = $store->loadIssue($issueId);
             $config = Config::load($this->root . '/.env');
         } catch (ClawException $e) {
@@ -214,236 +195,27 @@ final class WorkflowMode
             return 1;
         }
 
-        // The palette acts on the REAL project folder: this run works on the user's repo.
-        $workspace = new Workspace($project->path);
-        $workflowStore = new WorkflowStore($this->projectsDir() . '/' . $project->id . '-workflows', $project->id);
-        $projectDb = $store->pdo();   // the one open connection: shared by the state store + trace
-
-        $registry = new Registry();
-        $registry->add(new BashTool($project->path));
-        $registry->add(new ReadFileTool($workspace));
-        $registry->add(new WriteFileTool($workspace));
-        $registry->add(new ListFilesTool($workspace));
-        $registry->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
-        $registry->add(new FinishTool());   // the model can declare the task solved and end the run
-
-        $env = new Environment()
-            ->set(EnvKey::Worker, $agent)
-            ->set(EnvKey::Registry, $registry)
-            ->set(EnvKey::ModelId, $config->model)
-            ->set(EnvKey::SystemPrompt, Cli::DEFAULT_SYSTEM)
-            ->set(EnvKey::MaxHistory, $config->maxHistory)
-            ->set(EnvKey::Store, new SqliteStateStore($projectDb))   // durable: a killed run resumes here
-            ->set(EnvKey::Agents, $config->agents)                   // named roles share this access, override only the model
-            ->set(EnvKey::Budget, new Budget($config->budgetTokens, (float) $config->budgetSeconds))   // run total (0 = unlimited)
-            ->set(EnvKey::TurnTokenLimit, $config->turnTokens)       // per-exchange caps (0 = unlimited)
-            ->set(EnvKey::TurnTimeLimit, (float) $config->turnSeconds)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($config->budgetPolicy));   // stop | ask on the run total
-
-        // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle
-        // a critic escalation — accept / stop / guidance — on its own judgement), then the HUMAN console
-        // behind it. The supervisor passes a decision up to the human only when it replies ESCALATE.
-        $env->set(EnvKey::Ask, new EscalatingSpeaker(
-            $this->supervisorSpeaker($env, $agent, $config),
-            new ConsoleSpeaker(STDIN, STDOUT),
-        ));
-
-        $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issueId) . 'Solver';
-        $solverClass = $workflowStore->classFor($solverName, true);
-
-        // Resume an interrupted run (status still 'running') for this issue's solver, else start a new
-        // one. The run id ties the ledger row, the trace, and the durable state snapshot together — so
-        // resuming reuses it: the solver restores its saved state and re-runs only the unfinished tail.
-        $runId = $store->resumableRun($issue->id, $solverName);
-        $resuming = $runId !== null;
-        if ($runId === null) {
-            $runId = $store->recordRun($issue->id, $solverName);
-        }
-        $store->setIssueStatus($issue->id, IssueStatus::InProgress);
-        $tracer = new Tracer($runId, new TraceStore($projectDb), new ConsoleTraceSink(STDERR, $verbosity ?? Level::Info));
-        $env->set(EnvKey::Tracer, $tracer);
-        $taskBrief = "Title: {$issue->title}\n\nDescription: {$issue->description}";
-        $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));   // recall this run's own journal + task
-        if ($resuming) {
-            fwrite(STDOUT, "Resuming run #{$runId} for issue #{$issue->id}…\n");
-        }
-
-        $ctx = new RunContext($env, $tracer, $store, $workflowStore, $runId, $issue, $project, $solverName, $solverClass);
-
-        $early = $this->ensureSolver($ctx);
-        if ($early !== null) {
-            return $early;   // generation failed, or the human saved the solver without running it
-        }
-
-        return $this->runSolver($ctx);
-    }
-
-    /**
-     * Make sure a solver workflow exists for the run: reuse the one on disk, or generate one and have
-     * the human approve it. Returns null to proceed to running, or an exit code to stop here — a failed
-     * generation (1), or the human saving the solver without running it yet (0).
-     */
-    private function ensureSolver(RunContext $ctx): ?int
-    {
-        $solverPath = $ctx->workflowStore->path($ctx->solverName, true);
-        if (is_file($solverPath)) {
-            fwrite(STDOUT, "Reusing solver {$ctx->solverClass}.\n");
-
-            return null;
-        }
-
-        fwrite(STDOUT, "Generating a solver workflow for issue #{$ctx->issue->id}…\n");
-
-        $gen = $ctx->tracer->enterWorkflow('generate-issue-workflow');
-        try {
-            new GenerateIssueWorkflow($ctx->env, $ctx->runId . '-gen', [
-                'solverName' => $ctx->solverName,
-                'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
-                'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
-            ], $ctx->issue, $ctx->project)->run();
-        } catch (\Throwable $e) {
-            $ctx->tracer->exit($gen);
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-            fwrite(STDERR, 'claw run: generation failed: ' . $e->getMessage() . "\n");
-
-            return 1;
-        }
-        $ctx->tracer->exit($gen);
-
-        if (!is_file($solverPath)) {
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-            fwrite(STDERR, "claw run: no solver workflow was produced\n");
-
-            return 1;
-        }
-
-        fwrite(STDOUT, "\n--- {$solverPath} ---\n" . (string) file_get_contents($solverPath) . "\n--- end ---\n\n");
-        if (!$this->confirm('Run this workflow now?')) {
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Generated);
-            fwrite(STDOUT, "Saved. Not run — review it, then `claw run {$ctx->issue->id}` again.\n");
-
-            return 0;
-        }
-
-        return null;
-    }
-
-    /**
-     * Run the solver to completion; on a runtime crash, ask the supervisor to repair it (a new class
-     * version) and resume the same runId — its snapshot skips the finished steps. Bounded by MAX_REPAIRS.
-     */
-    private function runSolver(RunContext $ctx): int
-    {
-        $solverSpan = $ctx->tracer->enterWorkflow($ctx->solverName);
-        $currentClass = $ctx->solverClass;
-        $attempt = 0;
-        while (true) {
-            try {
-                $solver = new $currentClass($ctx->env, $ctx->runId, [], $ctx->issue, $ctx->project);
-                if (!$solver instanceof WorkflowAbstract) {
-                    throw new ClawException("{$currentClass} is not a workflow");
-                }
-                $solver->run();
-                break;
-            } catch (WorkflowFinished) {
-                break;   // the solver called `done`: a clean finish, not a crash to repair
-            } catch (\Throwable $e) {
-                if (++$attempt > self::MAX_REPAIRS) {
-                    $ctx->tracer->exit($solverSpan);
-                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-                    fwrite(STDERR, "claw run: run #{$ctx->runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}\n");
-
-                    return 1;
-                }
-
-                fwrite(STDOUT, "Run hit an error; asking the supervisor to repair (attempt {$attempt})…\n");
-                $fixed = $this->repairSolver($ctx, $currentClass, $e->getMessage(), $attempt);
-                if ($fixed === null) {
-                    $ctx->tracer->exit($solverSpan);
-                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-                    fwrite(STDERR, "claw run: the supervisor could not repair run #{$ctx->runId}\n");
-
-                    return 1;
-                }
-                $currentClass = $fixed;   // resume with the fixed class on the next loop turn
-            }
-        }
-        $ctx->tracer->exit($solverSpan);
-
-        $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
-        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Done);   // every step ran -> the issue is resolved
-        fwrite(STDOUT, "Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.\n");
-
-        return 0;
-    }
-
-    /**
-     * The supervisor tier of the ask channel: an agent on the `supervisor` model that settles in-run
-     * escalations (accept / stop / guidance) on its own judgement, so a stuck step does not wait on —
-     * or churn against — the human. It runs tool-less (it judges from the escalation text). Replying
-     * `ESCALATE` returns null, so {@see EscalatingSpeaker} passes the decision up to the human console.
-     */
-    private function supervisorSpeaker(Environment $env, AgentInterface $agent, Config $config): SpeakerInterface
-    {
-        $configured = $config->agents['supervisor'] ?? null;
-        $model = \is_string($configured) && $configured !== '' ? $configured : $config->model;
-
-        $loop = new DefaultTurnLoop($agent, $env->executor(), $model, self::SUPERVISOR_SYSTEM);
-        $supervisor = new AgentSpeaker(SpeakerRole::Supervisor, $loop);
-
-        return new class ($supervisor) implements SpeakerInterface {
-            public function __construct(private readonly AgentSpeaker $supervisor)
-            {
-            }
-
-            public function name(): SpeakerRole
-            {
-                return SpeakerRole::Supervisor;
-            }
-
-            public function reply(string $incoming): ?string
-            {
-                $answer = trim($this->supervisor->reply($incoming));
-
-                // ESCALATE (or an empty answer) -> pass up to the next tier (the human).
-                return $answer === '' || str_contains(strtoupper($answer), 'ESCALATE') ? null : $answer;
-            }
+        // Console seams for the headless runner: progress to STDOUT, errors to STDERR (with the
+        // command prefix), and the generated solver shown for a y/N confirm before it runs.
+        $report = static function (string $message, bool $isError): void {
+            $isError ? fwrite(STDERR, "claw run: {$message}\n") : fwrite(STDOUT, "{$message}\n");
         };
-    }
+        $approve = function (string $solverPath, string $solverCode): bool {
+            fwrite(STDOUT, "\n--- {$solverPath} ---\n" . $solverCode . "\n--- end ---\n\n");
 
-    /**
-     * Repair a crashed solver: read its source, hand it and the error to {@see SuperviseWorkflow}
-     * (the supervisor role), which writes a corrected version under a new class name. Returns that
-     * fully-qualified class name, or null if the repair produced nothing.
-     */
-    private function repairSolver(RunContext $ctx, string $brokenClass, string $error, int $attempt): ?string
-    {
-        $fixedName = $ctx->solverName . 'R' . $attempt;
-        $fixedClass = $ctx->workflowStore->classFor($fixedName, true);
-        $fixedNamespace = $ctx->workflowStore->namespaceFor(true);
+            return $this->confirm('Run this workflow now?');
+        };
 
-        $brokenShort = WorkflowStore::shortName($brokenClass);
-        $brokenPath = $ctx->workflowStore->path($brokenShort, true);
-        $brokenCode = is_file($brokenPath) ? (string) file_get_contents($brokenPath) : '';
-
-        $span = $ctx->tracer->enterWorkflow('supervise-run');
-        try {
-            new SuperviseWorkflow($ctx->env, $ctx->runId . '-fix' . $attempt, [
-                'brokenName' => $brokenShort,
-                'brokenCode' => $brokenCode,
-                'error' => $error,
-                'fixedName' => $fixedName,
-                'fixedNamespace' => $fixedNamespace,
-            ], $ctx->issue, $ctx->project)->run();
-        } catch (\Throwable $e) {
-            $ctx->tracer->exit($span);
-            fwrite(STDERR, 'claw run: repair failed: ' . $e->getMessage() . "\n");
-
-            return null;
-        }
-        $ctx->tracer->exit($span);
-
-        return is_file($ctx->workflowStore->path($fixedName, true)) ? $fixedClass : null;
+        return new IssueRunner(
+            $this->projectsDir(),
+            $store,
+            $config,
+            $agent,
+            new ConsoleSpeaker(STDIN, STDOUT),
+            $approve,
+            $report,
+            new ConsoleTraceSink(STDERR, $verbosity ?? Level::Info),
+        )->run($issue);
     }
 
     /**
