@@ -83,6 +83,9 @@ final class IssueRunner
         PROMPT;
 
     /**
+     * @param \Closure(Tracer $tracer): SpeakerInterface     $human   builds the ask channel's human tier once
+     *                                                                 the run's tracer exists (the HTTP gate
+     *                                                                 records its question/answer through it)
      * @param \Closure(string $solverPath, string $solverCode): bool $approve true = run the generated solver now
      * @param \Closure(string $message, bool $isError): void         $report  emit one progress/error line
      */
@@ -91,7 +94,7 @@ final class IssueRunner
         private readonly ProjectStore $store,
         private readonly Config $config,
         private readonly AgentInterface $agent,
-        private readonly SpeakerInterface $human,
+        private readonly \Closure $human,
         private readonly \Closure $approve,
         private readonly \Closure $report,
         private readonly ?TraceSinkInterface $liveSink = null,
@@ -133,14 +136,6 @@ final class IssueRunner
             ->set(EnvKey::TurnTimeLimit, (float) $this->config->turnSeconds)
             ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy));   // stop | ask on the run total
 
-        // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle
-        // a critic escalation — accept / stop / guidance — on its own judgement), then the injected
-        // HUMAN tier behind it. The supervisor passes a decision up only when it replies ESCALATE.
-        $env->set(EnvKey::Ask, new EscalatingSpeaker(
-            $this->supervisorSpeaker($env),
-            $this->human,
-        ));
-
         $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issue->id) . 'Solver';
         $solverClass = $workflowStore->classFor($solverName, true);
 
@@ -160,6 +155,16 @@ final class IssueRunner
         }
         $tracer = new Tracer($runId, ...$sinks);
         $env->set(EnvKey::Tracer, $tracer);
+
+        // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle
+        // a critic escalation — accept / stop / guidance — on its own judgement), then the injected HUMAN
+        // tier behind it. The human tier is built here, now that the tracer exists, because the HTTP gate
+        // records its question/answer through it. The supervisor passes up only when it replies ESCALATE.
+        $env->set(EnvKey::Ask, new EscalatingSpeaker(
+            $this->supervisorSpeaker($env),
+            ($this->human)($tracer),
+        ));
+
         $taskBrief = "Title: {$issue->title}\n\nDescription: {$issue->description}";
         $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));   // recall this run's own journal + task
         if ($resuming) {

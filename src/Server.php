@@ -4,6 +4,15 @@ declare(strict_types=1);
 
 namespace Claw;
 
+use Async\Channel;
+use Async\Scope;
+use Claw\Agent\SpeakerInterface;
+use Claw\Cli\Cli;
+use Claw\Cli\IssueRunner;
+use Claw\Http\CurlHttpClient;
+use Claw\Project\IssueStatus;
+use Claw\Project\ProjectStore;
+use Claw\Trace\Tracer;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
 use TrueAsync\HttpServer;
@@ -32,8 +41,20 @@ use TrueAsync\HttpServerConfig;
  */
 final class Server
 {
-    public function __construct(private readonly string $projectsDir)
-    {
+    /** Long-lived scope owning every in-flight run, so a run outlives the request that started it. */
+    private Scope $scope;
+
+    /** @var array<string, true> issue ids with an active run — guards against a concurrent double-start. */
+    private array $active = [];
+
+    /** @var array<string, Channel<string>> issue id → the open gate's answer channel ({@see answer()} feeds it). */
+    private array $gates = [];
+
+    /** @param string $root the install root: anchors the app home so a run can load its {@see \Claw\Config}. */
+    public function __construct(
+        private readonly string $projectsDir,
+        private readonly string $root,
+    ) {
     }
 
     public function run(string $host = '127.0.0.1', int $port = 8787): void
@@ -43,6 +64,8 @@ final class Server
             ->setReadTimeout(15)
             ->setWriteTimeout(15)
             ->setKeepAliveTimeout(60);
+
+        $this->scope = new Scope();   // owns the run coroutines spawned by POST .../start
 
         $server = new HttpServer($config);
         $server->addHttpHandler($this->handle(...));
@@ -68,13 +91,29 @@ final class Server
 
             return;
         }
-        if ($method !== 'GET') {
-            $this->json($res, 405, ['error' => 'method not allowed']);
-
-            return;
-        }
 
         try {
+            if ($method === 'POST') {
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/start$#', $path, $m)) {
+                    $this->start($res, $m[1], $m[2]);
+
+                    return;
+                }
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $m)) {
+                    $this->answer($req, $res, $m[1], $m[2]);
+
+                    return;
+                }
+                $this->json($res, 404, ['error' => 'not found', 'path' => $path]);
+
+                return;
+            }
+            if ($method !== 'GET') {
+                $this->json($res, 405, ['error' => 'method not allowed']);
+
+                return;
+            }
+
             if ($path === '/api/health') {
                 $this->json($res, 200, ['ok' => true]);
 
@@ -321,6 +360,119 @@ final class Server
         } catch (\Throwable) {
             // The client vanished mid-write — the connection is gone, nothing to clean up (yet).
         }
+    }
+
+    /**
+     * POST .../issues/{id}/start — launch the issue's solver as a detached coroutine and return at once.
+     * The dashboard watches progress on the run stream; the run records its own ledger row, trace and
+     * final status. At most one active run per issue (a concurrent start is rejected 409), and the run's
+     * gate parks on a per-issue answer channel that {@see answer()} feeds.
+     */
+    private function start(HttpResponse $res, string $key, string $issueId): void
+    {
+        try {
+            $store = $this->storeFor($key);
+            $issue = $store->loadIssue($issueId);
+        } catch (\Throwable $e) {
+            $this->json($res, 404, ['error' => $e->getMessage()]);
+
+            return;
+        }
+
+        if (isset($this->active[$issue->id])) {
+            $this->json($res, 409, ['error' => 'a run for this issue is already active']);
+
+            return;
+        }
+
+        $config = Config::load($this->root . '/.env');
+        $agent = Cli::makeAgent($config, new CurlHttpClient());
+        if ($agent === null) {
+            $this->json($res, 500, ['error' => "agent '{$config->agent}' is not wired"]);
+
+            return;
+        }
+
+        $this->active[$issue->id] = true;
+        /** @var Channel<string> $answers unbuffered: a gate's send() waits for the parked run's recv() */
+        $answers = new Channel();
+        $this->gates[$issue->id] = $answers;
+
+        // Detached into the server scope so the run survives this handler returning. No live trace sink:
+        // the dashboard reads the journal the TraceStore persists. The gate records through the run's
+        // tracer, so the human tier is built as a factory once the runner has made that tracer.
+        $this->scope->spawn(function () use ($store, $issue, $config, $agent, $answers): void {
+            try {
+                new IssueRunner(
+                    $this->projectsDir,
+                    $store,
+                    $config,
+                    $agent,
+                    fn (Tracer $tracer): SpeakerInterface => new HttpGateSpeaker($tracer, $store, $issue->id, $answers),
+                    static fn (string $solverPath, string $solverCode): bool => true,   // auto-run the generated solver (pre-approval gate is later)
+                    static function (string $message, bool $isError): void {},           // progress lives in the trace journal, not a console
+                )->run($issue);
+            } catch (\Throwable) {
+                // The run records its own Failed status; nothing else to do here.
+            } finally {
+                unset($this->active[$issue->id], $this->gates[$issue->id]);
+            }
+        });
+
+        $this->json($res, 202, ['ok' => true]);
+    }
+
+    /**
+     * POST .../issues/{id}/answer — deliver the human's reply to the run parked at its gate. Valid only
+     * while the issue is WaitingHuman (a gate is actually open); otherwise there is nothing to answer and
+     * the unbuffered send would hang, so we reject with 409.
+     */
+    private function answer(HttpRequest $req, HttpResponse $res, string $key, string $issueId): void
+    {
+        $channel = $this->gates[$issueId] ?? null;
+        if ($channel === null) {
+            $this->json($res, 409, ['error' => 'no run is waiting for an answer on this issue']);
+
+            return;
+        }
+
+        try {
+            $stmt = $this->pdo($key)->prepare('SELECT status FROM issues WHERE id = ?');
+            $stmt->execute([$issueId]);
+            $status = $stmt->fetchColumn();
+        } catch (\Throwable $e) {
+            $this->json($res, 404, ['error' => $e->getMessage()]);
+
+            return;
+        }
+        if ($status !== IssueStatus::WaitingHuman->name) {
+            $this->json($res, 409, ['error' => 'the run is not waiting for an answer right now']);
+
+            return;
+        }
+
+        $data = \json_decode($req->getBody(), true);
+        $text = \is_array($data) && isset($data['text']) ? (string) $data['text'] : '';
+
+        $channel->send($text);   // wake the parked run; unbuffered, so this returns once the run takes it
+        $this->json($res, 202, ['ok' => true]);
+    }
+
+    /** Open a WRITABLE project handle by key (a run mutates state), reusing the registry's {@see ProjectStore::discover()}. */
+    private function storeFor(string $key): ProjectStore
+    {
+        $stmt = $this->pdo($key)->query('SELECT path FROM project LIMIT 1');
+        $path = $stmt === false ? false : $stmt->fetchColumn();
+        if (!\is_string($path)) {
+            throw new \RuntimeException("unknown project: {$key}");
+        }
+
+        $store = ProjectStore::discover($this->projectsDir, $path);
+        if ($store === null) {
+            throw new \RuntimeException("cannot open project: {$key}");
+        }
+
+        return $store;
     }
 
     private function uiStatus(string $name): string

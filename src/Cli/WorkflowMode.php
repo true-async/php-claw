@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw\Cli;
 
 use Claw\Agent\ConsoleSpeaker;
+use Claw\Agent\SpeakerInterface;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
@@ -13,6 +14,7 @@ use Claw\Server;
 use Claw\Trace\ConsoleTraceSink;
 use Claw\Trace\Level;
 use Claw\Trace\TraceReader;
+use Claw\Trace\Tracer;
 
 /**
  * The default mode: drive a project's issues through generated solver workflows.
@@ -93,7 +95,7 @@ final class WorkflowMode
             return 1;
         }
 
-        (new Server($this->projectsDir()))->run($host, $port);
+        (new Server($this->projectsDir(), $this->root))->run($host, $port);
 
         return 0;
     }
@@ -211,7 +213,7 @@ final class WorkflowMode
             $store,
             $config,
             $agent,
-            new ConsoleSpeaker(STDIN, STDOUT),
+            static fn (Tracer $tracer): SpeakerInterface => new ConsoleSpeaker(STDIN, STDOUT),
             $approve,
             $report,
             new ConsoleTraceSink(STDERR, $verbosity ?? Level::Info),
