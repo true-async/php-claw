@@ -50,6 +50,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private const int DEFAULT_MAX_ROUNDS = 2;
 
+    /** Reserved snapshot key under which step-set params ride (no subclass field is named this). */
+    private const string STEP_PARAMS_KEY = '__params';
+
     /** @var list<string> step methods already completed (restored from the store) — skipped on re-run */
     private array $done;
 
@@ -132,6 +135,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /** This run's own environment scope — a child of the injected (project) env, so init() overrides locally. */
     private readonly Environment $env;
+
+    /**
+     * Parameters a step set for later steps via {@see setParam()} — a CONCRETE value a step pins for the
+     * next ones to use in CODE (a path, a count, a key), distinct from an artifact (content for the model/
+     * critic) or a handoff (a prose summary). Durable: ridden in the state snapshot, restored on resume.
+     * Read through {@see param()}, where they take precedence over the run's input params.
+     *
+     * @var array<string, mixed>
+     */
+    private array $stepParams = [];
 
     /** @param array<string, mixed> $params */
     public function __construct(
@@ -334,10 +347,25 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->env->set($key, $value);
     }
 
-    /** Read a run parameter — the value that makes the workflow describe one task, not a class of them. */
+    /**
+     * Read a parameter: one a previous step pinned with {@see setParam()} first, else a run INPUT param
+     * (the value that makes the workflow describe one task, not a class of them). Null if neither set it.
+     */
     protected function param(string $name): mixed
     {
-        return $this->params[$name] ?? null;
+        return $this->stepParams[$name] ?? $this->params[$name] ?? null;
+    }
+
+    /**
+     * Pin a parameter for LATER steps — a concrete value (path, count, id, flag) the next steps read back
+     * with {@see param()} and use in code. The THIRD inter-step channel beside artifact (content for the
+     * model/critic) and handoff (a prose baton): use this when a step decides an exact value the code of a
+     * later step needs deterministically. Durable — saved with the step's snapshot, so it survives a
+     * resume. Entirely optional: a workflow that passes nothing between steps this way is perfectly valid.
+     */
+    protected function setParam(string $name, mixed $value): void
+    {
+        $this->stepParams[$name] = $value;
     }
 
     /**
@@ -1033,6 +1061,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $state[$property->getName()] = $value;
         }
 
+        // Step-set params ride in the snapshot too, under a reserved key (no subclass field can be named
+        // it), so a resumed run reads back the concrete values earlier steps pinned. Only when non-empty.
+        if ($this->stepParams !== []) {
+            $state[self::STEP_PARAMS_KEY] = $this->stepParams;
+        }
+
         return $state;
     }
 
@@ -1044,6 +1078,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private function restoreState(array $state): void
     {
+        // Restore step-set params first (the reserved key is not a subclass field, so the loop skips it).
+        if (\is_array($state[self::STEP_PARAMS_KEY] ?? null)) {
+            $this->stepParams = $state[self::STEP_PARAMS_KEY];
+        }
+
         foreach ($this->stateProperties() as $property) {
             if (\array_key_exists($property->getName(), $state)) {
                 $property->setValue($this, $state[$property->getName()]);

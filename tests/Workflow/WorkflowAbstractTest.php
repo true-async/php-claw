@@ -82,6 +82,47 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aStepParamIsReadByLaterStepsAndSurvivesResume(): void
+    {
+        $store = new InMemoryStateStore();
+        $make = fn () => new class ($this->config(store: $store), 'r1') extends WorkflowAbstract {
+            public string $seen = '';
+
+            public function name(): string
+            {
+                return 'p';
+            }
+
+            public function only(string $name): void
+            {
+                $this->step($name);
+            }
+
+            #[Step]
+            protected function decide(): void
+            {
+                $this->setParam('chosen', 'cents');   // pin a concrete value for a later step's code
+            }
+
+            #[Step]
+            protected function consume(): void
+            {
+                $this->seen = (string) $this->param('chosen');
+            }
+        };
+
+        // First run crashes after 'decide' (the param is pinned and snapshotted), before 'consume'.
+        $make()->only('decide');
+
+        // A fresh instance resumes: 'decide' is skipped, 'consume' reads the RESTORED param — so a non-empty
+        // 'cents' proves the param was durable (a fresh instance starts with no in-memory step params).
+        $resumed = $make();
+        $resumed->run();
+
+        Assert::same($resumed->seen, 'cents');
+    }
+
+    #[Test]
     public function aReturnsTheModelTextAndAdvertisesOnlyItsToolPalette(): void
     {
         $worker = new ScriptedAgent($this->answer('the answer'));
