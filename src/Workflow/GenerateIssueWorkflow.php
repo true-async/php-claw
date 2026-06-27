@@ -20,33 +20,43 @@ use Claw\Tool\Registry;
 final class GenerateIssueWorkflow extends WorkflowAbstract
 {
     /**
-     * The canonical issue-solver recipe — the phases every generated solver must carry out.
-     * This is the single source of truth for the structure; {@see draftPrompt()} hands it to
-     * the model. Where a phase needs runtime the framework does not have yet (a mid-run human
-     * pause, parallel sub-workflows, automated CI/merge), the solver does the best the bash
-     * tool allows; the phase ordering still shapes the generated code.
+     * The MODEL of how a workflow works + the PRINCIPLE for choosing steps — NOT a fixed list of phases.
+     * A step is a unit of focused attention (a fresh context); the generator decides how many steps the
+     * task needs and uses the fewest (often one). {@see draftPrompt()} hands this to the model. This
+     * replaced a prescriptive 7-phase recipe, which made the model stamp out a ceremonial step per phase
+     * (validate/design/…) even for a one-file change — the dominant source of wasted steps and cost.
      */
     private const string RECIPE = <<<'RECIPE'
-        1. Validate — read the issue and the relevant code; decide whether it is real and complete.
-           Bug: reproduce it FIRST — add a failing test that captures it before any fix.
-           Feature: build the map of use-cases and check it is complete, error cases included.
-           If the issue is incomplete, do NOT invent scope — ASK the human for the missing cases
-           with $this->ask('...'). Pin explicit acceptance criteria (the done-conditions step 5 verifies).
-        2. Design — decide how to solve it and which classes/changes are needed; map the
-           components, reuse what already exists, check how the change fits.
-        3. Review the design against SOLID — responsibilities and dependency direction; keep any
-           violation minimal and deliberate. If the decision is foundational AND non-obvious (an
-           early or immature project, or it sets the base), get human approval of the design with
-           $this->ask('...') before implementing; if it is obvious in a mature codebase, proceed.
-        4. Implement — make the change by having the model edit the files with the tools and VERIFY
-           each edit with `php -l` in the same ai() exchange; never hand-write the new source as a
-           string. The model reads, writes, lints, and fixes itself before the step returns.
-        5. Test & accept — add a test for EACH acceptance criterion from step 1; run the full
-           quality gate via the bash tool (e.g. `composer qa`) and make it green; watch for
-           regressions. If a review finding or a test fails, loop back to step 4 (or 2) until green.
-           Gate this step with a critic whose rules demand the proof (lint clean, gate green).
-        6. Changelog — record what changed (docs / changelog).
-        7. Deliver — commit on a branch and open it for review (bash tool: git).
+        HOW TO DECIDE THE STEPS — read this carefully; it is the part solvers get wrong.
+
+        WHAT A STEP IS FOR. A step is NOT a ritual phase. It is a unit of FOCUSED ATTENTION: each step's
+        model call starts with a FRESH context and does NOT carry the whole prior history (which would
+        bloat and rot). So you split the work into separate steps ONLY when giving a part its own fresh
+        context — or its own critic — actually buys something. Between steps you carry only what matters:
+          - artifact — a named result, visible to every later step and to a critic;
+          - handoff — a short note to the VERY NEXT step;
+          - param — a concrete value a later step reads in CODE.
+        A step may carry a critic (a review sub-step) that judges its result — use it ONLY where a result
+        genuinely needs an independent check (e.g. proving the tests are green), never on every step.
+
+        THE PRINCIPLE — the FEWEST steps, no wasted motion:
+          1. First decide whether the task needs splitting AT ALL. Most small tasks do NOT: a simple task
+             is ONE step that makes the change and verifies it (read what's needed, write the code, run
+             `php -l` and the tests, fix until green). One step is the DEFAULT, not a shortcoming.
+          2. Add a further step ONLY when a part is distinct enough that its own fresh context or its own
+             critic earns the cost — e.g. a real design decision before a large change, or a test gate that
+             must be proven green. When in doubt: fewer steps.
+          3. The concerns to COVER (this is NOT a list of steps): understand what's asked, make the change,
+             prove it works (lint/tests green), record/deliver if it matters. On a simple task ALL of these
+             live in the single implement-and-verify step — do not spread them into separate steps.
+          4. Every step must do REAL work and leave a result. No ceremonial steps (a "validate" that only
+             restates the task, a "design" that only says "implement the methods"), and no step doing
+             another step's job (a design step must NEVER write the code — that is implement's job).
+          5. A step is NOT free. Its own fresh context plus the handoff it forms cost on the order of
+             ~3000 tokens BEFORE it does any real work (a critic adds several thousand more). So split a
+             part into its own step ONLY if that part is worth at least ~3000 tokens of real work; if it
+             is smaller, FOLD it into a neighbouring step — the boundary would cost more than the work it
+             isolates. This is the concrete test for "is this step worth it".
         RECIPE;
 
     private string $plan = '';
@@ -188,14 +198,15 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $recipe = self::RECIPE;
 
         return <<<PROMPT
-            Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract,
-            following the standard solver recipe.
+            Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract.
+            You DECIDE how many steps it needs — use the FEWEST the task actually requires (often just one).
 
             Plan:
             {$this->plan}
 
-            Recipe — the phases the solver must carry out, each as one or more #[Step] methods (use
-            plain if/while in run() where a phase loops or branches):
+            How to decide the steps — this is the MODEL of how a workflow works and the principle for
+            choosing steps, NOT a list of steps to stamp out (a step is one or more #[Step] methods; use
+            plain if/while in run() where the flow loops or branches):
             {$recipe}
 
             HOW A STEP ACTUALLY DOES WORK — read this twice, it is the part solvers get wrong:
