@@ -1,0 +1,58 @@
+@startuml trace-bus
+title Live trace delivery — pub/sub over TraceBus (one topic per runId)
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 12
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 13
+skinparam ArrowColor #5B6B7B
+skinparam ArrowFontColor #5B6B7B
+skinparam componentStyle rectangle
+skinparam NoteBackgroundColor #FFF8E1
+skinparam NoteBorderColor #E0C56E
+skinparam PackageBorderColor #B7C2CF
+
+' ---- the run: the PUBLISHER side ----
+package "Run — one coroutine (runId = R)" #EAF2FB {
+  component "Workflow\n+ Tracer" as TR
+  component "**LiveTraceSink**\n//publisher//" as LTS
+  TR -down-> LTS : write(record)
+}
+
+database "SQLite — project .db\n trace · runs · workflow_state" as DB #FFF3E0
+
+' ---- the bus ----
+package "**TraceBus** — in-process pub/sub" #E7F6EC {
+  component "topic **R**\n= [ ch1, ch2, … ]   (0..N)" as TOPIC
+}
+
+LTS -down-> DB    : (1) persist\n//store.write(record)//
+LTS -right-> TOPIC : (2) publish(record, seq)\n//sendAsync — non-blocking//
+
+' ---- the SUBSCRIBERS ----
+package "Subscribers — Server::stream() coroutines\n(one per open SSE connection)" #FCEAE8 {
+  component "stream() #1\n//holds a channel//" as S1
+  component "stream() #2\n//holds a channel//" as S2
+}
+
+TOPIC -right-> S1 : recv [record, seq]
+TOPIC -right-> S2 : recv [record, seq]
+DB .right.> S1 : replay + gap-heal\n//(seq > since)//
+DB .right.> S2
+
+' ---- the far end: browsers are NOT bus participants ----
+cloud "Browser tabs\n(EventSource clients)" as WEB #F4F4F4
+S1 -right-> WEB : SSE socket —\nliveRow -> sseEvent(id = seq)
+S2 -right-> WEB : SSE socket
+
+note bottom of TOPIC
+  **topic = runId.** publish() fans [record, seq]
+  to every channel subscribed under R (0..N).
+  The browser is NOT on the bus — it is the client
+  at the far end of a stream() coroutine's SSE socket.
+  Durable journal = the DB; a dropped live event is
+  healed by seq from the DB (or a reconnect replay).
+end note
+
+@enduml
