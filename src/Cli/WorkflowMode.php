@@ -4,17 +4,15 @@ declare(strict_types=1);
 
 namespace Claw\Cli;
 
-use Claw\Agent\ConsoleSpeaker;
-use Claw\Agent\SpeakerInterface;
+use Claw\Agent\AgentFactory;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\ProjectStore;
+use Claw\Run\ConsoleRunFrontend;
 use Claw\Server;
-use Claw\Trace\ConsoleTraceSink;
 use Claw\Trace\Level;
 use Claw\Trace\TraceReader;
-use Claw\Trace\Tracer;
 
 /**
  * The default mode: drive a project's issues through generated solver workflows.
@@ -190,34 +188,15 @@ final class WorkflowMode
             return 1;
         }
 
-        $agent = Cli::makeAgent($config, new CurlHttpClient());
+        $agent = AgentFactory::make($config, new CurlHttpClient());
         if ($agent === null) {
             fwrite(STDERR, "claw run: agent '{$config->agent}' is not wired yet.\n");
 
             return 1;
         }
 
-        // Console seams for the headless runner: progress to STDOUT, errors to STDERR (with the
-        // command prefix), and the generated solver shown for a y/N confirm before it runs.
-        $report = static function (string $message, bool $isError): void {
-            $isError ? fwrite(STDERR, "claw run: {$message}\n") : fwrite(STDOUT, "{$message}\n");
-        };
-        $approve = function (string $solverPath, string $solverCode): bool {
-            fwrite(STDOUT, "\n--- {$solverPath} ---\n" . $solverCode . "\n--- end ---\n\n");
-
-            return $this->confirm('Run this workflow now?');
-        };
-
-        return new IssueRunner(
-            $this->projectsDir(),
-            $store,
-            $config,
-            $agent,
-            static fn (Tracer $tracer): SpeakerInterface => new ConsoleSpeaker(STDIN, STDOUT),
-            $approve,
-            $report,
-            new ConsoleTraceSink(STDERR, $verbosity ?? Level::Info),
-        )->run($issue);
+        return new IssueRunner($this->projectsDir(), $store, $config, $agent, new ConsoleRunFrontend($verbosity))
+            ->run($issue);
     }
 
     /**
@@ -382,14 +361,5 @@ final class WorkflowMode
         $home = getenv('CLAW_WORKSPACE');
 
         return ($home === false || $home === '') ? $this->root . '/workspace' : $home;
-    }
-
-    /** Ask a yes/no question on the console; true only on an explicit yes. */
-    private function confirm(string $question): bool
-    {
-        fwrite(STDOUT, $question . ' [y/N] ');
-        $line = fgets(STDIN);
-
-        return $line !== false && \in_array(strtolower(trim($line)), ['y', 'yes'], true);
     }
 }

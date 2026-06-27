@@ -6,6 +6,7 @@ namespace Claw\Cli;
 
 use function Async\spawn;
 
+use Claw\Agent\AgentFactory;
 use Claw\Chat\ConsoleChat;
 use Claw\Chat\ConversationInterface;
 use Claw\Chat\TelegramChat;
@@ -61,7 +62,7 @@ final class SessionMode
         // Transport is a single request; retries are cause-aware at the agent level.
         $http = new CurlHttpClient();
 
-        $agent = Cli::makeAgent($config, $http);   // agents retry internally (cause-aware)
+        $agent = AgentFactory::make($config, $http);   // agents retry internally (cause-aware)
         if ($agent === null) {
             fwrite(STDERR, "Agent '{$config->agent}' is not wired yet.\n");
 
@@ -71,7 +72,7 @@ final class SessionMode
         $workspace = new Workspace($workspaceDir);
 
         $persona = $this->root . '/CLAUDE.md';
-        $system = is_file($persona) ? (string) file_get_contents($persona) : Cli::DEFAULT_SYSTEM;
+        $system = is_file($persona) ? (string) file_get_contents($persona) : Config::DEFAULT_SYSTEM;
 
         $chat = match ($config->channel) {
             'console' => new ConsoleChat(),

@@ -15,6 +15,10 @@ use Claw\Exceptions\ConfigException;
  */
 final class Config
 {
+    /** The fallback system prompt when no project CLAUDE.md persona is present. */
+    public const DEFAULT_SYSTEM = 'You are Claw, a helpful coding assistant. Be concise. '
+        . 'Use the tools to inspect and change files and run commands in the workspace.';
+
     private const DEFAULT_CHANNEL = 'console';
 
     private const CHANNELS = ['console', 'telegram'];

@@ -4,17 +4,18 @@ declare(strict_types=1);
 
 namespace Claw;
 
+use Async\AsyncCancellation;
 use Async\Channel;
-use Async\Scope;
-use Claw\Agent\SpeakerInterface;
-use Claw\Cli\Cli;
+
+use function Async\spawn;
+
+use Claw\Agent\AgentFactory;
 use Claw\Cli\IssueRunner;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
-use Claw\Trace\LiveTraceSink;
+use Claw\Run\HttpRunFrontend;
 use Claw\Trace\TraceBus;
-use Claw\Trace\Tracer;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
 use TrueAsync\HttpServer;
@@ -44,8 +45,8 @@ use TrueAsync\HttpServerConfig;
  */
 final class Server
 {
-    /** Long-lived scope owning every in-flight run, so a run outlives the request that started it. */
-    private Scope $scope;
+    /** Flags for the SSE data payloads (the JSON the dashboard reads). */
+    private const int JSON = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR;
 
     /** Live trace pub/sub: a run's LiveTraceSink publishes here, SSE streams subscribe (push, no poll). */
     private TraceBus $bus;
@@ -56,7 +57,7 @@ final class Server
     /** @var array<string, Channel<string>> issue id → the open gate's answer channel ({@see answer()} feeds it). */
     private array $gates = [];
 
-    /** @param string $root the install root: anchors the app home so a run can load its {@see \Claw\Config}. */
+    /** @param string $root the install root: anchors the app home so a run can load its {@see Config}. */
     public function __construct(
         private readonly string $projectsDir,
         private readonly string $root,
@@ -65,20 +66,19 @@ final class Server
 
     public function run(string $host = '127.0.0.1', int $port = 8787): void
     {
-        $config = (new HttpServerConfig())
+        $config = new HttpServerConfig()
             ->addListener($host, $port)
             ->setReadTimeout(15)
             ->setWriteTimeout(15)
             ->setKeepAliveTimeout(60);
 
-        $this->scope = new Scope();   // owns the run coroutines spawned by POST .../start
-        $this->bus = new TraceBus();   // live trace push from those runs to the SSE streams
+        $this->bus = new TraceBus();   // live trace push from the spawned runs to the SSE streams
 
         $server = new HttpServer($config);
         $server->addHttpHandler($this->handle(...));
 
-        \fwrite(STDOUT, "claw dashboard API → http://{$host}:{$port}\n");
-        \fwrite(STDOUT, "  projects: {$this->projectsDir}\n");
+        echo "claw dashboard API → http://{$host}:{$port}\n";
+        echo "  projects: {$this->projectsDir}\n";
 
         $server->start();
     }
@@ -101,135 +101,139 @@ final class Server
 
         try {
             if ($method === 'POST') {
-                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/start$#', $path, $m)) {
-                    $this->start($res, $m[1], $m[2]);
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/start$#', $path, $matches)) {
+                    $this->start($res, $matches[1], $matches[2]);
 
                     return;
                 }
-                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $m)) {
-                    $this->answer($req, $res, $m[1], $m[2]);
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $matches)) {
+                    $this->answer($req, $res, $matches[1], $matches[2]);
 
                     return;
                 }
-                $this->json($res, 404, ['error' => 'not found', 'path' => $path]);
+                $res->json(['error' => 'not found', 'path' => $path], 404);
 
                 return;
             }
             if ($method !== 'GET') {
-                $this->json($res, 405, ['error' => 'method not allowed']);
+                $res->json(['error' => 'method not allowed'], 405);
 
                 return;
             }
 
             if ($path === '/api/health') {
-                $this->json($res, 200, ['ok' => true]);
+                $res->json(['ok' => true]);
 
                 return;
             }
             if ($path === '/api/projects') {
-                $this->json($res, 200, $this->projects());
+                $res->json($this->projects());
 
                 return;
             }
-            if (\preg_match('#^/api/projects/([^/]+)/issues/stream$#', $path, $m)) {
-                $this->issuesStream($res, $m[1]);
+            if (\preg_match('#^/api/projects/([^/]+)/issues/stream$#', $path, $matches)) {
+                $this->issuesStream($res, $matches[1]);
 
                 return;
             }
-            if (\preg_match('#^/api/projects/([^/]+)/issues$#', $path, $m)) {
-                $this->json($res, 200, $this->issues($m[1]));
+            if (\preg_match('#^/api/projects/([^/]+)/issues$#', $path, $matches)) {
+                $res->json($this->issues($matches[1]));
 
                 return;
             }
-            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/stream$#', $path, $m)) {
-                $this->stream($req, $res, $m[1], $m[2]);
+            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/stream$#', $path, $matches)) {
+                $this->stream($req, $res, $matches[1], $matches[2]);
 
                 return;
             }
-            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/trace$#', $path, $m)) {
+            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/trace$#', $path, $matches)) {
                 $since = (int) $req->getQueryParam('since', 0);
-                $this->json($res, 200, $this->trace($this->pdo($m[1]), $m[2], $since));
+                $res->json($this->trace($this->pdo($matches[1]), $matches[2], $since));
 
                 return;
             }
-            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/artifacts$#', $path, $m)) {
-                $this->json($res, 200, $this->artifacts($this->pdo($m[1]), $m[2]));
+            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/artifacts$#', $path, $matches)) {
+                $res->json($this->artifacts($this->pdo($matches[1]), $matches[2]));
 
                 return;
             }
 
-            $this->json($res, 404, ['error' => 'not found', 'path' => $path]);
-        } catch (\Throwable $e) {
-            $this->json($res, 500, ['error' => $e->getMessage()]);
+            $res->json(['error' => 'not found', 'path' => $path], 404);
+        } catch (\Exception $e) {
+            $res->json(['error' => $e->getMessage()], 500);
         }
     }
 
     /** @return list<array{key:string,name:string,path:string}> */
     private function projects(): array
     {
-        $out = [];
+        $projects = [];
         foreach (\glob($this->projectsDir . '/*.db') ?: [] as $file) {
             try {
-                $stmt = $this->open($file)->prepare('SELECT name, path FROM project LIMIT 1');
-                $stmt->execute();
-                $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-            } catch (\Throwable) {
-                continue; // not a project db
+                $statement = $this->open($file)->prepare('SELECT name, path FROM project LIMIT 1');
+                $statement->execute();
+                $row = $statement->fetch(\PDO::FETCH_ASSOC);
+            } catch (\Exception) {
+                continue;   // not a project db
             }
             if (\is_array($row)) {
-                $out[] = ['key' => \basename($file, '.db'), 'name' => (string) $row['name'], 'path' => (string) $row['path']];
+                $projects[] = [
+                    'key' => \basename($file, '.db'),
+                    'name' => (string) $row['name'],
+                    'path' => (string) $row['path'],
+                ];
             }
         }
 
-        return $out;
+        return $projects;
     }
 
     /**
-     * Issues for a project, shaped to the UI's Issue model (status / progress / runs /
-     * tokens / artifacts), so the dashboard's HttpClient maps them with no translation.
+     * Issues for a project, shaped to the UI's Issue model (status / progress / runs / tokens /
+     * artifacts), so the dashboard's HttpClient maps them with no translation.
      *
      * @return list<array<string,mixed>>
      */
     private function issues(string $key): array
     {
         $pdo = $this->pdo($key);
-        $stmt = $pdo->prepare('SELECT id, title, status FROM issues ORDER BY id');
-        $stmt->execute();
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $statement = $pdo->prepare('SELECT id, title, status FROM issues ORDER BY id');
+        $statement->execute();
+        $issueRows = $statement->fetchAll(\PDO::FETCH_ASSOC);
 
         $issues = [];
-        foreach ($rows as $r) {
-            $runStmt = $pdo->prepare('SELECT id, workflow, status FROM runs WHERE issue_id = ? ORDER BY id');
-            $runStmt->execute([(string) $r['id']]);
-            $runRows = $runStmt->fetchAll(\PDO::FETCH_ASSOC);
-            $latest = $runRows ? $runRows[\array_key_last($runRows)] : null;
+        foreach ($issueRows as $issueRow) {
+            $runsStatement = $pdo->prepare('SELECT id, workflow, status FROM runs WHERE issue_id = ? ORDER BY id');
+            $runsStatement->execute([(string) $issueRow['id']]);
+            $runRows = $runsStatement->fetchAll(\PDO::FETCH_ASSOC);
+            $latestRun = $runRows ? $runRows[\array_key_last($runRows)] : null;
 
-            $done = 0;
-            $tin = 0;
-            $tout = 0;
+            $doneCount = 0;
+            $tokensIn = 0;
+            $tokensOut = 0;
             $artifacts = [];
-            if ($latest !== null) {
-                $rid = (string) $latest['id'];
-                $done = $this->doneCount($pdo, $rid);
-                [$tin, $tout] = $this->tokens($pdo, $rid);
-                $artifacts = $this->artifacts($pdo, $rid);
+            if ($latestRun !== null) {
+                $runId = (string) $latestRun['id'];
+                $doneCount = $this->doneCount($pdo, $runId);
+                [$tokensIn, $tokensOut] = $this->tokens($pdo, $runId);
+                $artifacts = $this->artifacts($pdo, $runId);
             }
 
-            $status = $this->uiStatus((string) $r['status']);
+            $status = IssueStatus::fromName((string) $issueRow['status'])->value;
             $issues[] = [
-                'id' => (int) $r['id'],
-                'title' => (string) $r['title'],
+                'id' => (int) $issueRow['id'],
+                'title' => (string) $issueRow['title'],
                 'status' => $status,
-                'done' => $done,
-                'live' => $status === 'inprogress',
+                'done' => $doneCount,
+                'live' => $status === IssueStatus::InProgress->value,
                 'runs' => \array_map(
-                    static fn (array $x): array => ['n' => (int) $x['id'], 'status' => (string) $x['status']],
+                    static fn (array $run): array => ['n' => (int) $run['id'], 'status' => (string) $run['status']],
                     $runRows,
                 ),
-                'tokensIn' => $tin,
-                'tokensOut' => $tout,
+                'tokensIn' => $tokensIn,
+                'tokensOut' => $tokensOut,
                 'artifacts' => $artifacts,
-                'chat' => [], // ask-channel inbox is a write path — needs the SSE/answer work
+                'chat' => [],   // ask-channel inbox is a write path — needs the SSE/answer work
             ];
         }
 
@@ -240,86 +244,86 @@ final class Server
     private function doneCount(\PDO $pdo, string $runId): int
     {
         try {
-            $stmt = $pdo->prepare('SELECT done FROM workflow_state WHERE run_id = ?');
-            $stmt->execute([$runId]);
-            $json = $stmt->fetchColumn();
-        } catch (\Throwable) {
-            return 0; // table not created on this db yet
+            $statement = $pdo->prepare('SELECT done FROM workflow_state WHERE run_id = ?');
+            $statement->execute([$runId]);
+            $doneJson = $statement->fetchColumn();
+        } catch (\Exception) {
+            return 0;   // table not created on this db yet
         }
-        if (!\is_string($json)) {
+        if (!\is_string($doneJson)) {
             return 0;
         }
-        $done = \json_decode($json, true);
+        $doneSteps = \json_decode($doneJson, true);
 
-        return \is_array($done) ? \count($done) : 0;
+        return \is_array($doneSteps) ? \count($doneSteps) : 0;
     }
 
     /** @return array{0:int,1:int} input/output tokens summed over the run's replies. */
     private function tokens(\PDO $pdo, string $runId): array
     {
-        $stmt = $pdo->prepare(
-            "SELECT COALESCE(SUM(json_extract(data, '$.usage.in')), 0)  AS tin,
-                    COALESCE(SUM(json_extract(data, '$.usage.out')), 0) AS tout
+        $statement = $pdo->prepare(
+            "SELECT COALESCE(SUM(json_extract(data, '$.usage.in')), 0)  AS tokens_in,
+                    COALESCE(SUM(json_extract(data, '$.usage.out')), 0) AS tokens_out
              FROM trace WHERE run_id = ? AND type = 'reply'",
         );
-        $stmt->execute([$runId]);
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: ['tin' => 0, 'tout' => 0];
+        $statement->execute([$runId]);
+        $row = $statement->fetch(\PDO::FETCH_ASSOC) ?: ['tokens_in' => 0, 'tokens_out' => 0];
 
-        return [(int) $row['tin'], (int) $row['tout']];
+        return [(int) $row['tokens_in'], (int) $row['tokens_out']];
     }
 
     /** @return list<array<string,mixed>> */
     private function artifacts(\PDO $pdo, string $runId): array
     {
-        $stmt = $pdo->prepare("SELECT data FROM trace WHERE run_id = ? AND type = 'artifact' ORDER BY seq");
-        $stmt->execute([$runId]);
+        $statement = $pdo->prepare("SELECT data FROM trace WHERE run_id = ? AND type = 'artifact' ORDER BY seq");
+        $statement->execute([$runId]);
 
-        $out = [];
-        foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $json) {
-            $d = \json_decode((string) $json, true);
-            if (!\is_array($d)) {
+        $artifacts = [];
+        foreach ($statement->fetchAll(\PDO::FETCH_COLUMN) as $artifactJson) {
+            $artifact = \json_decode((string) $artifactJson, true);
+            if (!\is_array($artifact)) {
                 continue;
             }
-            $out[] = [
-                'name' => (string) ($d['label'] ?? ''),
-                'kind' => (string) ($d['kind'] ?? 'file'),
+            $artifacts[] = [
+                'name' => (string) ($artifact['label'] ?? ''),
+                'kind' => (string) ($artifact['kind'] ?? 'file'),
                 'meta' => '',
-                'body' => (string) ($d['value'] ?? ''),
+                'body' => (string) ($artifact['value'] ?? ''),
             ];
         }
 
-        return $out;
+        return $artifacts;
     }
 
     /**
-     * Trace spans for a run past a seq cursor — the polling primitive that stands in
-     * for SSE. `seq` is a global monotonic autoincrement, so `seq > since` is a clean tail.
+     * Trace rows for a run past a seq cursor — the replay query, shared by the run stream and the
+     * `?since=` poll fallback. `seq` is a global monotonic autoincrement, so `seq > since` is a clean tail.
      *
      * @return list<array<string,mixed>>
      */
     private function trace(\PDO $pdo, string $runId, int $since): array
     {
-        $stmt = $pdo->prepare(
+        $statement = $pdo->prepare(
             'SELECT seq, span_id, parent_id, depth, phase, type, level, data
              FROM trace WHERE run_id = ? AND seq > ? ORDER BY seq',
         );
-        $stmt->execute([$runId, $since]);
+        $statement->execute([$runId, $since]);
 
-        $out = [];
-        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $r) {
-            $out[] = [
-                'seq' => (int) $r['seq'],
-                'spanId' => (int) $r['span_id'],
-                'parentId' => $r['parent_id'] !== null ? (int) $r['parent_id'] : null,
-                'depth' => (int) $r['depth'],
-                'phase' => (string) $r['phase'],
-                'type' => (string) $r['type'],
-                'level' => (int) $r['level'],
-                'data' => \json_decode((string) $r['data'], true),
+        $rows = [];
+        foreach ($statement->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $rows[] = [
+                'seq' => (int) $row['seq'],
+                'spanId' => (int) $row['span_id'],
+                'parentId' => $row['parent_id'] !== null ? (int) $row['parent_id'] : null,
+                'depth' => (int) $row['depth'],
+                'phase' => (string) $row['phase'],
+                'type' => (string) $row['type'],
+                'level' => (int) $row['level'],
+                'data' => \json_decode((string) $row['data'], true),
             ];
         }
 
-        return $out;
+        return $rows;
     }
 
     /**
@@ -337,8 +341,8 @@ final class Server
     {
         try {
             $pdo = $this->pdo($key);
-        } catch (\Throwable $e) {
-            $this->json($res, 404, ['error' => $e->getMessage()]);   // pre-stream: a normal JSON error is fine
+        } catch (\Exception $e) {
+            $res->json(['error' => $e->getMessage()], 404);   // pre-stream: a normal JSON error is fine
 
             return;
         }
@@ -358,10 +362,12 @@ final class Server
             while (!$res->isClosed()) {   // 2) live: pushed by the run's LiveTraceSink, no poll
                 try {
                     $row = $channel->recv(\Async\timeout(10000));
-                } catch (\Throwable) {
-                    $res->sseComment('hb');   // the timeout cancelled recv (the channel is never closed) — heartbeat
+                } catch (AsyncCancellation) {
+                    $res->sseComment('hb');   // heartbeat timeout: ping, then re-check the connection
 
                     continue;
+                } catch (\Cancellation $cancellation) {
+                    throw $cancellation;   // a real coroutine cancellation must propagate, never be swallowed
                 }
 
                 $seq = (int) $row['seq'];
@@ -370,9 +376,9 @@ final class Server
                 }
                 if ($seq > $since + 1) {
                     // a dropped event left a gap — heal it from the durable journal, in order
-                    foreach ($this->trace($pdo, $runId, $since) as $gap) {
-                        $this->sseRow($res, $gap);
-                        $since = (int) $gap['seq'];
+                    foreach ($this->trace($pdo, $runId, $since) as $gapRow) {
+                        $this->sseRow($res, $gapRow);
+                        $since = (int) $gapRow['seq'];
                     }
 
                     continue;
@@ -383,7 +389,7 @@ final class Server
                 $this->sseRow($res, $row);
                 $since = $seq;
             }
-        } catch (\Throwable) {
+        } catch (\Exception) {
             // The client vanished mid-write — the connection is gone.
         } finally {
             $unsubscribe();
@@ -398,7 +404,7 @@ final class Server
     private function sseRow(HttpResponse $res, array $row): void
     {
         $res->sseEvent(
-            data: \json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            data: \json_encode($row, self::JSON),
             event: 'trace',
             id: (string) $row['seq'],
         );
@@ -416,30 +422,30 @@ final class Server
     {
         try {
             $this->pdo($key);   // resolve/validate the project before committing the stream
-        } catch (\Throwable $e) {
-            $this->json($res, 404, ['error' => $e->getMessage()]);
+        } catch (\Exception $e) {
+            $res->json(['error' => $e->getMessage()], 404);
 
             return;
         }
 
         $res->sseStart();
 
-        $seen = [];   // issue id → the json it was last sent as
+        $sentSnapshots = [];   // issue id → the json it was last sent as
         $idleTicks = 0;
         try {
             while (!$res->isClosed()) {
                 $changed = false;
                 foreach ($this->issues($key) as $issue) {
                     $id = (string) $issue['id'];
-                    $json = \json_encode($issue, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-                    if (($seen[$id] ?? null) === $json) {
+                    $snapshot = \json_encode($issue, self::JSON);
+                    if (($sentSnapshots[$id] ?? null) === $snapshot) {
                         continue;
                     }
                     if (!$res->sendable()) {
                         continue;   // slow client: leave it unseen so the next tick retries
                     }
-                    $seen[$id] = $json;
-                    $res->sseEvent(data: $json, event: 'issue');
+                    $sentSnapshots[$id] = $snapshot;
+                    $res->sseEvent(data: $snapshot, event: 'issue');
                     $changed = true;
                 }
 
@@ -452,7 +458,7 @@ final class Server
 
                 \Async\delay(2000);
             }
-        } catch (\Throwable) {
+        } catch (\Exception) {
             // The client vanished mid-write — the connection is gone.
         }
     }
@@ -468,22 +474,22 @@ final class Server
         try {
             $store = $this->storeFor($key);
             $issue = $store->loadIssue($issueId);
-        } catch (\Throwable $e) {
-            $this->json($res, 404, ['error' => $e->getMessage()]);
+        } catch (\Exception $e) {
+            $res->json(['error' => $e->getMessage()], 404);
 
             return;
         }
 
         if (isset($this->active[$issue->id])) {
-            $this->json($res, 409, ['error' => 'a run for this issue is already active']);
+            $res->json(['error' => 'a run for this issue is already active'], 409);
 
             return;
         }
 
         $config = Config::load($this->root . '/.env');
-        $agent = Cli::makeAgent($config, new CurlHttpClient());
+        $agent = AgentFactory::make($config, new CurlHttpClient());
         if ($agent === null) {
-            $this->json($res, 500, ['error' => "agent '{$config->agent}' is not wired"]);
+            $res->json(['error' => "agent '{$config->agent}' is not wired"], 500);
 
             return;
         }
@@ -493,30 +499,19 @@ final class Server
         $answers = new Channel();
         $this->gates[$issue->id] = $answers;
 
-        // Detached into the server scope so the run survives this handler returning. No live trace sink:
-        // the dashboard reads the journal the TraceStore persists. The gate records through the run's
-        // tracer, so the human tier is built as a factory once the runner has made that tracer.
-        $this->scope->spawn(function () use ($store, $issue, $config, $agent, $answers): void {
+        $frontend = new HttpRunFrontend($store, $issue->id, $answers, $this->bus, $store->pdo());
+
+        // Spawn detached so the run survives this handler returning; the dashboard watches the run stream.
+        // The run records its own final status, so there is nothing to catch — only the active/gate cleanup.
+        spawn(function () use ($store, $config, $agent, $issue, $frontend): void {
             try {
-                new IssueRunner(
-                    $this->projectsDir,
-                    $store,
-                    $config,
-                    $agent,
-                    fn (Tracer $tracer): SpeakerInterface => new HttpGateSpeaker($tracer, $store, $issue->id, $answers),
-                    static fn (string $solverPath, string $solverCode): bool => true,   // auto-run the generated solver (pre-approval gate is later)
-                    static function (string $message, bool $isError): void {
-                    },           // progress lives in the trace journal, not a console
-                    new LiveTraceSink($this->bus, $store->pdo()),                         // push each persisted record to the SSE streams
-                )->run($issue);
-            } catch (\Throwable) {
-                // The run records its own Failed status; nothing else to do here.
+                new IssueRunner($this->projectsDir, $store, $config, $agent, $frontend)->run($issue);
             } finally {
                 unset($this->active[$issue->id], $this->gates[$issue->id]);
             }
         });
 
-        $this->json($res, 202, ['ok' => true]);
+        $res->json(['ok' => true], 202);
     }
 
     /**
@@ -528,38 +523,41 @@ final class Server
     {
         $channel = $this->gates[$issueId] ?? null;
         if ($channel === null) {
-            $this->json($res, 409, ['error' => 'no run is waiting for an answer on this issue']);
+            $res->json(['error' => 'no run is waiting for an answer on this issue'], 409);
 
             return;
         }
 
         try {
-            $stmt = $this->pdo($key)->prepare('SELECT status FROM issues WHERE id = ?');
-            $stmt->execute([$issueId]);
-            $status = $stmt->fetchColumn();
-        } catch (\Throwable $e) {
-            $this->json($res, 404, ['error' => $e->getMessage()]);
+            $statement = $this->pdo($key)->prepare('SELECT status FROM issues WHERE id = ?');
+            $statement->execute([$issueId]);
+            $status = $statement->fetchColumn();
+        } catch (\Exception $e) {
+            $res->json(['error' => $e->getMessage()], 404);
 
             return;
         }
         if ($status !== IssueStatus::WaitingHuman->name) {
-            $this->json($res, 409, ['error' => 'the run is not waiting for an answer right now']);
+            $res->json(['error' => 'the run is not waiting for an answer right now'], 409);
 
             return;
         }
 
-        $data = \json_decode($req->getBody(), true);
-        $text = \is_array($data) && isset($data['text']) ? (string) $data['text'] : '';
+        $payload = \json_decode($req->getBody(), true);
+        $text = \is_array($payload) && isset($payload['text']) ? (string) $payload['text'] : '';
 
         $channel->send($text);   // wake the parked run; unbuffered, so this returns once the run takes it
-        $this->json($res, 202, ['ok' => true]);
+        $res->json(['ok' => true], 202);
     }
 
-    /** Open a WRITABLE project handle by key (a run mutates state), reusing the registry's {@see ProjectStore::discover()}. */
+    /**
+     * Open a WRITABLE project handle by key (a run mutates state), reusing
+     * {@see ProjectStore::discover()}.
+     */
     private function storeFor(string $key): ProjectStore
     {
-        $stmt = $this->pdo($key)->query('SELECT path FROM project LIMIT 1');
-        $path = $stmt === false ? false : $stmt->fetchColumn();
+        $statement = $this->pdo($key)->query('SELECT path FROM project LIMIT 1');
+        $path = $statement === false ? false : $statement->fetchColumn();
         if (!\is_string($path)) {
             throw new \RuntimeException("unknown project: {$key}");
         }
@@ -570,18 +568,6 @@ final class Server
         }
 
         return $store;
-    }
-
-    private function uiStatus(string $name): string
-    {
-        return match ($name) {
-            'Open' => 'open',
-            'InProgress' => 'inprogress',
-            'WaitingHuman' => 'waiting',
-            'Done' => 'done',
-            'Closed' => 'closed',
-            default => 'open',
-        };
     }
 
     private function pdo(string $key): \PDO
@@ -601,13 +587,5 @@ final class Server
         $pdo->exec('PRAGMA busy_timeout=4000');
 
         return $pdo;
-    }
-
-    private function json(HttpResponse $res, int $status, mixed $data): void
-    {
-        $res->setStatusCode($status)
-            ->setHeader('Content-Type', 'application/json; charset=utf-8')
-            ->setBody(\json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR))
-            ->end();
     }
 }

@@ -18,19 +18,13 @@ use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Project\RunStatus;
-use Claw\Tool\BashTool;
-use Claw\Tool\DefineWorkflowTool;
-use Claw\Tool\FinishTool;
-use Claw\Tool\ListFilesTool;
-use Claw\Tool\ReadFileTool;
+use Claw\Run\RunFrontendInterface;
 use Claw\Tool\RecallTool;
-use Claw\Tool\Registry;
+use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
-use Claw\Tool\WriteFileTool;
-use Claw\Trace\TraceReader;
-use Claw\Trace\TraceSinkInterface;
-use Claw\Trace\TraceStore;
 use Claw\Trace\Tracer;
+use Claw\Trace\TraceReader;
+use Claw\Trace\TraceStore;
 use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
@@ -39,7 +33,6 @@ use Claw\Workflow\SqliteStateStore;
 use Claw\Workflow\SuperviseWorkflow;
 use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStore;
-use Claw\Workflow\WorkflowValidator;
 
 /**
  * Runs one issue's solver workflow to completion, headless. The shared run engine behind both
@@ -47,13 +40,9 @@ use Claw\Workflow\WorkflowValidator;
  * wires the run environment, generates or reuses the solver, runs it, and on a runtime crash asks
  * the supervisor to repair it and resumes the same run from its durable snapshot.
  *
- * Everything that differs between the console and the server is injected, so the pipeline itself
- * holds no I/O opinion:
- *   - $human    the ask channel's human tier behind the supervisor agent (console | HTTP gate);
- *   - $approve  decide whether to run a freshly generated solver (show + confirm | gate | auto-yes);
- *   - $report   one human-facing progress/error line (console writes | the server discards — the
- *               dashboard reads the trace journal instead);
- *   - $liveSink an extra live trace sink (the console tree | none — the dashboard tails the db).
+ * Everything that differs between the console and the server is behind one {@see RunFrontendInterface}
+ * (the human tier, the solver-approval decision, progress reporting, the live trace sink), so the
+ * pipeline itself holds no I/O opinion.
  */
 final class IssueRunner
 {
@@ -82,22 +71,12 @@ final class IssueRunner
         you must not make alone); it will then be passed up to the person.
         PROMPT;
 
-    /**
-     * @param \Closure(Tracer $tracer): SpeakerInterface     $human   builds the ask channel's human tier once
-     *                                                                 the run's tracer exists (the HTTP gate
-     *                                                                 records its question/answer through it)
-     * @param \Closure(string $solverPath, string $solverCode): bool $approve true = run the generated solver now
-     * @param \Closure(string $message, bool $isError): void         $report  emit one progress/error line
-     */
     public function __construct(
         private readonly string $projectsDir,
         private readonly ProjectStore $store,
         private readonly Config $config,
         private readonly AgentInterface $agent,
-        private readonly \Closure $human,
-        private readonly \Closure $approve,
-        private readonly \Closure $report,
-        private readonly ?TraceSinkInterface $liveSink = null,
+        private readonly RunFrontendInterface $frontend,
     ) {
     }
 
@@ -114,27 +93,22 @@ final class IssueRunner
         $workspace = new Workspace($project->path);
         $workflowStore = new WorkflowStore($this->projectsDir . '/' . $project->id . '-workflows', $project->id);
         $projectDb = $this->store->pdo();   // the one open connection: shared by the state store + trace
+        $registry = ToolFactory::forRun($project, $workspace, $workflowStore);
 
-        $registry = new Registry();
-        $registry->add(new BashTool($project->path));
-        $registry->add(new ReadFileTool($workspace));
-        $registry->add(new WriteFileTool($workspace));
-        $registry->add(new ListFilesTool($workspace));
-        $registry->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
-        $registry->add(new FinishTool());   // the model can declare the task solved and end the run
-
+        // The store is durable (a killed run resumes from its snapshot); budgets cap the run total and
+        // each exchange (0 = unlimited); named agent roles share the access and override only the model.
         $env = new Environment()
             ->set(EnvKey::Worker, $this->agent)
             ->set(EnvKey::Registry, $registry)
             ->set(EnvKey::ModelId, $this->config->model)
-            ->set(EnvKey::SystemPrompt, Cli::DEFAULT_SYSTEM)
+            ->set(EnvKey::SystemPrompt, Config::DEFAULT_SYSTEM)
             ->set(EnvKey::MaxHistory, $this->config->maxHistory)
-            ->set(EnvKey::Store, new SqliteStateStore($projectDb))   // durable: a killed run resumes here
-            ->set(EnvKey::Agents, $this->config->agents)             // named roles share this access, override only the model
-            ->set(EnvKey::Budget, new Budget($this->config->budgetTokens, (float) $this->config->budgetSeconds))   // run total (0 = unlimited)
-            ->set(EnvKey::TurnTokenLimit, $this->config->turnTokens)   // per-exchange caps (0 = unlimited)
+            ->set(EnvKey::Store, new SqliteStateStore($projectDb))
+            ->set(EnvKey::Agents, $this->config->agents)
+            ->set(EnvKey::Budget, new Budget($this->config->budgetTokens, (float) $this->config->budgetSeconds))
+            ->set(EnvKey::TurnTokenLimit, $this->config->turnTokens)
             ->set(EnvKey::TurnTimeLimit, (float) $this->config->turnSeconds)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy));   // stop | ask on the run total
+            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy));
 
         $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issue->id) . 'Solver';
         $solverClass = $workflowStore->classFor($solverName, true);
@@ -150,28 +124,38 @@ final class IssueRunner
         $this->store->setIssueStatus($issue->id, IssueStatus::InProgress);
 
         $sinks = [new TraceStore($projectDb)];
-        if ($this->liveSink !== null) {
-            $sinks[] = $this->liveSink;
+        $liveSink = $this->frontend->liveSink();
+        if ($liveSink !== null) {
+            $sinks[] = $liveSink;
         }
         $tracer = new Tracer($runId, ...$sinks);
         $env->set(EnvKey::Tracer, $tracer);
 
-        // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle
-        // a critic escalation — accept / stop / guidance — on its own judgement), then the injected HUMAN
-        // tier behind it. The human tier is built here, now that the tracer exists, because the HTTP gate
-        // records its question/answer through it. The supervisor passes up only when it replies ESCALATE.
+        // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle a
+        // critic escalation on its own judgement), then the human tier behind it. The human tier is built
+        // here, now the tracer exists, because the HTTP gate records its question/answer through it.
         $env->set(EnvKey::Ask, new EscalatingSpeaker(
             $this->supervisorSpeaker($env),
-            ($this->human)($tracer),
+            $this->frontend->human($tracer),
         ));
 
         $taskBrief = "Title: {$issue->title}\n\nDescription: {$issue->description}";
-        $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));   // recall this run's own journal + task
+        $registry->add(new RecallTool(new TraceReader($projectDb), $runId, $taskBrief));
         if ($resuming) {
-            ($this->report)("Resuming run #{$runId} for issue #{$issue->id}…", false);
+            $this->frontend->report("Resuming run #{$runId} for issue #{$issue->id}…", false);
         }
 
-        $ctx = new RunContext($env, $tracer, $this->store, $workflowStore, $runId, $issue, $project, $solverName, $solverClass);
+        $ctx = new RunContext(
+            $env,
+            $tracer,
+            $this->store,
+            $workflowStore,
+            $runId,
+            $issue,
+            $project,
+            $solverName,
+            $solverClass,
+        );
 
         $early = $this->ensureSolver($ctx);
         if ($early !== null) {
@@ -183,19 +167,19 @@ final class IssueRunner
 
     /**
      * Make sure a solver workflow exists for the run: reuse the one on disk, or generate one and have
-     * the approver decide whether to run it. Returns null to proceed to running, or an exit code to stop
+     * the front-end decide whether to run it. Returns null to proceed to running, or an exit code to stop
      * here — a failed generation (1), or the solver saved without being run yet (0).
      */
     private function ensureSolver(RunContext $ctx): ?int
     {
         $solverPath = $ctx->workflowStore->path($ctx->solverName, true);
         if (is_file($solverPath)) {
-            ($this->report)("Reusing solver {$ctx->solverClass}.", false);
+            $this->frontend->report("Reusing solver {$ctx->solverClass}.", false);
 
             return null;
         }
 
-        ($this->report)("Generating a solver workflow for issue #{$ctx->issue->id}…", false);
+        $this->frontend->report("Generating a solver workflow for issue #{$ctx->issue->id}…", false);
 
         $gen = $ctx->tracer->enterWorkflow('generate-issue-workflow');
         try {
@@ -204,10 +188,10 @@ final class IssueRunner
                 'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
             ], $ctx->issue, $ctx->project)->run();
-        } catch (\Throwable $e) {
+        } catch (\Exception $e) {
             $ctx->tracer->exit($gen);
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-            ($this->report)('generation failed: ' . $e->getMessage(), true);
+            $this->frontend->report('generation failed: ' . $e->getMessage(), true);
 
             return 1;
         }
@@ -215,14 +199,14 @@ final class IssueRunner
 
         if (!is_file($solverPath)) {
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-            ($this->report)('no solver workflow was produced', true);
+            $this->frontend->report('no solver workflow was produced', true);
 
             return 1;
         }
 
-        if (!($this->approve)($solverPath, (string) file_get_contents($solverPath))) {
+        if (!$this->frontend->approveSolver($solverPath, (string) file_get_contents($solverPath))) {
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Generated);
-            ($this->report)("Saved. Not run — review it, then run issue #{$ctx->issue->id} again.", false);
+            $this->frontend->report("Saved. Not run — review it, then run issue #{$ctx->issue->id} again.", false);
 
             return 0;
         }
@@ -249,21 +233,22 @@ final class IssueRunner
                 break;
             } catch (WorkflowFinished) {
                 break;   // the solver called `done`: a clean finish, not a crash to repair
-            } catch (\Throwable $e) {
+            } catch (\Exception $e) {
                 if (++$attempt > self::MAX_REPAIRS) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-                    ($this->report)("run #{$ctx->runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}", true);
+                    $message = "run #{$ctx->runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}";
+                    $this->frontend->report($message, true);
 
                     return 1;
                 }
 
-                ($this->report)("Run hit an error; asking the supervisor to repair (attempt {$attempt})…", false);
+                $this->frontend->report("Run hit an error; repairing (attempt {$attempt})…", false);
                 $fixed = $this->repairSolver($ctx, $currentClass, $e->getMessage(), $attempt);
                 if ($fixed === null) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-                    ($this->report)("the supervisor could not repair run #{$ctx->runId}", true);
+                    $this->frontend->report("the supervisor could not repair run #{$ctx->runId}", true);
 
                     return 1;
                 }
@@ -273,8 +258,8 @@ final class IssueRunner
         $ctx->tracer->exit($solverSpan);
 
         $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
-        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Done);   // every step ran -> the issue is resolved
-        ($this->report)("Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.", false);
+        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Done);   // every step ran -> issue resolved
+        $this->frontend->report("Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.", false);
 
         return 0;
     }
@@ -337,9 +322,9 @@ final class IssueRunner
                 'fixedName' => $fixedName,
                 'fixedNamespace' => $fixedNamespace,
             ], $ctx->issue, $ctx->project)->run();
-        } catch (\Throwable $e) {
+        } catch (\Exception $e) {
             $ctx->tracer->exit($span);
-            ($this->report)('repair failed: ' . $e->getMessage(), true);
+            $this->frontend->report('repair failed: ' . $e->getMessage(), true);
 
             return null;
         }

@@ -174,7 +174,7 @@ final class Tracer
         foreach ($this->sinks as $sink) {
             try {
                 $sink->write($record);
-            } catch (\Throwable) {
+            } catch (\Exception) {
                 // Tracing must never bring the run down.
             }
         }
