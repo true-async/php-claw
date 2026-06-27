@@ -28,7 +28,7 @@ final class RecordingRunFrontend implements RunFrontendInterface
 
     public function human(Tracer $tracer): SpeakerInterface
     {
-        return new class implements SpeakerInterface {
+        return new class () implements SpeakerInterface {
             public function name(): SpeakerRole
             {
                 return SpeakerRole::Human;
