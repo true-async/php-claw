@@ -106,41 +106,19 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $this->workerTier = $this->difficulty === 'simple' ? 'worker' : 'worker-smart';
     }
 
-    #[Step]
-    protected function draft(): void
-    {
-        $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));   // [] = return code, don't act
-    }
-
     /**
-     * The supervisor reviews the finished solver before it is saved: not "is it valid PHP" (the
-     * validator does that) but "will it actually work" — does every step do real work via tools/ai
-     * rather than return a placeholder, is each critic name backed by criticRules(), is the task
-     * truly solved. On a rejection, one strong-tier revision pass folds the findings back in.
+     * Write the solver, then have it reviewed by the `solverReview` critic — "will it actually solve the
+     * task", not "is it valid PHP" (the validator covers that). The critic gates the step, so a rejected
+     * draft RE-RUNS here (continuing this conversation, see {@see WorkflowAbstract::ai()}) and is re-judged
+     * — the worker's fix can't slip through unreviewed, which is how a bad draft used to escape.
      */
-    #[Step]
-    protected function review(): void
+    #[Step(critic: 'solverReview')]
+    protected function draft(): string
     {
-        $verdict = trim($this->ai(
-            'You are a senior engineer reviewing a GENERATED solver workflow before it is allowed to '
-            . 'run. Judge whether it will actually solve the task — not its syntax. Reject it if any '
-            . 'step just returns a placeholder string instead of doing real work via $this->tool()/'
-            . "\$this->ai(), if a `#[Step(critic: '<name>')]` has no matching entry in criticRules(), "
-            . 'if any step calls `done`/$this->tool(\'done\') before the deliverable is actually built '
-            . '(e.g. `done` hardcoded in validate/design ends the run having done nothing — `done` means '
-            . "the whole task is solved, not that a step finished), or if the recipe is not genuinely carried out.\n\n"
-            . "If it is genuinely ready to run, reply with exactly: OK\n"
-            . "Otherwise reply with the concrete problems that must be fixed.\n\n"
-            . "The task:\n{$this->taskSummary()}\n\nThe workflow code:\n{$this->code}",
-            [],
-            'supervisor-smart',
-        ));
+        // [] = the model returns the class CODE, it does not act with tools
+        $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));
 
-        if (strtoupper(trim($verdict)) === 'OK') {
-            return;
-        }
-
-        $this->code = $this->reviseCode("A senior reviewer rejected the workflow you wrote. Problems to fix:\n{$verdict}");
+        return $this->code;   // the critic judges this; a rejection re-runs draft with the findings
     }
 
     #[Step]
@@ -149,8 +127,28 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $this->code = $this->saveGeneratedWorkflow(
             (string) $this->param('solverName'),
             $this->code,
-            fn (string $rejection): string => $this->reviseCode("The workflow class you wrote was rejected: {$rejection}"),
+            fn (string $rejection): string => $this->reviseCode("The class you wrote was rejected: {$rejection}"),
         );
+    }
+
+    /**
+     * The rubric the `solverReview` critic judges the {@see draft()} against: will the generated solver
+     * ACTUALLY solve the task. Spelled out in full because the reviewer is judged only against this text.
+     *
+     * @return array<string, string>
+     */
+    protected function criticRules(): array
+    {
+        return [
+            'solverReview' => 'Judge the workflow code in the step result: will it ACTUALLY solve the task '
+                . 'below — not whether it is valid PHP (the validator covers that). REJECT it if any step '
+                . 'just returns a placeholder string instead of doing real work via $this->tool()/$this->ai(); '
+                . "if a `#[Step(critic: '<name>')]` has no matching entry in criticRules(); if any step calls "
+                . "`done`/\$this->tool('done') before the deliverable is actually built (e.g. `done` hardcoded "
+                . 'in validate/design ends the run having done NOTHING — `done` means the whole task is solved, '
+                . 'not that a step finished); or if the recipe is not genuinely carried out.'
+                . "\n\nThe task:\n{$this->taskSummary()}",
+        ];
     }
 
     /** The issue's title and description as a compact task brief — shared by the planning steps. */
@@ -165,6 +163,14 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
 
     private function draftPrompt(): string
     {
+        // A re-run after the critic rejected the draft: the model still holds its previous attempt in the
+        // continued conversation, so don't re-state the whole brief — just hand it the findings to fix.
+        $critique = $this->critique();
+        if ($critique !== null) {
+            return "A reviewer REJECTED the workflow you just wrote:\n\n{$critique}\n\n"
+                . 'Rewrite the FULL class fixing exactly those problems, keeping the rest. Reply with only the PHP code.';
+        }
+
         $namespace = (string) $this->param('solverNamespace');
         $class = (string) $this->param('solverName');
         $toolDocs = $this->availableTools();

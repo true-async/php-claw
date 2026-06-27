@@ -41,16 +41,15 @@ final class GenerateIssueWorkflowTest
             $registry->add(new DefineWorkflowTool($store, new WorkflowValidator()));
 
             // Each step calls ai(); between steps the engine forms a handoff (continuing the step's
-            // conversation), so those replies are interleaved: plan, [handoff], difficulty, [handoff],
-            // code, [handoff], OK.
+            // conversation). draft is critic-gated, so after the code comes the solverReview critic's
+            // verdict: plan, [handoff], difficulty, [handoff], code, OK(critic). save makes no model call.
             $agent = new ScriptedAgent(
                 self::answer('Plan: read the file, then summarize it.'),
                 self::answer('handoff after understand'),
                 self::answer('simple — a localized, mechanical change.'),
                 self::answer('handoff after assess'),
                 self::answer(self::solverCode('Issue7Solver')),
-                self::answer('handoff after draft'),
-                self::answer('OK'),
+                self::answer('OK'),   // the solverReview critic passes the drafted solver
             );
 
             $env = new Environment()
