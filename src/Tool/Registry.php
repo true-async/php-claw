@@ -94,6 +94,7 @@ final class Registry
         foreach ($this->tools as $existing) {
             $widened->add($existing);
         }
+
         $widened->add($tool);
 
         return $widened;
