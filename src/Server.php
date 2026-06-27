@@ -12,6 +12,8 @@ use Claw\Cli\IssueRunner;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
+use Claw\Trace\LiveTraceSink;
+use Claw\Trace\TraceBus;
 use Claw\Trace\Tracer;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
@@ -44,6 +46,9 @@ final class Server
     /** Long-lived scope owning every in-flight run, so a run outlives the request that started it. */
     private Scope $scope;
 
+    /** Live trace pub/sub: a run's LiveTraceSink publishes here, SSE streams subscribe (push, no poll). */
+    private TraceBus $bus;
+
     /** @var array<string, true> issue ids with an active run — guards against a concurrent double-start. */
     private array $active = [];
 
@@ -66,6 +71,7 @@ final class Server
             ->setKeepAliveTimeout(60);
 
         $this->scope = new Scope();   // owns the run coroutines spawned by POST .../start
+        $this->bus = new TraceBus();   // live trace push from those runs to the SSE streams
 
         $server = new HttpServer($config);
         $server->addHttpHandler($this->handle(...));
@@ -311,12 +317,15 @@ final class Server
     }
 
     /**
-     * Live trace for a run, as Server-Sent Events. Replays the journal tail past the client's
-     * cursor (`Last-Event-ID` header on an EventSource reconnect, or `?since=`), emitting one
-     * `trace` event per record with `id: <seq>` — so a dropped connection resumes with no gap.
+     * Live trace for a run, as Server-Sent Events. Replays the journal tail past the client's cursor
+     * (`Last-Event-ID` header on an EventSource reconnect, or `?since=`), then subscribes to the trace
+     * bus and is PUSHED each new record — no polling while connected. Every event carries `id: <seq>`,
+     * so a dropped connection resumes with no gap.
      *
-     * For now it DB-tails on a short interval; that inner poll is what the in-process trace bus
-     * (a push from the run's LiveTraceSink) replaces next, leaving the replay-on-connect intact.
+     * Only runs executing in this server publish to the bus; a stream over any other run replays the
+     * journal then idles (heartbeating). recv blocks until an event or a ~10s heartbeat tick, which also
+     * re-checks for client disconnect. A dropped live event shows up as a seq gap and is healed from the
+     * db on the spot.
      */
     private function stream(HttpRequest $req, HttpResponse $res, string $key, string $runId): void
     {
@@ -331,35 +340,62 @@ final class Server
         $since = (int) ($req->getHeader('Last-Event-ID') ?? $req->getQueryParam('since', 0));
         $res->sseStart();   // commit text/event-stream headers now, so the browser's onopen fires
 
+        // Subscribe BEFORE the replay so nothing published mid-replay is lost; the seq check de-dupes the
+        // overlap. The unsubscribe MUST run on every exit, so the topic does not leak.
+        [$channel, $unsubscribe] = $this->bus->subscribe($runId);
         try {
-            $idleTicks = 0;
-            while (!$res->isClosed()) {
-                $sent = false;
-                foreach ($this->trace($pdo, $runId, $since) as $rec) {
-                    if (!$res->sendable()) {
-                        break;   // slow client: stop piling on, retry the tail next tick
+            foreach ($this->trace($pdo, $runId, $since) as $row) {   // 1) replay the journal gap
+                $this->sseRow($res, $row);
+                $since = (int) $row['seq'];
+            }
+
+            while (!$res->isClosed()) {   // 2) live: pushed by the run's LiveTraceSink, no poll
+                try {
+                    $row = $channel->recv(\Async\timeout(10000));
+                } catch (\Throwable) {
+                    $res->sseComment('hb');   // the timeout cancelled recv (the channel is never closed) — heartbeat
+
+                    continue;
+                }
+
+                $seq = (int) $row['seq'];
+                if ($seq <= $since) {
+                    continue;   // already sent during the replay/overlap
+                }
+                if ($seq > $since + 1) {
+                    // a dropped event left a gap — heal it from the durable journal, in order
+                    foreach ($this->trace($pdo, $runId, $since) as $gap) {
+                        $this->sseRow($res, $gap);
+                        $since = (int) $gap['seq'];
                     }
-                    $res->sseEvent(
-                        data: \json_encode($rec, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
-                        event: 'trace',
-                        id: (string) $rec['seq'],
-                    );
-                    $since = (int) $rec['seq'];
-                    $sent = true;
-                }
 
-                if ($sent) {
-                    $idleTicks = 0;
-                } elseif (++$idleTicks >= 60) {   // ~15s of quiet → heartbeat past proxy idle timeouts
-                    $res->sseComment('hb');
-                    $idleTicks = 0;
+                    continue;
                 }
-
-                \Async\delay(250);   // yields the loop; other requests run while this run is quiet
+                if (!$res->sendable()) {
+                    continue;   // slow client: skip; a later gap-heal or a reconnect replays it
+                }
+                $this->sseRow($res, $row);
+                $since = $seq;
             }
         } catch (\Throwable) {
-            // The client vanished mid-write — the connection is gone, nothing to clean up (yet).
+            // The client vanished mid-write — the connection is gone.
+        } finally {
+            $unsubscribe();
         }
+    }
+
+    /**
+     * Emit one trace row as an SSE `trace` event keyed by its seq.
+     *
+     * @param array<string, mixed> $row
+     */
+    private function sseRow(HttpResponse $res, array $row): void
+    {
+        $res->sseEvent(
+            data: \json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            event: 'trace',
+            id: (string) $row['seq'],
+        );
     }
 
     /**
@@ -411,6 +447,7 @@ final class Server
                     fn (Tracer $tracer): SpeakerInterface => new HttpGateSpeaker($tracer, $store, $issue->id, $answers),
                     static fn (string $solverPath, string $solverCode): bool => true,   // auto-run the generated solver (pre-approval gate is later)
                     static function (string $message, bool $isError): void {},           // progress lives in the trace journal, not a console
+                    new LiveTraceSink($this->bus, $store->pdo()),                         // push each persisted record to the SSE streams
                 )->run($issue);
             } catch (\Throwable) {
                 // The run records its own Failed status; nothing else to do here.
