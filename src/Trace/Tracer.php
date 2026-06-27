@@ -152,6 +152,12 @@ final class Tracer
         $this->event(new TraceEvent('answer', Level::Notice, ['ref' => $questionId, 'text' => $text]));
     }
 
+    /** The run jumped BACK to an earlier step (e.g. a review sending the work back) — recorded with the reason. */
+    public function back(string $from, string $to, string $reason): void
+    {
+        $this->event(new TraceEvent('back', Level::Notice, ['from' => $from, 'to' => $to, 'reason' => $reason]));
+    }
+
     private function open(TraceEvent $event): int
     {
         $id = ++$this->seq;

@@ -85,6 +85,34 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private array $lastHistory = [];
 
     /**
+     * The prior attempt's conversation, carried into a critic re-run (or a {@see back()} jump) so the
+     * step's next ai() CONTINUES that history instead of cold-restarting: the model keeps everything it
+     * already did and reacts to the critique, rather than re-deriving the whole step from scratch. The
+     * attempt's FIRST ai() consumes it (then it clears); empty otherwise. Transient.
+     *
+     * @var list<Message>
+     */
+    private array $resumeHistory = [];
+
+    /**
+     * Each step's last work conversation, kept so a {@see back()} into an earlier step can CONTINUE it
+     * (the model re-enters with full context, not cold). Transient — a resume rebuilds it as steps re-run.
+     *
+     * @var array<string, list<Message>>
+     */
+    private array $stepHistory = [];
+
+    /** A {@see back()} request made during the running step: the earlier step to re-enter, and why. */
+    private ?string $backTo = null;
+
+    private string $backReason = '';
+
+    /** The step the driver is re-entering via back(), and the reason to hand it — its first-attempt guidance. */
+    private ?string $reentryStep = null;
+
+    private string $reentryReason = '';
+
+    /**
      * Artifacts produced this run, kept per step so PRIOR steps' outputs are not lost — only the
      * current step's slot is reset on a critic re-run (it regenerates them). Transient: not part of
      * resume state (the journal is the durable copy a resumed run reads back).
@@ -133,20 +161,65 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * The run's entry point. Default: drive every {@see Step} method in declaration order, each
-     * skipped if already done. Override to orchestrate by hand — it is plain PHP (ordering,
-     * if/while, sub-workflows); call $this->step('methodName') to run a step with the same
-     * skip-and-snapshot guarantee.
+     * skipped if already done. A step may {@see back()} to an earlier step — the driver then re-runs
+     * that step onward (so a review can send the work back to where it was produced). Override to
+     * orchestrate by hand — it is plain PHP (ordering, if/while, sub-workflows); call
+     * $this->step('methodName') to run a step with the same skip-and-snapshot guarantee.
      */
     public function run(): void
     {
         try {
-            foreach ($this->stepMethods() as $name) {
-                $this->step($name);
+            $names = $this->stepMethods();
+            $index = 0;
+            while ($index < \count($names)) {
+                $this->step($names[$index]);
+                $index = $this->backTo === null ? $index + 1 : $this->rewindTo($names, $index);
             }
         } catch (WorkflowFinished $finished) {
             // the model called the `done` tool: the task is solved, skip any remaining steps.
             $this->tracer()?->log('done', $finished->summary, [], Level::Notice);
         }
+    }
+
+    /**
+     * Send the run BACK to an earlier step from inside the current one (e.g. a review that wants the
+     * work redone where it was produced). The default {@see run()} re-runs the target onward; the target
+     * re-enters CONTINUING its own conversation (so the model keeps its context) and reads $reason as its
+     * first-attempt guidance via {@see critique()}. Recorded in the journal so the jump and its reason are
+     * visible. Within a hand-written run(), honor it yourself (e.g. loop back to the step).
+     */
+    protected function back(string $toStep, string $reason): void
+    {
+        if (!\in_array($toStep, $this->stepMethods(), true)) {
+            throw new \LogicException("back('{$toStep}'): no such step");
+        }
+        $this->backTo = $toStep;
+        $this->backReason = $reason;
+        $this->tracer()?->back($this->currentStep, $toStep, $reason);
+    }
+
+    /**
+     * Carry out a back() requested during the step at $from: clear the done-marks of target..$from so they
+     * re-run, arm the target's re-entry (continue its history + read the reason), and return the target's
+     * index for the driver to jump to.
+     *
+     * @param list<string> $names
+     */
+    private function rewindTo(array $names, int $from): int
+    {
+        $target = (string) $this->backTo;
+        $this->backTo = null;
+        $to = array_search($target, $names, true);
+        if ($to === false || $to > $from) {
+            throw new \LogicException("back('{$target}') must name an EARLIER step");
+        }
+        for ($k = $to; $k <= $from; ++$k) {
+            $this->done = array_values(array_filter($this->done, static fn (string $d): bool => $d !== $names[$k]));
+        }
+        $this->reentryStep = $target;
+        $this->reentryReason = $this->backReason;
+
+        return $to;
     }
 
     /**
@@ -190,9 +263,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $maxRounds = $this->maxRounds($step);
             $result = '';
             $workHistory = [];
+            $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
+            if ($this->reentryStep === $name) {
+                $resume = $this->stepHistory[$name] ?? [];   // a back() into this step continues its prior conversation
+                $this->critique = $this->reentryReason;        // the back() reason is its first-attempt guidance
+                $this->reentryStep = null;
+                $this->reentryReason = '';
+            }
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
+                $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
                 $raw = $this->{$name}();
                 $result = \is_string($raw) ? $raw : '';
                 $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
@@ -211,6 +292,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 }
 
                 $this->critique = $guidance;   // the re-run reads this via critique()
+                $resume = $workHistory;        // the next attempt continues THIS attempt's conversation
                 $this->enforceBudget();        // the round spent tokens; stop here if the budget is gone
             }
         } finally {
@@ -224,6 +306,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // e.g. the last step, or a step that finishes through a tool) — by CONTINUING this history,
         // and is persisted as it is formed. See {@see formPendingHandoff()}.
         $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
+        $this->stepHistory[$name] = $workHistory;   // kept so a later back() into this step continues its context
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
@@ -308,7 +391,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
         $this->formPendingHandoff();   // a downstream step is reading: form (and persist) the previous step's handoff
 
-        return $this->runTurns($prompt, $tools, $agent, []);
+        $prior = $this->resumeHistory;   // a re-run/back continues the prior attempt's conversation, not a cold restart
+        $this->resumeHistory = [];       // only the attempt's first ai() continues; later calls start fresh
+
+        return $this->runTurns($prompt, $tools, $agent, $prior);
     }
 
     /**

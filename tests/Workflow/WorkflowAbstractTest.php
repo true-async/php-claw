@@ -22,6 +22,7 @@ use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
 use Claw\Trace\ArrayTraceSink;
 use Claw\Trace\Tracer;
+use Claw\Trace\TraceRecordInterface;
 use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
@@ -239,6 +240,58 @@ final class WorkflowAbstractTest
 
         Assert::same($wf->trail, 'b');
         Assert::same($this->stepNames($sink), ['b']);
+    }
+
+    #[Test]
+    public function backReRunsTheTargetStepOnwardAndIsJournaled(): void
+    {
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public string $trail = '';
+
+            private int $backs = 0;
+
+            public function name(): string
+            {
+                return 'backer';
+            }
+
+            #[Step]
+            public function a(): void
+            {
+                $this->trail .= 'a';
+            }
+
+            #[Step]
+            public function b(): void
+            {
+                $this->trail .= 'b';
+            }
+
+            #[Step]
+            public function c(): void
+            {
+                $this->trail .= 'c';
+                if ($this->backs === 0) {
+                    ++$this->backs;                       // once, so the run terminates
+                    $this->back('a', 'redo from a');      // send the run back to step a
+                }
+            }
+        };
+
+        $wf->run();
+
+        // a,b,c ran, then back('a') re-ran a,b,c — the driver honored the backward jump.
+        Assert::same($wf->trail, 'abcabc');
+        Assert::same($this->stepNames($sink), ['a', 'b', 'c', 'a', 'b', 'c']);
+
+        // and the jump is in the journal, with where it came from / went to / why.
+        $backs = array_values(array_filter(
+            $sink->records,
+            static fn (TraceRecordInterface $record): bool => $record->event()->type === 'back',
+        ));
+        Assert::count($backs, 1);
+        Assert::same($backs[0]->event()->data, ['from' => 'c', 'to' => 'a', 'reason' => 'redo from a']);
     }
 
     #[Test]
