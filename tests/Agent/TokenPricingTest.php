@@ -66,4 +66,13 @@ final class TokenPricingTest
         // uncached 600*1 + cached 400*0.5 + output 200*4 = 600 + 200 + 800 = 1600
         Assert::same($this->pricing()->normalized(1000, 400, 200, 'gpt-4o-mini'), 1600);
     }
+
+    #[Test]
+    public function costMicrosIsRealMoneyInMicroUnits(): void
+    {
+        // gpt-4o-mini prices per 1M: in 0.15, cached 0.075, out 0.60. micro-cost = uncached*in + cached*ca + out*out.
+        // 1000 input (400 cached) + 200 output: 600*0.15 + 400*0.075 + 200*0.60 = 90 + 30 + 120 = 240 micro = $0.000240
+        Assert::same($this->pricing()->costMicros(1000, 400, 200, 'gpt-4o-mini'), 240);
+        Assert::same($this->pricing()->costMicros(0, 0, 1000, 'gpt-4o-mini'), 600);   // output only
+    }
 }

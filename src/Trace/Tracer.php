@@ -100,13 +100,21 @@ final class Tracer
         int $outTokens,
         int $cachedTokens = 0,
         int $normalizedTokens = 0,
+        int $costMicros = 0,
     ): void {
         // usage: in/out are the provider's raw counts; cached is the prompt-cache subset of `in`; norm is
-        // the cost-weighted equivalent ({@see \Claw\Agent\TokenPricing}). All four are summed per run.
+        // the cost-weighted token equivalent and cost is the real money in micro-units of the price
+        // currency ({@see \Claw\Agent\TokenPricing}). All are summed per run by the TraceReader.
         $this->event(new TraceEvent('reply', Level::Debug, [
             'text' => $text,
             'tool_calls' => $toolCalls,
-            'usage' => ['in' => $inTokens, 'out' => $outTokens, 'cached' => $cachedTokens, 'norm' => $normalizedTokens],
+            'usage' => [
+                'in' => $inTokens,
+                'out' => $outTokens,
+                'cached' => $cachedTokens,
+                'norm' => $normalizedTokens,
+                'cost' => $costMicros,
+            ],
         ]));
     }
 

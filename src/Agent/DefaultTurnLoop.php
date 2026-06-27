@@ -139,6 +139,12 @@ final class DefaultTurnLoop implements TurnLoopInterface
                     $response->usage->outputTokens,
                     $this->model,
                 ),
+                $pricing->costMicros(
+                    $response->usage->inputTokens,
+                    $response->usage->cachedTokens,
+                    $response->usage->outputTokens,
+                    $this->model,
+                ),
             );
 
             $history[] = new Message(Role::Assistant, $response->content);

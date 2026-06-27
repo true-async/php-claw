@@ -62,6 +62,23 @@ final class TokenPricing
     }
 
     /**
+     * Real money cost of one round-trip, in MICRO-units of the price table's currency (so it stays an
+     * integer summable in the trace; divide by 1e6 for the headline figure). Prices are per 1M tokens,
+     * so micro-cost = uncached*inputPrice + cached*cachedPrice + output*outputPrice (the 1e6s cancel).
+     */
+    public function costMicros(int $input, int $cached, int $output, string $model): int
+    {
+        $rates = $this->ratesFor($model);
+        $uncached = max(0, $input - $cached);
+
+        return (int) round(
+            $uncached * $rates['input']
+            + $cached * $rates['cached']
+            + $output * $rates['output'],
+        );
+    }
+
+    /**
      * The price row for a model: the longest-prefix match, else `default`, else built-in defaults.
      *
      * @return array{input: float, cached: float, output: float}
