@@ -91,7 +91,7 @@ final readonly class IssueRunner
         $workspace = new Workspace($project->path);
         $workflowStore = new WorkflowStore($this->projectsDir . '/' . $project->id . '-workflows', $project->id);
         $projectDb = $this->store->pdo();   // the one open connection: shared by the state store + trace
-        $registry = ToolFactory::forRun($project, $workspace, $workflowStore);
+        $registry = ToolFactory::forRun($project, $workspace);
 
         // The store is durable (a killed run resumes from its snapshot); budgets cap the run total and
         // each exchange (0 = unlimited); named agent roles share the access and override only the model.
@@ -162,6 +162,21 @@ final readonly class IssueRunner
     }
 
     /**
+     * A child scope for the AUTHORING workflows — generation and crash-repair — that mixes the
+     * `define_workflow` tool into the run's registry. The solver itself runs on {@see RunContext::$env}
+     * (no `define_workflow`): writing workflows is the generator's job, not the solver's, and leaving the
+     * tool out of the solver's palette removes a whole class of confusion (a solver reaching for it and
+     * looping on its validation). The child shadows only the registry; everything else is inherited.
+     */
+    private function authoringEnv(RunContext $ctx): Environment
+    {
+        return $ctx->env->child()->set(
+            EnvKey::Registry,
+            $ctx->env->findRegistry()->with(ToolFactory::defineWorkflow($ctx->workflowStore)),
+        );
+    }
+
+    /**
      * Make sure a solver workflow exists for the run: reuse the one on disk, or generate one and have
      * the front-end decide whether to run it. Returns null to proceed to running, or an exit code to stop
      * here — a failed generation (1), or the solver saved without being run yet (0).
@@ -181,7 +196,7 @@ final readonly class IssueRunner
         $gen = $ctx->tracer->enterWorkflow('generate-issue-workflow');
 
         try {
-            new GenerateIssueWorkflow($ctx->env, $ctx->runId . '-gen', [
+            new GenerateIssueWorkflow($this->authoringEnv($ctx), $ctx->runId . '-gen', [
                 'solverName' => $ctx->solverName,
                 'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
@@ -324,7 +339,7 @@ final readonly class IssueRunner
         $span = $ctx->tracer->enterWorkflow('supervise-run');
 
         try {
-            new SuperviseWorkflow($ctx->env, $ctx->runId . '-fix' . $attempt, [
+            new SuperviseWorkflow($this->authoringEnv($ctx), $ctx->runId . '-fix' . $attempt, [
                 'brokenName' => $brokenShort,
                 'brokenCode' => $brokenCode,
                 'error' => $error,

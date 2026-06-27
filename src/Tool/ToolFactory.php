@@ -9,23 +9,33 @@ use Claw\Workflow\WorkflowStore;
 use Claw\Workflow\WorkflowValidator;
 
 /**
- * Builds the tool palette a solver run works with — the file/shell tools plus the workflow-authoring and
- * finish tools — against a project's real folder. Kept out of {@see \Claw\Run\IssueRunner} so the run
- * pipeline does not own the tool wiring. The run's own RecallTool is added by the runner afterwards, once
- * the tracer it reads from exists.
+ * Builds the tool palette a solver run works with — the file/shell tools plus the finish tool — against
+ * a project's real folder. Kept out of {@see \Claw\Run\IssueRunner} so the run pipeline does not own the
+ * tool wiring. The run's own RecallTool is added by the runner afterwards, once the tracer it reads from
+ * exists.
+ *
+ * Note what is NOT here: `define_workflow`. Authoring a workflow is the GENERATOR's job, not the solver's
+ * — a solver solves the task. So that tool is mixed into the generation/repair scope only ({@see
+ * defineWorkflow()}, wired in {@see \Claw\Run\IssueRunner}), never the solver's palette, where it only
+ * invites a confused model to reach for the wrong tool.
  */
 final class ToolFactory
 {
-    public static function forRun(Project $project, Workspace $workspace, WorkflowStore $workflowStore): Registry
+    public static function forRun(Project $project, Workspace $workspace): Registry
     {
         $registry = new Registry();
         $registry->add(new BashTool($project->path));
         $registry->add(new ReadFileTool($workspace));
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
-        $registry->add(new DefineWorkflowTool($workflowStore, new WorkflowValidator()));
         $registry->add(new FinishTool());   // the model can declare the task solved and end the run
 
         return $registry;
+    }
+
+    /** The workflow-authoring tool, mixed into the registry only while GENERATING or REPAIRING a solver. */
+    public static function defineWorkflow(WorkflowStore $workflowStore): DefineWorkflowTool
+    {
+        return new DefineWorkflowTool($workflowStore, new WorkflowValidator());
     }
 }

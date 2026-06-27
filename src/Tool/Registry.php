@@ -82,6 +82,24 @@ final class Registry
     }
 
     /**
+     * A new registry holding every tool in this one PLUS $tool, sharing the same instances — the
+     * palette WIDENED by one for a scope, without touching this registry. The counterpart to
+     * {@see only()}: used to mix a scope-only tool (e.g. the workflow-authoring tool, added just
+     * for the generation/repair scope, never the solver's) into a child env's registry.
+     */
+    public function with(ToolInterface $tool): self
+    {
+        $widened = new self();
+
+        foreach ($this->tools as $existing) {
+            $widened->add($existing);
+        }
+        $widened->add($tool);
+
+        return $widened;
+    }
+
+    /**
      * The registered tools that are agents — resolved through their own path so the caller
      * asks for an agent explicitly, not out of the generic tool pile.
      *
