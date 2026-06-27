@@ -16,6 +16,7 @@ use Claw\Project\ProjectStore;
 use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
 use Claw\Trace\TraceBus;
+use Claw\Trace\TraceRecordInterface;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
 use TrueAsync\HttpServer;
@@ -361,7 +362,7 @@ final class Server
 
             while (!$res->isClosed()) {   // 2) live: pushed by the run's LiveTraceSink, no poll
                 try {
-                    $row = $channel->recv(\Async\timeout(10000));
+                    [$record, $seq] = $channel->recv(\Async\timeout(10000));
                 } catch (AsyncCancellation) {
                     $res->sseComment('hb');   // heartbeat timeout: ping, then re-check the connection
 
@@ -370,7 +371,6 @@ final class Server
                     throw $cancellation;   // a real coroutine cancellation must propagate, never be swallowed
                 }
 
-                $seq = (int) $row['seq'];
                 if ($seq <= $since) {
                     continue;   // already sent during the replay/overlap
                 }
@@ -386,7 +386,7 @@ final class Server
                 if (!$res->sendable()) {
                     continue;   // slow client: skip; a later gap-heal or a reconnect replays it
                 }
-                $this->sseRow($res, $row);
+                $this->sseRow($res, $this->liveRow($record, $seq));
                 $since = $seq;
             }
         } catch (\Exception) {
@@ -408,6 +408,29 @@ final class Server
             event: 'trace',
             id: (string) $row['seq'],
         );
+    }
+
+    /**
+     * Format a live (record, seq) into the same wire shape {@see trace()} produces from a db row, so a
+     * pushed event is indistinguishable from a replayed one. The wire shape belongs here, at the edge —
+     * not in the bus or the sink.
+     *
+     * @return array<string, mixed>
+     */
+    private function liveRow(TraceRecordInterface $record, int $seq): array
+    {
+        $event = $record->event();
+
+        return [
+            'seq' => $seq,
+            'spanId' => $record->id(),
+            'parentId' => $record->parentId(),
+            'depth' => $record->depth(),
+            'phase' => $record->phase(),
+            'type' => $event->type,
+            'level' => $event->level->value,
+            'data' => $event->data,
+        ];
     }
 
     /**
@@ -499,7 +522,7 @@ final class Server
         $answers = new Channel();
         $this->gates[$issue->id] = $answers;
 
-        $frontend = new HttpRunFrontend($store, $issue->id, $answers, $this->bus, $store->pdo());
+        $frontend = new HttpRunFrontend($store, $issue->id, $answers, $this->bus);
 
         // Spawn detached so the run survives this handler returning; the dashboard watches the run stream.
         // The run records its own final status, so there is nothing to catch — only the active/gate cleanup.

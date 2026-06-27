@@ -9,7 +9,7 @@ use Claw\Agent\SpeakerInterface;
 use Claw\Trace\ConsoleTraceSink;
 use Claw\Trace\Level;
 use Claw\Trace\Tracer;
-use Claw\Trace\TraceSinkInterface;
+use Claw\Trace\TraceStore;
 
 /**
  * The console front-end of a run (`claw run`): the human answers on the terminal, the generated solver is
@@ -39,9 +39,12 @@ final readonly class ConsoleRunFrontend implements RunFrontendInterface
         $isError ? fwrite(STDERR, "claw run: {$message}\n") : fwrite(STDOUT, "{$message}\n");
     }
 
-    public function liveSink(): TraceSinkInterface
+    public function traceSinks(\PDO $projectDb): array
     {
-        return new ConsoleTraceSink(STDERR, $this->verbosity ?? Level::Info);
+        return [
+            new TraceStore($projectDb),
+            new ConsoleTraceSink(STDERR, $this->verbosity ?? Level::Info),
+        ];
     }
 
     /** Ask a yes/no question on the console; true only on an explicit yes. */

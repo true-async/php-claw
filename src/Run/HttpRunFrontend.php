@@ -11,7 +11,7 @@ use Claw\Project\ProjectStore;
 use Claw\Trace\LiveTraceSink;
 use Claw\Trace\TraceBus;
 use Claw\Trace\Tracer;
-use Claw\Trace\TraceSinkInterface;
+use Claw\Trace\TraceStore;
 
 /**
  * The HTTP front-end of a run (the dashboard server): the human answers over POST .../answer through a
@@ -27,7 +27,6 @@ final readonly class HttpRunFrontend implements RunFrontendInterface
         private string $issueId,
         private Channel $answers,
         private TraceBus $bus,
-        private \PDO $pdo,
     ) {
     }
 
@@ -46,8 +45,10 @@ final readonly class HttpRunFrontend implements RunFrontendInterface
         // No console: the dashboard reads progress from the trace journal.
     }
 
-    public function liveSink(): TraceSinkInterface
+    public function traceSinks(\PDO $projectDb): array
     {
-        return new LiveTraceSink($this->bus, $this->pdo);
+        // One sink that persists AND publishes: LiveTraceSink writes through the TraceStore, then pushes
+        // the persisted record (with its seq) to the bus — no separate TraceStore to order against.
+        return [new LiveTraceSink(new TraceStore($projectDb), $this->bus)];
     }
 }

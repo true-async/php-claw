@@ -25,6 +25,11 @@ interface RunFrontendInterface
     /** Emit one progress or error line. */
     public function report(string $message, bool $isError): void;
 
-    /** An extra live trace sink for this run, or null when the durable journal alone suffices. */
-    public function liveSink(): ?TraceSinkInterface;
+    /**
+     * The run's trace sinks, over the project's db connection: always persists (the console front-end
+     * adds the live stderr tree; the HTTP one persists-and-publishes through one {@see LiveTraceSink}).
+     *
+     * @return list<TraceSinkInterface>
+     */
+    public function traceSinks(\PDO $projectDb): array;
 }

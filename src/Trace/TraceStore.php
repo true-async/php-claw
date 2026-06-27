@@ -75,4 +75,10 @@ final class TraceStore implements TraceSinkInterface
             'at' => $record->at(),
         ]);
     }
+
+    /** The autoincrement `seq` of the row the last {@see write()} inserted on this connection — the dashboard's cursor. */
+    public function lastSeq(): int
+    {
+        return (int) $this->pdo->lastInsertId();
+    }
 }

@@ -23,7 +23,6 @@ use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
-use Claw\Trace\TraceStore;
 use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
@@ -122,12 +121,7 @@ final readonly class IssueRunner
         }
         $this->store->setIssueStatus($issue->id, IssueStatus::InProgress);
 
-        $sinks = [new TraceStore($projectDb)];
-        $liveSink = $this->frontend->liveSink();
-        if ($liveSink !== null) {
-            $sinks[] = $liveSink;
-        }
-        $tracer = new Tracer($runId, ...$sinks);
+        $tracer = new Tracer($runId, ...$this->frontend->traceSinks($projectDb));
         $env->set(EnvKey::Tracer, $tracer);
 
         // The ask channel is a ladder: a SUPERVISOR AGENT first (it can unblock a stuck step or settle a

@@ -5,48 +5,24 @@ declare(strict_types=1);
 namespace Claw\Trace;
 
 /**
- * The live-delivery trace sink: after the durable {@see TraceStore} has persisted a record, this
- * publishes it to the {@see TraceBus} so subscribed SSE streams are pushed to with no polling.
+ * The live-delivery trace sink: persist through the {@see TraceStore} it composes, then publish the
+ * persisted record to the {@see TraceBus} so subscribed SSE streams are pushed to with no polling.
  *
- * It must sit AFTER the TraceStore in the tracer's sink list and share the SAME pdo connection: the
- * record carries a span id, not the db's `seq` (the autoincrement primary key the dashboard resumes
- * on), so this reads `lastInsertId()` of the row the TraceStore just inserted on that connection. A
- * run's tracer fans out synchronously on its own connection, so that id is exactly this record's seq;
- * concurrent runs use separate connections, so they never cross.
+ * It owns the persistence (so there is no separate TraceStore in the sink list to order against): it
+ * writes, then asks that same store for the row's `seq` — the autoincrement the record itself does not
+ * carry but the dashboard resumes on — and hands the bus the typed record together with that seq.
  */
 final readonly class LiveTraceSink implements TraceSinkInterface
 {
     public function __construct(
+        private TraceStore $store,
         private TraceBus $bus,
-        private \PDO $pdo,
     ) {
     }
 
     public function write(TraceRecordInterface $record): void
     {
-        $seq = (int) $this->pdo->lastInsertId();   // the row TraceStore just inserted on this connection
-        $this->bus->publish($record->runId(), self::row($record, $seq));
-    }
-
-    /**
-     * Format a record the same way {@see \Claw\Server::trace()} serializes a db row, so a subscriber
-     * cannot tell a pushed live row from a replayed one.
-     *
-     * @return array<string, mixed>
-     */
-    private static function row(TraceRecordInterface $record, int $seq): array
-    {
-        $event = $record->event();
-
-        return [
-            'seq' => $seq,
-            'spanId' => $record->id(),
-            'parentId' => $record->parentId(),
-            'depth' => $record->depth(),
-            'phase' => $record->phase(),
-            'type' => $event->type,
-            'level' => $event->level->value,
-            'data' => $event->data,
-        ];
+        $this->store->write($record);                            // persist first — the store owns the connection + seq
+        $this->bus->publish($record, $this->store->lastSeq());   // then notify, with the record and its persisted seq
     }
 }
