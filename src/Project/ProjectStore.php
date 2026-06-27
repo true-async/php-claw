@@ -111,10 +111,82 @@ final class ProjectStore
         }
     }
 
+    /** Open a registered project by its key (the db filename), or null if there is no such db. */
+    public static function openByKey(string $projectsDir, string $key): ?self
+    {
+        $dbPath = self::dbPath($projectsDir, basename($key));
+
+        return is_file($dbPath) ? self::openHandle($dbPath) : null;
+    }
+
+    /**
+     * Every registered project's metadata — for the dashboard's project list. A db that is not a valid
+     * project (no metadata row) is skipped rather than failing the whole listing.
+     *
+     * @return list<Project>
+     */
+    public static function all(string $projectsDir): array
+    {
+        $projects = [];
+
+        foreach (glob($projectsDir . '/*.db') ?: [] as $dbPath) {
+            try {
+                $projects[] = self::openHandle($dbPath)->project;
+            } catch (\Exception) {
+                continue;
+            }
+        }
+
+        return $projects;
+    }
+
     /** This project's metadata (id, name, the external folder path, description). */
     public function project(): Project
     {
         return $this->project;
+    }
+
+    /**
+     * Every issue in the project, oldest first — for the dashboard board. Runs are read separately
+     * ({@see runsFor()}), so this stays a single cheap query.
+     *
+     * @return list<Issue>
+     */
+    public function allIssues(): array
+    {
+        $stmt = $this->pdo->query('SELECT id, title, description, status FROM issues ORDER BY id');
+        $rows = $stmt === false ? [] : $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+        return array_values(array_map(
+            fn (array $row): Issue => new Issue(
+                (string) $row['id'],
+                $this->project->id,
+                (string) $row['title'],
+                (string) $row['description'],
+                IssueStatus::fromName((string) $row['status']),
+            ),
+            $rows,
+        ));
+    }
+
+    /**
+     * The runs spawned for an issue, oldest first, with their status — for the dashboard's run list.
+     *
+     * @return list<array{id: string, workflow: string, status: string}>
+     */
+    public function runsFor(string $issueId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT id, workflow, status FROM runs WHERE issue_id = ? ORDER BY id');
+        $stmt->execute([$issueId]);
+
+        return array_values(array_map(
+            static fn (array $row): array => [
+                'id' => (string) $row['id'],
+                'workflow' => (string) $row['workflow'],
+                'status' => (string) $row['status'],
+            ],
+            $stmt->fetchAll(\PDO::FETCH_ASSOC),
+        ));
     }
 
     /** The single open connection, shared with the run-state store and the tracer. */
@@ -288,6 +360,7 @@ final class ProjectStore
     {
         $pdo = new \PDO('sqlite:' . $dbPath);
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->exec('PRAGMA busy_timeout=4000');   // ride out a concurrent writer (the run) rather than fail
 
         return $pdo;
     }
