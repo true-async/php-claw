@@ -10,6 +10,7 @@ use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\ProjectStore;
 use Claw\Run\ConsoleRunFrontend;
+use Claw\Run\IssueRunner;
 use Claw\Server;
 use Claw\Trace\Level;
 use Claw\Trace\TraceReader;

@@ -9,7 +9,7 @@ use Claw\Trace\Tracer;
 use Claw\Trace\TraceSinkInterface;
 
 /**
- * The outside-facing side of a run: how {@see \Claw\Cli\IssueRunner} reaches a human, gets a generated
+ * The outside-facing side of a run: how {@see \Claw\Run\IssueRunner} reaches a human, gets a generated
  * solver approved, reports progress, and surfaces live trace — so the run pipeline itself holds no I/O
  * opinion. The two implementations are {@see ConsoleRunFrontend} (`claw run`) and {@see HttpRunFrontend}
  * (the dashboard server).

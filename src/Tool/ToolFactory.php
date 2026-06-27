@@ -10,7 +10,7 @@ use Claw\Workflow\WorkflowValidator;
 
 /**
  * Builds the tool palette a solver run works with — the file/shell tools plus the workflow-authoring and
- * finish tools — against a project's real folder. Kept out of {@see \Claw\Cli\IssueRunner} so the run
+ * finish tools — against a project's real folder. Kept out of {@see \Claw\Run\IssueRunner} so the run
  * pipeline does not own the tool wiring. The run's own RecallTool is added by the runner afterwards, once
  * the tracer it reads from exists.
  */

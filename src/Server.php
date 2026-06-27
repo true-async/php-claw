@@ -10,11 +10,11 @@ use Async\Channel;
 use function Async\spawn;
 
 use Claw\Agent\AgentFactory;
-use Claw\Cli\IssueRunner;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Run\HttpRunFrontend;
+use Claw\Run\IssueRunner;
 use Claw\Trace\TraceBus;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Claw\Cli;
+namespace Claw\Run;
 
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentSpeaker;
@@ -18,7 +18,6 @@ use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Project\RunStatus;
-use Claw\Run\RunFrontendInterface;
 use Claw\Tool\RecallTool;
 use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
@@ -188,7 +187,9 @@ final class IssueRunner
                 'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
             ], $ctx->issue, $ctx->project)->run();
-        } catch (\Exception $e) {
+        } catch (\Cancellation $cancellation) {
+            throw $cancellation;   // a cancelled run must stop, not be reported as a generation failure
+        } catch (\Throwable $e) {
             $ctx->tracer->exit($gen);
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
             $this->frontend->report('generation failed: ' . $e->getMessage(), true);
@@ -233,7 +234,11 @@ final class IssueRunner
                 break;
             } catch (WorkflowFinished) {
                 break;   // the solver called `done`: a clean finish, not a crash to repair
-            } catch (\Exception $e) {
+            } catch (\Cancellation $cancellation) {
+                throw $cancellation;   // a cancelled run must stop — never "repair" a cancellation
+            } catch (\Throwable $e) {
+                // a generated solver throws Error (TypeError, ParseError, ...) as readily as Exception,
+                // so catch the lot here and repair-and-resume — that is exactly this boundary's job
                 if (++$attempt > self::MAX_REPAIRS) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
@@ -322,7 +327,9 @@ final class IssueRunner
                 'fixedName' => $fixedName,
                 'fixedNamespace' => $fixedNamespace,
             ], $ctx->issue, $ctx->project)->run();
-        } catch (\Exception $e) {
+        } catch (\Cancellation $cancellation) {
+            throw $cancellation;
+        } catch (\Throwable $e) {
             $ctx->tracer->exit($span);
             $this->frontend->report('repair failed: ' . $e->getMessage(), true);
 

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Claw\Cli;
+namespace Claw\Run;
 
 use Claw\Project\Issue;
 use Claw\Project\Project;
