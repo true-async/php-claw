@@ -16,9 +16,9 @@ use Claw\Trace\TraceSinkInterface;
  * shown for a y/N confirm before it runs, progress prints to STDOUT/STDERR, and the live trace is the
  * indented stderr tree.
  */
-final class ConsoleRunFrontend implements RunFrontendInterface
+final readonly class ConsoleRunFrontend implements RunFrontendInterface
 {
-    public function __construct(private readonly ?Level $verbosity = null)
+    public function __construct(private ?Level $verbosity = null)
     {
     }
 

@@ -22,10 +22,8 @@ final class TraceBus
     /** Per-subscriber buffer: a burst of records queues here rather than blocking the run. */
     private const int CAPACITY = 1024;
 
-    /** @var array<string, array<int, Channel<array<string, mixed>>>> runId → subscriberId → channel */
+    /** @var array<string, array<int, Channel<array<string, mixed>>>> runId → spl_object_id(channel) → channel */
     private array $subscribers = [];
-
-    private int $nextId = 0;
 
     /**
      * Subscribe to a run's live trace. Returns the channel to recv formatted rows on, plus an
@@ -35,9 +33,9 @@ final class TraceBus
      */
     public function subscribe(string $runId): array
     {
-        $id = $this->nextId++;
         /** @var Channel<array<string, mixed>> $channel */
         $channel = new Channel(self::CAPACITY);
+        $id = spl_object_id($channel);   // the channel is its own identity — no counter to keep
         $this->subscribers[$runId][$id] = $channel;
 
         $unsubscribe = function () use ($runId, $id): void {

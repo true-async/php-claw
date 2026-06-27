@@ -14,11 +14,11 @@ namespace Claw\Trace;
  * run's tracer fans out synchronously on its own connection, so that id is exactly this record's seq;
  * concurrent runs use separate connections, so they never cross.
  */
-final class LiveTraceSink implements TraceSinkInterface
+final readonly class LiveTraceSink implements TraceSinkInterface
 {
     public function __construct(
-        private readonly TraceBus $bus,
-        private readonly \PDO $pdo,
+        private TraceBus $bus,
+        private \PDO $pdo,
     ) {
     }
 

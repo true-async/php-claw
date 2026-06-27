@@ -23,14 +23,14 @@ use Claw\Trace\Tracer;
  * LIVE wakeup. A restart loses the channel but not the journal, so the gate stays visible and the run
  * resumes from its snapshot back into a fresh gate.
  */
-final class HttpGateSpeaker implements SpeakerInterface
+final readonly class HttpGateSpeaker implements SpeakerInterface
 {
     /** @param Channel<string> $answers the live wakeup — POST .../answer sends the human reply here */
     public function __construct(
-        private readonly Tracer $tracer,
-        private readonly ProjectStore $store,
-        private readonly string $issueId,
-        private readonly Channel $answers,
+        private Tracer $tracer,
+        private ProjectStore $store,
+        private string $issueId,
+        private Channel $answers,
     ) {
     }
 

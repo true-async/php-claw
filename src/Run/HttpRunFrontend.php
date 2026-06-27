@@ -19,15 +19,15 @@ use Claw\Trace\TraceSinkInterface;
  * progress goes only to the trace journal the dashboard reads, and the live sink pushes each record to
  * the SSE streams.
  */
-final class HttpRunFrontend implements RunFrontendInterface
+final readonly class HttpRunFrontend implements RunFrontendInterface
 {
     /** @param Channel<string> $answers the open gate's answer channel — POST .../answer sends the reply here */
     public function __construct(
-        private readonly ProjectStore $store,
-        private readonly string $issueId,
-        private readonly Channel $answers,
-        private readonly TraceBus $bus,
-        private readonly \PDO $pdo,
+        private ProjectStore $store,
+        private string $issueId,
+        private Channel $answers,
+        private TraceBus $bus,
+        private \PDO $pdo,
     ) {
     }
 

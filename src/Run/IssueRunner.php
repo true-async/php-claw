@@ -43,7 +43,7 @@ use Claw\Workflow\WorkflowStore;
  * (the human tier, the solver-approval decision, progress reporting, the live trace sink), so the
  * pipeline itself holds no I/O opinion.
  */
-final class IssueRunner
+final readonly class IssueRunner
 {
     /** How many times the supervisor may repair-and-resume a crashing solver before giving up. */
     private const int MAX_REPAIRS = 2;
@@ -71,11 +71,11 @@ final class IssueRunner
         PROMPT;
 
     public function __construct(
-        private readonly string $projectsDir,
-        private readonly ProjectStore $store,
-        private readonly Config $config,
-        private readonly AgentInterface $agent,
-        private readonly RunFrontendInterface $frontend,
+        private string $projectsDir,
+        private ProjectStore $store,
+        private Config $config,
+        private AgentInterface $agent,
+        private RunFrontendInterface $frontend,
     ) {
     }
 
