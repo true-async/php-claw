@@ -131,6 +131,12 @@ final class Tracer
         $this->event(new TraceEvent('tool-result', $level, ['name' => $name, 'text' => $text, 'is_error' => $isError]));
     }
 
+    /** A step pinned a concrete param for a later step (the addressed inter-step value channel). */
+    public function param(string $forStep, string $name, mixed $value): void
+    {
+        $this->event(new TraceEvent('param', Level::Info, ['forStep' => $forStep, 'name' => $name, 'value' => $value]));
+    }
+
     /** @param array<string, mixed> $context */
     public function log(string $action, string $message = '', array $context = [], Level $level = Level::Info): void
     {

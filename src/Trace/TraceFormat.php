@@ -30,6 +30,7 @@ final class TraceFormat
         'note'        => '90',     // grey — a logged note
         'artifact'    => '36',     // cyan — a produced output
         'handoff'     => '1;33',   // bold yellow — context carried to the next step
+        'param'       => '1;36',   // bold cyan — a concrete value addressed to a later step
     ];
 
     /**
@@ -63,6 +64,7 @@ final class TraceFormat
             'note' => trim(self::str($data, 'action') . ' ' . self::str($data, 'message')),
             'artifact' => self::str($data, 'label') . ' (' . self::str($data, 'kind') . ')  ' . self::oneLine(self::str($data, 'value'), 60),
             'handoff' => self::oneLine(self::str($data, 'text'), 70),
+            'param' => self::str($data, 'name') . ' → ' . self::str($data, 'forStep') . '  ' . self::oneLine(self::json($data, 'value'), 50),
             default => '',
         };
     }
@@ -133,5 +135,19 @@ final class TraceFormat
     private static function bool(array $data, string $key): bool
     {
         return (bool) ($data[$key] ?? false);
+    }
+
+    /**
+     * Read a field as a compact JSON string — for a value that may not be scalar (a param's value).
+     *
+     * @param array<array-key, mixed> $data
+     */
+    private static function json(array $data, string $key): string
+    {
+        if (!\array_key_exists($key, $data)) {
+            return '';
+        }
+
+        return json_encode($data[$key], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '';
     }
 }

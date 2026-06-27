@@ -82,11 +82,12 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function aStepParamIsReadByLaterStepsAndSurvivesResume(): void
+    public function anAddressedParamReachesOnlyItsStepAndSurvivesResume(): void
     {
         $store = new InMemoryStateStore();
         $make = fn () => new class ($this->config(store: $store), 'r1') extends WorkflowAbstract {
             public string $seen = '';
+            public string $seenElsewhere = '';
 
             public function name(): string
             {
@@ -101,7 +102,7 @@ final class WorkflowAbstractTest
             #[Step]
             protected function decide(): void
             {
-                $this->setParam('chosen', 'cents');   // pin a concrete value for a later step's code
+                $this->setParam('consume', 'chosen', 'cents');   // pin a value FOR the 'consume' step only
             }
 
             #[Step]
@@ -109,17 +110,26 @@ final class WorkflowAbstractTest
             {
                 $this->seen = (string) $this->param('chosen');
             }
+
+            #[Step]
+            protected function later(): void
+            {
+                // a step the param was NOT addressed to cannot read it — no peeking across steps
+                $this->seenElsewhere = (string) ($this->param('chosen') ?? 'none');
+            }
         };
 
-        // First run crashes after 'decide' (the param is pinned and snapshotted), before 'consume'.
+        // First run crashes after 'decide' (the param is pinned and snapshotted), before the rest.
         $make()->only('decide');
 
-        // A fresh instance resumes: 'decide' is skipped, 'consume' reads the RESTORED param — so a non-empty
-        // 'cents' proves the param was durable (a fresh instance starts with no in-memory step params).
+        // A fresh instance resumes: 'decide' is skipped; 'consume' reads the RESTORED param (so non-empty
+        // 'cents' proves durability — a fresh instance starts with no in-memory params), and 'later' — which
+        // the param was not addressed to — sees nothing.
         $resumed = $make();
         $resumed->run();
 
-        Assert::same($resumed->seen, 'cents');
+        Assert::same($resumed->seen, 'cents');         // the addressed step got it, across a resume
+        Assert::same($resumed->seenElsewhere, 'none'); // a different step cannot read it
     }
 
     #[Test]

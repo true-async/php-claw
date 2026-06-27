@@ -137,12 +137,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private readonly Environment $env;
 
     /**
-     * Parameters a step set for later steps via {@see setParam()} — a CONCRETE value a step pins for the
-     * next ones to use in CODE (a path, a count, a key), distinct from an artifact (content for the model/
-     * critic) or a handoff (a prose summary). Durable: ridden in the state snapshot, restored on resume.
-     * Read through {@see param()}, where they take precedence over the run's input params.
+     * Parameters a step pinned FOR A SPECIFIC later step via {@see setParam()} — a CONCRETE value (path,
+     * count, id, flag) the target step reads with {@see param()} and uses in CODE. Keyed by the TARGET
+     * step's name, so it is ADDRESSED, not global: a step sees only the params aimed at it and cannot peek
+     * another step's (unlike an artifact, which every later step sees). The target step's critic does see
+     * them. Durable: ridden in the state snapshot, restored on resume; each set is also journaled (a
+     * `param` trace event) so it can be inspected.
      *
-     * @var array<string, mixed>
+     * @var array<string, array<string, mixed>> targetStep => (name => value)
      */
     private array $stepParams = [];
 
@@ -348,24 +350,30 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Read a parameter: one a previous step pinned with {@see setParam()} first, else a run INPUT param
-     * (the value that makes the workflow describe one task, not a class of them). Null if neither set it.
+     * Read a parameter addressed to the CURRENTLY running step (pinned by an earlier step via
+     * {@see setParam()}), else a run INPUT param (the value that makes the workflow describe one task).
+     * Null if neither set it. A step sees ONLY params aimed at it — it cannot read those sent to another
+     * step.
      */
     protected function param(string $name): mixed
     {
-        return $this->stepParams[$name] ?? $this->params[$name] ?? null;
+        return $this->stepParams[$this->currentStep][$name] ?? $this->params[$name] ?? null;
     }
 
     /**
-     * Pin a parameter for LATER steps — a concrete value (path, count, id, flag) the next steps read back
-     * with {@see param()} and use in code. The THIRD inter-step channel beside artifact (content for the
-     * model/critic) and handoff (a prose baton): use this when a step decides an exact value the code of a
-     * later step needs deterministically. Durable — saved with the step's snapshot, so it survives a
-     * resume. Entirely optional: a workflow that passes nothing between steps this way is perfectly valid.
+     * Pin a parameter FOR A SPECIFIC step ($forStep — the target step's method name): a concrete value
+     * (path, count, id, flag) that step reads back with {@see param()} and uses in code. The THIRD
+     * inter-step channel beside artifact (content for the model/critic) and handoff (a prose baton), and
+     * the one that is ADDRESSED: unlike an artifact (global — every later step and the critic see it), only
+     * $forStep reads a param; no other step can peek (the target step's OWN critic does see it). Use it
+     * when a step decides an exact value the code of a particular later step needs deterministically.
+     * Durable — saved with the snapshot, survives a resume — and journaled so it can be inspected.
+     * Entirely optional: a workflow that passes nothing this way is perfectly valid.
      */
-    protected function setParam(string $name, mixed $value): void
+    protected function setParam(string $forStep, string $name, mixed $value): void
     {
-        $this->stepParams[$name] = $value;
+        $this->stepParams[$forStep][$name] = $value;
+        $this->tracer()?->param($forStep, $name, $value);
     }
 
     /**
@@ -801,6 +809,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
             . "The step's output to review — its artifact(s):\n{$output}\n\n"
+            . $this->renderParams($this->stepParams[$name] ?? [])
             . "If the work fully satisfies the rubric, reply with exactly: OK\n"
             . 'Otherwise reply with the concrete problems that must be fixed.',
             null,   // every tool — a critic is a normal AI and must be able to verify, not just read
@@ -808,6 +817,28 @@ abstract class WorkflowAbstract implements WorkflowInterface
         ));
 
         return strtoupper($verdict) === 'OK' ? null : $verdict;
+    }
+
+    /**
+     * Render the concrete params addressed to a step for its critic — so the reviewer sees the exact
+     * inputs an earlier step pinned for this one. Empty string when there are none.
+     *
+     * @param array<string, mixed> $params
+     */
+    private function renderParams(array $params): string
+    {
+        if ($params === []) {
+            return '';
+        }
+
+        $lines = [];
+
+        foreach ($params as $key => $value) {
+            $lines[] = "- {$key} = " . json_encode($value, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        }
+
+        return "Parameters addressed to this step (concrete values an earlier step pinned for it):\n"
+            . implode("\n", $lines) . "\n\n";
     }
 
     /**
