@@ -79,6 +79,7 @@ final class AgentErrors
     private static function isContextOverflow(string $message): bool
     {
         $message = strtolower($message);
+
         foreach (['context length', 'context window', 'maximum context', 'prompt is too long', 'too many tokens', 'reduce the length'] as $needle) {
             if (str_contains($message, $needle)) {
                 return true;

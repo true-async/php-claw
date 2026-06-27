@@ -91,6 +91,7 @@ final class ClaudeAgent extends AbstractAgent
                     $textBlock = new TextBlock((string) ($block['text'] ?? ''));
                     $content[] = $textBlock;
                     $texts[] = $textBlock->text;
+
                     break;
 
                 case 'tool_use':
@@ -101,6 +102,7 @@ final class ClaudeAgent extends AbstractAgent
                     );
                     $content[] = $useBlock;
                     $toolCalls[] = $useBlock;
+
                     break;
             }
         }

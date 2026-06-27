@@ -28,6 +28,7 @@ abstract class AbstractAgent implements AgentInterface
                 return $this->attempt($request);
             } catch (AgentException $e) {
                 $delay = $this->retryPolicy->delayBeforeRetry($e, $attempt);
+
                 if ($delay === null) {
                     throw $e;
                 }
@@ -56,6 +57,7 @@ abstract class AbstractAgent implements AgentInterface
     {
         try {
             $response = $this->http->post($url, $body, $headers);
+
             if (!$response->isOk()) {
                 throw AgentErrors::fromResponse($response);
             }

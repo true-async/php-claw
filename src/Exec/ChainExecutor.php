@@ -34,6 +34,7 @@ final readonly class ChainExecutor implements ExecutorInterface
     public function call(ToolCall $call): ToolResultBlock
     {
         $next = $this->terminal;
+
         foreach (array_reverse($this->middlewares) as $middleware) {
             $next = static fn (ToolCall $c): ToolResultBlock => $middleware->handle($c, $next);
         }

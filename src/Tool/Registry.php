@@ -50,6 +50,7 @@ final class Registry
     public function specs(): array
     {
         $specs = [];
+
         foreach ($this->tools as $tool) {
             $specs[] = new ToolSpec($tool->name(), $tool->description(), $tool->inputSchema());
         }
@@ -72,6 +73,7 @@ final class Registry
     public function only(array $names): self
     {
         $subset = new self();
+
         foreach ($names as $name) {
             $subset->add($this->get($name));
         }
@@ -88,6 +90,7 @@ final class Registry
     public function agents(): array
     {
         $agents = [];
+
         foreach ($this->tools as $tool) {
             if ($tool instanceof AgentToolInterface) {
                 $agents[] = $tool;

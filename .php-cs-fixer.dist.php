@@ -18,6 +18,11 @@ return (new PhpCsFixer\Config())
         'single_quote' => true,
         'trailing_comma_in_multiline' => true,
         'declare_strict_types' => true,
+        // a blank line before these statements => a blank line after a control-structure's closing `}`
+        'blank_line_before_statement' => ['statements' => [
+            'break', 'continue', 'declare', 'do', 'for', 'foreach', 'if',
+            'return', 'switch', 'throw', 'try', 'while', 'yield', 'yield_from',
+        ]],
         'phpdoc_align' => false,
         'phpdoc_separation' => false,
         'no_superfluous_phpdoc_tags' => false,

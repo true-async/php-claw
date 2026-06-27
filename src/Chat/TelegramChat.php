@@ -71,6 +71,7 @@ final class TelegramChat implements ChatInterface
     public function ingest(array $update): void
     {
         $callback = $update['callback_query'] ?? null;
+
         if (\is_array($callback)) {
             $this->ingestCallback($callback);
 
@@ -78,17 +79,20 @@ final class TelegramChat implements ChatInterface
         }
 
         $message = $update['message'] ?? null;
+
         if (!\is_array($message)) {
             return;
         }
 
         $chat = \is_array($message['chat'] ?? null) ? $message['chat'] : [];
+
         if (($chat['type'] ?? null) !== 'private') {
             return;   // DMs only for now
         }
 
         $from = \is_array($message['from'] ?? null) ? $message['from'] : [];
         $userId = (int) ($from['id'] ?? 0);
+
         if (!($this->isAllowed)($userId)) {
             // Silent drop. Log the id so the owner can find it for the allowlist.
             fwrite(STDERR, "telegram: dropped message from unauthorized id {$userId}\n");
@@ -97,12 +101,14 @@ final class TelegramChat implements ChatInterface
         }
 
         $text = $message['text'] ?? null;
+
         if (!\is_string($text) || trim($text) === '') {
             return;
         }
 
         $chatId = (int) ($chat['id'] ?? $userId);
         $conversation = $this->conversations[$chatId] ?? null;
+
         if ($conversation === null) {
             $conversation = new TelegramConversation($chatId, $this->client);
             $this->conversations[$chatId] = $conversation;
@@ -121,11 +127,13 @@ final class TelegramChat implements ChatInterface
     private function ingestCallback(array $callback): void
     {
         $from = \is_array($callback['from'] ?? null) ? $callback['from'] : [];
+
         if (!($this->isAllowed)((int) ($from['id'] ?? 0))) {
             return;
         }
 
         $id = (string) ($callback['id'] ?? '');
+
         if ($id !== '') {
             $this->client->answerCallbackQuery($id);
         }
@@ -136,6 +144,7 @@ final class TelegramChat implements ChatInterface
         $data = $callback['data'] ?? null;
 
         $conversation = $this->conversations[$chatId] ?? null;
+
         if ($conversation !== null && \is_string($data)) {
             $conversation->deliver($data);
         }

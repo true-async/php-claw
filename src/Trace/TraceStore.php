@@ -44,6 +44,7 @@ final class TraceStore implements TraceSinkInterface
     private static function ensureColumn(\PDO $pdo, string $column, string $decl): void
     {
         $info = $pdo->query('PRAGMA table_info(trace)');
+
         if ($info === false) {
             return;
         }
@@ -74,5 +75,11 @@ final class TraceStore implements TraceSinkInterface
             'data' => json_encode($record->event()->data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
             'at' => $record->at(),
         ]);
+    }
+
+    /** The autoincrement `seq` of the row the last {@see write()} inserted on this connection — the dashboard's cursor. */
+    public function lastSeq(): int
+    {
+        return (int) $this->pdo->lastInsertId();
     }
 }

@@ -49,6 +49,7 @@ final readonly class ReadFileTool implements ToolInterface
     public function handle(array $input): string
     {
         $path = (string) ($input['path'] ?? '');
+
         if ($path === '') {
             throw new ToolException('read_file: "path" is required');
         }
@@ -56,6 +57,7 @@ final readonly class ReadFileTool implements ToolInterface
         $real = $this->workspace->resolveExisting($path);
 
         $data = file_get_contents($real, false, null, 0, $this->maxBytes + 1);
+
         if ($data === false) {
             throw new ToolException("read_file: cannot read {$path}");
         }

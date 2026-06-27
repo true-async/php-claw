@@ -35,6 +35,7 @@ final class Policy
     public function check(ToolInterface $tool, array $input): Verdict
     {
         $command = isset($input['command']) && \is_string($input['command']) ? $input['command'] : '';
+
         if ($command !== '' && $this->isDenied($command)) {
             return Verdict::deny('command matches a hard-blocked pattern');
         }
@@ -49,6 +50,7 @@ final class Policy
     private function isDenied(string $command): bool
     {
         $haystack = strtolower($command);
+
         foreach (self::DENYLIST as $needle) {
             if (str_contains($haystack, strtolower($needle))) {
                 return true;

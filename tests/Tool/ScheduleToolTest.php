@@ -38,6 +38,7 @@ final class ScheduleToolTest
     public function rejectsNonPositiveDelay(): void
     {
         $threw = false;
+
         try {
             new ScheduleTool(static function (string $m): void {
             })->handle(['after_seconds' => 0, 'message' => 'x']);
@@ -52,6 +53,7 @@ final class ScheduleToolTest
     public function rejectsEmptyMessage(): void
     {
         $threw = false;
+
         try {
             new ScheduleTool(static function (string $m): void {
             })->handle(['after_seconds' => 1, 'message' => '  ']);

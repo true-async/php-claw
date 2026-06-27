@@ -133,6 +133,31 @@ final class Tracer
         $this->event(new TraceEvent('handoff', Level::Notice, ['text' => $text]));
     }
 
+    /**
+     * A run paused for a human: record the escalation/question and return its span id. The dashboard
+     * surfaces the latest `question` with no matching {@see answer()} as the issue's open gate, and the
+     * id lets the answer point back at exactly this question (one run can gate more than once).
+     */
+    public function question(string $prompt): int
+    {
+        $id = ++$this->seq;
+        $this->emit('event', $id, new TraceEvent('question', Level::Notice, ['prompt' => $prompt]));
+
+        return $id;
+    }
+
+    /** The human's reply to a {@see question()}, recorded against its id — closes that gate in the journal. */
+    public function answer(int $questionId, string $text): void
+    {
+        $this->event(new TraceEvent('answer', Level::Notice, ['ref' => $questionId, 'text' => $text]));
+    }
+
+    /** The run jumped BACK to an earlier step (e.g. a review sending the work back) — recorded with the reason. */
+    public function back(string $from, string $to, string $reason): void
+    {
+        $this->event(new TraceEvent('back', Level::Notice, ['from' => $from, 'to' => $to, 'reason' => $reason]));
+    }
+
     private function open(TraceEvent $event): int
     {
         $id = ++$this->seq;
@@ -155,7 +180,7 @@ final class Tracer
         foreach ($this->sinks as $sink) {
             try {
                 $sink->write($record);
-            } catch (\Throwable) {
+            } catch (\Exception) {
                 // Tracing must never bring the run down.
             }
         }

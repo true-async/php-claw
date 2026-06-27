@@ -48,6 +48,7 @@ final readonly class BashTool implements ToolInterface
     public function handle(array $input): string
     {
         $command = (string) ($input['command'] ?? '');
+
         if (trim($command) === '') {
             throw new ToolException('bash: "command" is required');
         }
@@ -71,6 +72,7 @@ final readonly class BashTool implements ToolInterface
         $shell = DIRECTORY_SEPARATOR === '\\' ? 'sh' : '/bin/sh';
 
         $process = proc_open([$shell, '-c', $command], $descriptors, $pipes, $this->cwd, $env);
+
         if (!\is_resource($process)) {
             throw new ToolException('bash: failed to start the command');
         }

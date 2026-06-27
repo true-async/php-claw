@@ -33,6 +33,7 @@ final class EscalatingSpeaker implements SpeakerInterface
     {
         foreach ($this->tiers as $tier) {
             $answer = $tier->reply($incoming);
+
             if ($answer !== null) {
                 return $answer;   // this tier handled it
             }

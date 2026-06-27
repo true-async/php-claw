@@ -175,6 +175,7 @@ final class ClaudeAgentTest
         $agent = new ClaudeAgent($http, 'sk-test');
 
         $threw = false;
+
         try {
             $agent->send(new AgentRequest('m', [Message::userText('x')]));
         } catch (AgentException $e) {
@@ -199,6 +200,7 @@ final class ClaudeAgentTest
         );
 
         $caught = null;
+
         try {
             $agent->send(new AgentRequest('m', [Message::userText('x')]));
         } catch (\Throwable $e) {
@@ -221,6 +223,7 @@ final class ClaudeAgentTest
         );
 
         $threw = false;
+
         try {
             $agent->send(new AgentRequest('m', [Message::userText('x')]));
         } catch (AgentException $e) {

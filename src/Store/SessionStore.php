@@ -58,6 +58,7 @@ final class SessionStore
     public function load(): array
     {
         $stmt = $this->pdo->query('SELECT role, content FROM messages ORDER BY seq');
+
         if ($stmt === false) {
             return [];   // unreachable under ERRMODE_EXCEPTION; kept because query() is typed PDOStatement|false
         }
@@ -112,6 +113,7 @@ final class SessionStore
     public function auditTrail(): array
     {
         $stmt = $this->pdo->query('SELECT call, is_error, result FROM audit ORDER BY id');
+
         if ($stmt === false) {
             return [];   // unreachable under ERRMODE_EXCEPTION; kept because query() is typed PDOStatement|false
         }

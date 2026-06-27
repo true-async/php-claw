@@ -84,6 +84,7 @@ final class AbstractAgentTest
     private function assertThrows(ScriptedRetryAgent $agent): void
     {
         $threw = false;
+
         try {
             $agent->send($this->request());
         } catch (\Claw\Exceptions\AgentException $e) {

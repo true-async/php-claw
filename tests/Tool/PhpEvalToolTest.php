@@ -35,6 +35,7 @@ final class PhpEvalToolTest
     private function assertToolError(callable $fn): void
     {
         $threw = false;
+
         try {
             $fn();
         } catch (ToolException $e) {

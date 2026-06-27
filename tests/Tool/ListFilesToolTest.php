@@ -69,6 +69,7 @@ final class ListFilesToolTest
     private function assertToolError(callable $fn): void
     {
         $threw = false;
+
         try {
             $fn();
         } catch (ToolException $e) {

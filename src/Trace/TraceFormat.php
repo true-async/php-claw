@@ -95,6 +95,7 @@ final class TraceFormat
 
         $names = [];
         $calls = $data['tool_calls'] ?? [];
+
         if (\is_array($calls)) {
             foreach ($calls as $call) {
                 if (\is_array($call) && isset($call['name']) && \is_scalar($call['name'])) {

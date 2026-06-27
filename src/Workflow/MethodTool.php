@@ -38,8 +38,10 @@ final class MethodTool implements ToolInterface
     {
         $properties = [];
         $required = [];
+
         foreach ($this->method->getParameters() as $param) {
             $properties[$param->getName()] = ['type' => self::jsonType($param->getType())];
+
             if (!$param->isOptional()) {
                 $required[] = $param->getName();
             }
@@ -57,8 +59,10 @@ final class MethodTool implements ToolInterface
     public function handle(array $input): string
     {
         $args = [];
+
         foreach ($this->method->getParameters() as $param) {
             $name = $param->getName();
+
             if (\array_key_exists($name, $input)) {
                 $args[] = $input[$name];
             } elseif ($param->isOptional()) {

@@ -38,6 +38,7 @@ final class ProjectStore
     public static function init(string $projectsDir, string $projectPath): Project
     {
         $abs = realpath($projectPath);
+
         if ($abs === false || !is_dir($abs)) {
             throw new ClawException("project folder does not exist: {$projectPath}");
         }
@@ -48,11 +49,13 @@ final class ProjectStore
 
         $id = self::keyFor($abs);
         $dbPath = self::dbPath($projectsDir, $id);
+
         if (is_file($dbPath)) {
             throw new ClawException("project already initialized: {$abs} ({$dbPath})");
         }
 
         $name = basename($abs);
+
         try {
             $pdo = self::open($dbPath);
             self::ensureSchema($pdo);
@@ -88,16 +91,19 @@ final class ProjectStore
     public static function discover(string $projectsDir, string $startDir): ?self
     {
         $dir = realpath($startDir);
+
         if ($dir === false) {
             return null;
         }
 
         while (true) {
             $dbPath = self::dbPath($projectsDir, self::keyFor($dir));
+
             if (is_file($dbPath)) {
                 return self::openHandle($dbPath);
             }
             $parent = \dirname($dir);
+
             if ($parent === $dir) {   // reached the filesystem root without a match
                 return null;
             }
@@ -105,10 +111,82 @@ final class ProjectStore
         }
     }
 
+    /** Open a registered project by its key (the db filename), or null if there is no such db. */
+    public static function openByKey(string $projectsDir, string $key): ?self
+    {
+        $dbPath = self::dbPath($projectsDir, basename($key));
+
+        return is_file($dbPath) ? self::openHandle($dbPath) : null;
+    }
+
+    /**
+     * Every registered project's metadata — for the dashboard's project list. A db that is not a valid
+     * project (no metadata row) is skipped rather than failing the whole listing.
+     *
+     * @return list<Project>
+     */
+    public static function all(string $projectsDir): array
+    {
+        $projects = [];
+
+        foreach (glob($projectsDir . '/*.db') ?: [] as $dbPath) {
+            try {
+                $projects[] = self::openHandle($dbPath)->project;
+            } catch (\Exception) {
+                continue;
+            }
+        }
+
+        return $projects;
+    }
+
     /** This project's metadata (id, name, the external folder path, description). */
     public function project(): Project
     {
         return $this->project;
+    }
+
+    /**
+     * Every issue in the project, oldest first — for the dashboard board. Runs are read separately
+     * ({@see runsFor()}), so this stays a single cheap query.
+     *
+     * @return list<Issue>
+     */
+    public function allIssues(): array
+    {
+        $stmt = $this->pdo->query('SELECT id, title, description, status FROM issues ORDER BY id');
+        $rows = $stmt === false ? [] : $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+        return array_values(array_map(
+            fn (array $row): Issue => new Issue(
+                (string) $row['id'],
+                $this->project->id,
+                (string) $row['title'],
+                (string) $row['description'],
+                IssueStatus::fromName((string) $row['status']),
+            ),
+            $rows,
+        ));
+    }
+
+    /**
+     * The runs spawned for an issue, oldest first, with their status — for the dashboard's run list.
+     *
+     * @return list<array{id: string, workflow: string, status: string}>
+     */
+    public function runsFor(string $issueId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT id, workflow, status FROM runs WHERE issue_id = ? ORDER BY id');
+        $stmt->execute([$issueId]);
+
+        return array_values(array_map(
+            static fn (array $row): array => [
+                'id' => (string) $row['id'],
+                'workflow' => (string) $row['workflow'],
+                'status' => (string) $row['status'],
+            ],
+            $stmt->fetchAll(\PDO::FETCH_ASSOC),
+        ));
     }
 
     /** The single open connection, shared with the run-state store and the tracer. */
@@ -126,6 +204,7 @@ final class ProjectStore
     public function addIssue(string $title, string $description = ''): Issue
     {
         $title = trim($title);
+
         if ($title === '') {
             throw new ClawException('issue title must not be empty');
         }
@@ -156,6 +235,7 @@ final class ProjectStore
             $stmt = $this->pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
             $stmt->execute(['id' => $issueId]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
             if (!\is_array($row)) {
                 throw new ClawException("issue #{$issueId} not found in project {$this->project->id}");
             }
@@ -208,6 +288,7 @@ final class ProjectStore
         $stmt->execute();
 
         $runs = [];
+
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
             $runs[] = [
                 'id' => (string) ($row['id'] ?? ''),
@@ -256,6 +337,7 @@ final class ProjectStore
 
         $stmt = $pdo->query('SELECT id, name, path, description FROM project LIMIT 1');
         $row = $stmt === false ? false : $stmt->fetch(\PDO::FETCH_ASSOC);
+
         if (!\is_array($row)) {
             throw new ClawException("project has no metadata: {$dbPath}");
         }
@@ -278,6 +360,7 @@ final class ProjectStore
     {
         $pdo = new \PDO('sqlite:' . $dbPath);
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->exec('PRAGMA busy_timeout=4000');   // ride out a concurrent writer (the run) rather than fail
 
         return $pdo;
     }

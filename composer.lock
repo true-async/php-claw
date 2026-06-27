@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "f3461a6f1cf42c64eaae189640509def",
+    "content-hash": "b154077932d56629fc586408861ea928",
     "packages": [
         {
             "name": "composer/ca-bundle",
@@ -3899,16 +3899,16 @@
         },
         {
             "name": "true-async/ide-helper",
-            "version": "v0.7.2",
+            "version": "v0.7.3",
             "source": {
                 "type": "git",
                 "url": "https://github.com/true-async/ide-helper.git",
-                "reference": "3b2e280cf82819fffd1ea742c54a22393721d512"
+                "reference": "87e785fb936fbcd0bf2e001f1c37299ad985aae4"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/true-async/ide-helper/zipball/3b2e280cf82819fffd1ea742c54a22393721d512",
-                "reference": "3b2e280cf82819fffd1ea742c54a22393721d512",
+                "url": "https://api.github.com/repos/true-async/ide-helper/zipball/87e785fb936fbcd0bf2e001f1c37299ad985aae4",
+                "reference": "87e785fb936fbcd0bf2e001f1c37299ad985aae4",
                 "shasum": ""
             },
             "type": "library",
@@ -3928,9 +3928,9 @@
             ],
             "support": {
                 "issues": "https://github.com/true-async/ide-helper/issues",
-                "source": "https://github.com/true-async/ide-helper/tree/v0.7.2"
+                "source": "https://github.com/true-async/ide-helper/tree/v0.7.3"
             },
-            "time": "2026-06-20T17:30:13+00:00"
+            "time": "2026-06-27T04:31:30+00:00"
         },
         {
             "name": "yiisoft/injector",

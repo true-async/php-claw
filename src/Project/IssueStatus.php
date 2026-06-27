@@ -6,14 +6,18 @@ namespace Claw\Project;
 
 use Claw\Exceptions\ClawException;
 
-/** Lifecycle of an issue: tracked above the level of a single workflow run. */
-enum IssueStatus
+/**
+ * Lifecycle of an issue: tracked above the level of a single workflow run. The case NAME is what the
+ * project db persists (see {@see ProjectStore}); the backing VALUE is the dashboard's lowercase form,
+ * so the API serializes a status straight from the enum with no second mapping.
+ */
+enum IssueStatus: string
 {
-    case Open;
-    case InProgress;
-    case WaitingHuman;
-    case Done;
-    case Closed;
+    case Open = 'open';
+    case InProgress = 'inprogress';
+    case WaitingHuman = 'waiting';
+    case Done = 'done';
+    case Closed = 'closed';
 
     /**
      * Resolve a case by its name (how the status round-trips through the project db). An unrecognized

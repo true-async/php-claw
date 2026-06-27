@@ -46,33 +46,40 @@ final readonly class ListFilesTool implements ToolInterface
     public function handle(array $input): string
     {
         $path = (string) ($input['path'] ?? '.');
+
         if ($path === '') {
             $path = '.';
         }
 
         $real = $this->workspace->resolveExisting($path);
+
         if (!is_dir($real)) {
             throw new ToolException("list_files: not a directory: {$path}");
         }
 
         $entries = scandir($real);
+
         if ($entries === false) {
             throw new ToolException("list_files: cannot read directory: {$path}");
         }
 
         $entries = array_values(array_filter($entries, static fn (string $e): bool => $e !== '.' && $e !== '..'));
+
         if ($entries === []) {
             return '(empty directory)';
         }
 
         $lines = [];
+
         foreach ($entries as $i => $entry) {
             if ($i >= $this->maxEntries) {
                 $lines[] = "... [truncated at {$this->maxEntries} entries]";
+
                 break;
             }
 
             $full = $real . DIRECTORY_SEPARATOR . $entry;
+
             if (is_dir($full)) {
                 $lines[] = $entry . '/';
             } else {

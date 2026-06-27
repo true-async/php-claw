@@ -32,6 +32,7 @@ final class RegistryTest
     public function unknownToolThrows(): void
     {
         $threw = false;
+
         try {
             new Registry()->get('nope');
         } catch (ToolException $e) {
@@ -96,6 +97,7 @@ final class RegistryTest
         $registry->add(new StubTool('read'));
 
         $threw = false;
+
         try {
             $registry->only(['read', 'ghost']);
         } catch (ToolException $e) {

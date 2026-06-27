@@ -49,6 +49,7 @@ final class TraceReader
     public function stepHistory(string $runId, string $name): string
     {
         $bounds = $this->stepBounds($runId, $name);
+
         if ($bounds === null) {
             return "No step '{$name}' has run in this workflow yet.";
         }
@@ -77,6 +78,7 @@ final class TraceReader
     {
         if ($step !== '') {
             $bounds = $this->stepBounds($runId, $step);
+
             if ($bounds === null) {
                 return "No step '{$step}' has run in this workflow yet.";
             }
@@ -89,6 +91,7 @@ final class TraceReader
         }
 
         $lines = [];
+
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
             $data = json_decode(TraceFormat::str($row, 'data'), true);
             $data = \is_array($data) ? $data : [];
@@ -96,6 +99,87 @@ final class TraceReader
         }
 
         return $lines === [] ? 'No artifacts have been recorded in this workflow yet.' : implode("\n", $lines);
+    }
+
+    /**
+     * The run's trace rows past a seq cursor — the dashboard's replay and `?since=` poll. `seq` is a
+     * global monotonic autoincrement, so `seq > since` is a clean tail.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function tail(string $runId, int $since): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT seq, span_id, parent_id, depth, phase, type, level, data
+             FROM trace WHERE run_id = :r AND seq > :s ORDER BY seq',
+        );
+        $stmt->execute(['r' => $runId, 's' => $since]);
+
+        $rows = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $rows[] = [
+                'seq' => (int) $row['seq'],
+                'spanId' => (int) $row['span_id'],
+                'parentId' => $row['parent_id'] !== null ? (int) $row['parent_id'] : null,
+                'depth' => (int) $row['depth'],
+                'phase' => (string) $row['phase'],
+                'type' => (string) $row['type'],
+                'level' => (int) $row['level'],
+                'data' => json_decode((string) $row['data'], true),
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Input/output tokens summed over the run's model replies — the run's cost so far.
+     *
+     * @return array{0: int, 1: int}
+     */
+    public function tokens(string $runId): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT COALESCE(SUM(json_extract(data, '$.usage.in')), 0)  AS tokens_in,
+                    COALESCE(SUM(json_extract(data, '$.usage.out')), 0) AS tokens_out
+             FROM trace WHERE run_id = ? AND type = 'reply'",
+        );
+        $stmt->execute([$runId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: ['tokens_in' => 0, 'tokens_out' => 0];
+
+        return [(int) $row['tokens_in'], (int) $row['tokens_out']];
+    }
+
+    /**
+     * The run's artifacts as structured records (name / kind / body) — for the dashboard, distinct from
+     * {@see artifacts()} which renders them as a console string.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function artifactRecords(string $runId): array
+    {
+        $stmt = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = ? AND type = 'artifact' ORDER BY seq");
+        $stmt->execute([$runId]);
+
+        $records = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $json) {
+            $artifact = json_decode((string) $json, true);
+
+            if (!\is_array($artifact)) {
+                continue;
+            }
+
+            $records[] = [
+                'name' => (string) ($artifact['label'] ?? ''),
+                'kind' => (string) ($artifact['kind'] ?? 'file'),
+                'meta' => '',
+                'body' => (string) ($artifact['value'] ?? ''),
+            ];
+        }
+
+        return $records;
     }
 
     /** The workflow's name and the steps it has run so far (in order) — a quick map of the run. */
@@ -111,9 +195,11 @@ final class TraceReader
         $steps = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = :r AND type = 'step' AND phase = 'enter' ORDER BY seq");
         $steps->execute(['r' => $runId]);
         $names = [];
+
         foreach ($steps->fetchAll(\PDO::FETCH_ASSOC) as $stepRow) {
             $decoded = json_decode(TraceFormat::str($stepRow, 'data'), true);
             $stepName = \is_array($decoded) ? TraceFormat::str($decoded, 'name') : '';
+
             if ($stepName !== '' && !\in_array($stepName, $names, true)) {
                 $names[] = $stepName;
             }
@@ -136,6 +222,7 @@ final class TraceReader
         );
         $enter->execute(['r' => $runId, 'n' => $name]);
         $row = $enter->fetch(\PDO::FETCH_ASSOC);
+
         if ($row === false) {
             return null;
         }
@@ -159,6 +246,7 @@ final class TraceReader
     private function renderRows(array $rows, bool $color = false): string
     {
         $lines = [];
+
         foreach ($rows as $row) {
             if (!\is_array($row)) {
                 continue;

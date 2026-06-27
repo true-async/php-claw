@@ -62,6 +62,7 @@ final readonly class ScheduleTool implements ToolInterface
         if ($after <= 0) {
             throw new ToolException('schedule: "after_seconds" must be greater than zero');
         }
+
         if ($message === '') {
             throw new ToolException('schedule: "message" is required');
         }

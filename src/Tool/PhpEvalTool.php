@@ -43,6 +43,7 @@ final readonly class PhpEvalTool implements ToolInterface
     public function handle(array $input): string
     {
         $code = trim((string) ($input['code'] ?? ''));
+
         if ($code === '') {
             throw new ToolException('php_eval: "code" is required');
         }

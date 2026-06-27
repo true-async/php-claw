@@ -52,6 +52,7 @@ final class CurlHttpClient implements HttpClientInterface
             CURLOPT_TIMEOUT_MS => $this->timeoutMs,
             CURLOPT_HEADERFUNCTION => static function ($_handle, string $header) use (&$responseHeaders): int {
                 $colon = strpos($header, ':');
+
                 if ($colon !== false) {
                     $name = strtolower(trim(substr($header, 0, $colon)));
                     $responseHeaders[$name] = trim(substr($header, $colon + 1));

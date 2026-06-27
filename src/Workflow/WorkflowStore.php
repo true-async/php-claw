@@ -48,11 +48,13 @@ final class WorkflowStore
         $this->assertValidName($name);
 
         $dir = $shared ? $this->commonDir() : $this->sessionDir();
+
         if (!is_dir($dir) && !mkdir($dir, 0o775, true) && !is_dir($dir)) {
             throw new WorkflowException("cannot create workflow directory: {$dir}");
         }
 
         $path = $this->path($name, $shared);
+
         if (file_put_contents($path, $code) === false) {
             throw new WorkflowException("cannot write workflow: {$path}");
         }
@@ -121,6 +123,7 @@ final class WorkflowStore
 
             $relative = substr($class, \strlen(self::NS_ROOT) + 1);
             $path = $base . '/' . str_replace('\\', '/', $relative) . '.php';
+
             if (is_file($path)) {
                 require $path;
             }

@@ -36,6 +36,7 @@ final class ConsoleTraceSink implements TraceSinkInterface
         }
 
         $event = $record->event();
+
         if (!$event->level->passes($this->threshold)) {
             return;
         }

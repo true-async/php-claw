@@ -106,39 +106,19 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $this->workerTier = $this->difficulty === 'simple' ? 'worker' : 'worker-smart';
     }
 
-    #[Step]
-    protected function draft(): void
-    {
-        $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));   // [] = return code, don't act
-    }
-
     /**
-     * The supervisor reviews the finished solver before it is saved: not "is it valid PHP" (the
-     * validator does that) but "will it actually work" — does every step do real work via tools/ai
-     * rather than return a placeholder, is each critic name backed by criticRules(), is the task
-     * truly solved. On a rejection, one strong-tier revision pass folds the findings back in.
+     * Write the solver, then have it reviewed by the `solverReview` critic — "will it actually solve the
+     * task", not "is it valid PHP" (the validator covers that). The critic gates the step, so a rejected
+     * draft RE-RUNS here (continuing this conversation, see {@see WorkflowAbstract::ai()}) and is re-judged
+     * — the worker's fix can't slip through unreviewed, which is how a bad draft used to escape.
      */
-    #[Step]
-    protected function review(): void
+    #[Step(critic: 'solverReview')]
+    protected function draft(): string
     {
-        $verdict = trim($this->ai(
-            'You are a senior engineer reviewing a GENERATED solver workflow before it is allowed to '
-            . 'run. Judge whether it will actually solve the task — not its syntax. Reject it if any '
-            . 'step just returns a placeholder string instead of doing real work via $this->tool()/'
-            . "\$this->ai(), if a `#[Step(critic: '<name>')]` has no matching entry in criticRules(), "
-            . "or if the recipe is not genuinely carried out.\n\n"
-            . "If it is genuinely ready to run, reply with exactly: OK\n"
-            . "Otherwise reply with the concrete problems that must be fixed.\n\n"
-            . "The task:\n{$this->taskSummary()}\n\nThe workflow code:\n{$this->code}",
-            [],
-            'supervisor-smart',
-        ));
+        // [] = the model returns the class CODE, it does not act with tools
+        $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));
 
-        if (strtoupper(trim($verdict)) === 'OK') {
-            return;
-        }
-
-        $this->code = $this->reviseCode("A senior reviewer rejected the workflow you wrote. Problems to fix:\n{$verdict}");
+        return $this->code;   // the critic judges this; a rejection re-runs draft with the findings
     }
 
     #[Step]
@@ -147,8 +127,28 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $this->code = $this->saveGeneratedWorkflow(
             (string) $this->param('solverName'),
             $this->code,
-            fn (string $rejection): string => $this->reviseCode("The workflow class you wrote was rejected: {$rejection}"),
+            fn (string $rejection): string => $this->reviseCode("The class you wrote was rejected: {$rejection}"),
         );
+    }
+
+    /**
+     * The rubric the `solverReview` critic judges the {@see draft()} against: will the generated solver
+     * ACTUALLY solve the task. Spelled out in full because the reviewer is judged only against this text.
+     *
+     * @return array<string, string>
+     */
+    protected function criticRules(): array
+    {
+        return [
+            'solverReview' => 'Judge the workflow code in the step result: will it ACTUALLY solve the task '
+                . 'below — not whether it is valid PHP (the validator covers that). REJECT it if any step '
+                . 'just returns a placeholder string instead of doing real work via $this->tool()/$this->ai(); '
+                . "if a `#[Step(critic: '<name>')]` has no matching entry in criticRules(); if any step calls "
+                . "`done`/\$this->tool('done') before the deliverable is actually built (e.g. `done` hardcoded "
+                . 'in validate/design ends the run having done NOTHING — `done` means the whole task is solved, '
+                . 'not that a step finished); or if the recipe is not genuinely carried out.'
+                . "\n\nThe task:\n{$this->taskSummary()}",
+        ];
     }
 
     /** The issue's title and description as a compact task brief — shared by the planning steps. */
@@ -163,6 +163,15 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
 
     private function draftPrompt(): string
     {
+        // A re-run after the critic rejected the draft: the model still holds its previous attempt in the
+        // continued conversation, so don't re-state the whole brief — just hand it the findings to fix.
+        $critique = $this->critique();
+
+        if ($critique !== null) {
+            return "A reviewer REJECTED the workflow you just wrote:\n\n{$critique}\n\n"
+                . 'Rewrite the FULL class fixing exactly those problems, keeping the rest. Reply with only the PHP code.';
+        }
+
         $namespace = (string) $this->param('solverNamespace');
         $class = (string) $this->param('solverName');
         $toolDocs = $this->availableTools();
@@ -222,7 +231,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - file paths are relative to the project root, EXACTLY as list_files shows them (e.g. 'src/Calculator.php', NOT 'Calculator.php'); when unsure of a path, call list_files at run time inside a step rather than hardcoding a guess
             - `\$this->tool(...)` returns the tool's raw output as a STRING and `\$this->ai(...)` returns the model's text as a STRING — never index them like arrays (no `\$result['content']`); parse the string if you need to
             - a tool error does NOT throw — `\$this->tool(...)` returns the failure as a string starting `tool '<name>' failed: ...`; check for that and recover (e.g. a wrong path: call list_files and retry) or fold the message into the next `\$this->ai(...)` so the model fixes it, rather than blindly using a failed result
-            - a step does not have to be exhausted: if the task is genuinely solved (and verified) before the planned steps run out, tell the step's model it may call the `done` tool with a short summary to finish the workflow immediately and skip the rest — a small task should not be dragged through every phase
+            - `done` ENDS THE WHOLE RUN, it does NOT mark a step complete. A step completes by RETURNING; calling `done` stops the entire workflow on the spot and skips every remaining step. So `done` means "the task's actual deliverable now exists and has been verified" — NEVER "this phase is finished". NEVER put `\$this->tool('done', ...)` in an early step (validate/design/assess) or in a PHP branch: that aborts the run before the implement step ever creates anything (e.g. a validate that calls `done` when "no conflict" finishes having done NOTHING). The only legitimate `done` is the model deciding, INSIDE an `ai()` exchange AFTER it has produced and verified the change, that the task is fully solved and the rest is redundant — so offer it by listing `done` among that step's tools, do not hardcode it. When unsure, just `return` and let the next step run.
             - each step's `ai()` starts fresh — it does NOT see earlier steps, and the engine carries NOTHING between steps automatically. YOU decide, per step, what prior context it needs and have it pulled in. The door is the `recall` tool the step's model can call: `recall(what='task')` re-reads the issue brief, `what='workflow'` lists the steps so far, `what='step', name='design'` returns a sibling step's history, `what='artifacts', name='design'` its artifacts, `what='tool', name='bash'` a tool's calls. So when a step builds on an earlier one, say so in its prompt (e.g. "first call recall(what='artifacts', name='implement') to see what was changed, then ...") — do not assume the earlier work is visible, and do not re-derive what a prior step already produced
             - THE BATON IS AUTOMATIC: after each step the engine EXPLICITLY asks the model to form a handoff (a summary of what the step did + the findings the next step must watch for), and feeds it into the next step's context as "the previous step handed this to you". You do NOT write handoff code — just make each step do its work well and `return` what it produced (so the engine has good material to form the handoff from). The next step can rely on that incoming context being present
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
@@ -241,11 +250,13 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $names = \is_array($tools) ? array_map(strval(...), $tools) : ['read_file', 'write_file', 'list_files', 'bash'];
 
         $registry = $this->find(EnvKey::Registry);
+
         if (!$registry instanceof Registry) {
             return implode(', ', $names);
         }
 
         $docs = [];
+
         foreach ($names as $name) {
             if (!$registry->has($name)) {
                 continue;

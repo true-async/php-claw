@@ -15,6 +15,10 @@ use Claw\Exceptions\ConfigException;
  */
 final class Config
 {
+    /** The fallback system prompt when no project CLAUDE.md persona is present. */
+    public const DEFAULT_SYSTEM = 'You are Claw, a helpful coding assistant. Be concise. '
+        . 'Use the tools to inspect and change files and run commands in the workspace.';
+
     private const DEFAULT_CHANNEL = 'console';
 
     private const CHANNELS = ['console', 'telegram'];
@@ -77,6 +81,7 @@ final class Config
 
         $get = static function (string $key) use ($file): ?string {
             $env = getenv($key);
+
             if ($env !== false && $env !== '') {
                 return $env;
             }
@@ -86,6 +91,7 @@ final class Config
 
         $require = static function (string $key) use ($get): string {
             $value = $get($key);
+
             if ($value === null || $value === '') {
                 throw new ConfigException("Missing required config: {$key}");
             }
@@ -94,6 +100,7 @@ final class Config
         };
 
         $channel = $get('CLAW_CHANNEL') ?? self::DEFAULT_CHANNEL;
+
         if (!\in_array($channel, self::CHANNELS, true)) {
             throw new ConfigException(
                 "Unknown CLAW_CHANNEL '{$channel}', expected one of: " . implode(', ', self::CHANNELS)
@@ -101,6 +108,7 @@ final class Config
         }
 
         $agent = $get('CLAW_AGENT') ?? self::DEFAULT_AGENT;
+
         if (!\in_array($agent, self::AGENTS, true)) {
             throw new ConfigException(
                 "Unknown CLAW_AGENT '{$agent}', expected one of: " . implode(', ', self::AGENTS)
@@ -108,6 +116,7 @@ final class Config
         }
 
         $budgetPolicy = strtolower($get('CLAW_BUDGET_POLICY') ?? self::DEFAULT_BUDGET_POLICY);
+
         if (!\in_array($budgetPolicy, self::BUDGET_POLICIES, true)) {
             throw new ConfigException(
                 "Unknown CLAW_BUDGET_POLICY '{$budgetPolicy}', expected one of: " . implode(', ', self::BUDGET_POLICIES)
@@ -116,6 +125,7 @@ final class Config
 
         $keyVar = self::API_KEY_VARS[$agent];
         $apiKey = $get($keyVar) ?? $get('CLAW_API_KEY');
+
         if ($apiKey === null || $apiKey === '') {
             throw new ConfigException(
                 "Missing API key: set {$keyVar} (or CLAW_API_KEY) for agent '{$agent}'"
@@ -170,11 +180,13 @@ final class Config
     {
         $prefix = 'CLAW_AGENT_';
         $merged = $file;                       // file is the base; real env overrides it
+
         foreach (getenv() as $key => $value) {
             $merged[$key] = $value;
         }
 
         $agents = [];
+
         foreach ($merged as $key => $value) {
             if (!str_starts_with($key, $prefix)) {
                 continue;
@@ -184,6 +196,7 @@ final class Config
             // so a workflow routes a call with the readable `ai(..., agent: 'worker-smart')`.
             $role = str_replace('_', '-', strtolower(substr($key, \strlen($prefix))));
             $model = trim($value);
+
             if ($role !== '' && $model !== '') {
                 $agents[$role] = $model;
             }
@@ -210,13 +223,16 @@ final class Config
         }
 
         $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+
         if ($lines === false) {
             throw new ConfigException("Cannot read env file: {$path}");
         }
 
         $out = [];
+
         foreach ($lines as $line) {
             $line = trim($line);
+
             if ($line === '' || $line[0] === '#') {
                 continue;
             }
@@ -226,6 +242,7 @@ final class Config
             }
 
             $eq = strpos($line, '=');
+
             if ($eq === false) {
                 continue;
             }
@@ -241,6 +258,7 @@ final class Config
     private static function stripQuotes(string $value): string
     {
         $len = \strlen($value);
+
         if ($len >= 2 && ($value[0] === '"' || $value[0] === "'") && $value[$len - 1] === $value[0]) {
             return substr($value, 1, $len - 2);
         }
@@ -254,8 +272,10 @@ final class Config
     private static function parseChatIds(string $raw): array
     {
         $ids = [];
+
         foreach (explode(',', $raw) as $part) {
             $part = trim($part);
+
             if ($part === '') {
                 continue;
             }

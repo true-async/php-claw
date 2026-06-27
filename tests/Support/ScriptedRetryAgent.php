@@ -39,6 +39,7 @@ final class ScriptedRetryAgent extends AbstractAgent
         $this->attempts++;
 
         $next = array_shift($this->outcomes);
+
         if ($next === null) {
             throw new \RuntimeException('ScriptedRetryAgent: no more outcomes');
         }

@@ -38,6 +38,7 @@ final class BashToolTest
         $bash = new BashTool($dir);
 
         $pwd = $bash->handle(['command' => 'pwd']);
+
         if (DIRECTORY_SEPARATOR === '\\') {
             // MSYS/Git `sh` reports a POSIX path (/tmp/…) that can't equal PHP's
             // realpath (C:\…\Temp\…); assert it ran in the right dir by name.
@@ -55,6 +56,7 @@ final class BashToolTest
     public function requiresCommand(): void
     {
         $threw = false;
+
         try {
             new BashTool(sys_get_temp_dir())->handle([]);
         } catch (ToolException $e) {
