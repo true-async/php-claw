@@ -144,9 +144,15 @@ final class Tracer
     }
 
     /** A named output a step produced — recorded under the current step so it shows in the journal. */
-    public function artifact(string $label, string $kind, string $value): void
+    public function artifact(string $label, string $kind, string $value, string $ext = 'txt', string $mime = 'text/plain'): void
     {
-        $this->event(new TraceEvent('artifact', Level::Info, ['label' => $label, 'kind' => $kind, 'value' => $value]));
+        $this->event(new TraceEvent('artifact', Level::Info, [
+            'label' => $label,
+            'kind' => $kind,
+            'value' => $value,
+            'ext' => $ext,
+            'mime' => $mime,
+        ]));
     }
 
     /** The baton a step hands to the next: its returned summary of what it did / what to watch for. */

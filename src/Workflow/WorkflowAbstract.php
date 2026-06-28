@@ -398,19 +398,21 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * Record a named output the current step produced — a piece of text, or a file the step wrote.
      * Artifacts are journaled (so they show in `claw log`) and handed to the step's critic for review;
      * a step that declares a critic SHOULD emit the artifacts the rubric is judged against. Pass either
-     * $text or $file (a path relative to the project), not both.
+     * $text or $file (a path relative to the project), not both. For inline text, $lang names the content
+     * type (e.g. 'php', 'json', 'diff') so a viewer can render it properly; omit it to let the content be
+     * sniffed. A file's type comes from its path.
      */
-    protected function artifact(string $label, ?string $text = null, ?string $file = null): void
+    protected function artifact(string $label, ?string $text = null, ?string $file = null, string $lang = ''): void
     {
         // Exactly one of $text / $file — enforce the contract rather than silently preferring $file
         // (dropping $text) or recording an empty artifact when neither is given.
         $entry = match (true) {
             $file !== null && $text === null => Artifact::file($label, $file),
-            $text !== null && $file === null => Artifact::text($label, $text),
+            $text !== null && $file === null => Artifact::text($label, $text, $lang),
             default => throw new \LogicException("artifact('{$label}') needs exactly one of \$text or \$file."),
         };
         $this->artifacts[$this->currentStep][] = $entry;
-        $this->tracer()?->artifact($entry->label, $entry->kind, $entry->value);
+        $this->tracer()?->artifact($entry->label, $entry->kind, $entry->value, $entry->ext, $entry->mime);
     }
 
     /** The issue this run was started under, if any — climb to it for wider context. */

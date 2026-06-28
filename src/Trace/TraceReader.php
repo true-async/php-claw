@@ -164,8 +164,9 @@ final class TraceReader
     }
 
     /**
-     * The run's artifacts as structured records (name / kind / body) — for the dashboard, distinct from
-     * {@see artifacts()} which renders them as a console string.
+     * The run's artifacts as structured records (name / kind / ext / mime / body) — for the dashboard,
+     * distinct from {@see artifacts()} which renders them as a console string. `ext`/`mime` describe the
+     * content type so the UI can render it properly; older rows without them fall back to plain text.
      *
      * @return list<array<string, mixed>>
      */
@@ -186,6 +187,8 @@ final class TraceReader
             $records[] = [
                 'name' => (string) ($artifact['label'] ?? ''),
                 'kind' => (string) ($artifact['kind'] ?? 'file'),
+                'ext' => (string) ($artifact['ext'] ?? ''),
+                'mime' => (string) ($artifact['mime'] ?? ''),
                 'meta' => '',
                 'body' => (string) ($artifact['value'] ?? ''),
             ];
