@@ -32,7 +32,7 @@ final class TraceStore implements TraceSinkInterface
                 type       TEXT NOT NULL,
                 level      INTEGER NOT NULL DEFAULT 20,
                 data       TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL  -- Unix time in MILLISECONDS, so the waterfall can time sub-second spans
             )',
         );
 

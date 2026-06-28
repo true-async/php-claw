@@ -197,7 +197,10 @@ final class Tracer
 
     private function emit(string $phase, int $id, TraceEvent $event): void
     {
-        $record = new TraceRecord($this->runId, $id, $this->top(), \count($this->stack), $phase, $event, time());
+        // Millisecond wall-clock: the dashboard waterfall times spans as exit.at − enter.at, so seconds
+        // would collapse every sub-second span to a zero-width bar.
+        $at = (int) round(microtime(true) * 1000);
+        $record = new TraceRecord($this->runId, $id, $this->top(), \count($this->stack), $phase, $event, $at);
 
         foreach ($this->sinks as $sink) {
             try {

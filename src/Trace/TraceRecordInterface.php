@@ -29,6 +29,6 @@ interface TraceRecordInterface
     /** The typed payload. */
     public function event(): TraceEvent;
 
-    /** Unix timestamp (seconds) when the record was produced. */
+    /** Unix timestamp in milliseconds when the record was produced — fine enough to time sub-second spans. */
     public function at(): int;
 }

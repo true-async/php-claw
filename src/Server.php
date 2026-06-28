@@ -119,6 +119,12 @@ final class Server
                     return;
                 }
 
+                if (\preg_match('#^/api/projects/([^/]+)/issues$#', $path, $matches)) {
+                    $this->createIssue($request, $response, $matches[1]);
+
+                    return;
+                }
+
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/start$#', $path, $matches)) {
                     $this->start($response, $matches[1], $matches[2]);
 
@@ -184,6 +190,12 @@ final class Server
                 return;
             }
 
+            if (\preg_match('#^/api/projects/([^/]+)/artifact-file$#', $path, $matches)) {
+                $this->artifactFile($response, $matches[1], (string) $request->getQueryParam('path', ''));
+
+                return;
+            }
+
             $response->json(['error' => 'not found', 'path' => $path], 404);
         } catch (\Exception $e) {
             // A streaming route may have already committed its SSE headers; a JSON 500 over that is
@@ -235,6 +247,28 @@ final class Server
         unset($this->readStores[$project->id], $this->readers[$project->id]);
 
         $response->json(['key' => $project->id, 'name' => $project->name, 'path' => $project->path], 201);
+    }
+
+    /**
+     * POST /api/projects/{key}/issues — add an issue to a project (the dashboard's equivalent of
+     * `claw -i "<title>"`). Returns the new issue (201); the board's SSE feed then carries it like any
+     * other change. An empty title is a 400.
+     */
+    private function createIssue(HttpRequest $request, HttpResponse $response, string $key): void
+    {
+        $payload = \json_decode($request->getBody(), true);
+        $title = \is_array($payload) && isset($payload['title']) ? (string) $payload['title'] : '';
+        $description = \is_array($payload) && isset($payload['description']) ? (string) $payload['description'] : '';
+
+        try {
+            $issue = $this->readStore($key)->addIssue($title, $description);
+        } catch (ClawException $e) {
+            $response->json(['error' => $e->getMessage()], 400);
+
+            return;
+        }
+
+        $response->json(['id' => (int) $issue->id, 'title' => $issue->title, 'status' => IssueStatus::Open->value], 201);
     }
 
     /**
@@ -301,6 +335,39 @@ final class Server
     private function reader(string $key): TraceReader
     {
         return $this->readers[$key] ??= new TraceReader($this->readStore($key)->pdo());
+    }
+
+    /**
+     * Read a `file` artifact's contents on demand. A file artifact stores only a path relative to the
+     * project ({@see \Claw\Workflow\Artifact::file()}); the dashboard fetches the bytes lazily, only when
+     * a user expands it. The resolved path is confined to the project folder — a traversal outside it, a
+     * missing file, or a non-file is a 4xx, never a read elsewhere on disk.
+     */
+    private function artifactFile(HttpResponse $response, string $key, string $relative): void
+    {
+        if ($relative === '') {
+            $response->json(['error' => 'a file path is required'], 400);
+
+            return;
+        }
+
+        $root = realpath($this->readStore($key)->project()->path);
+        $full = realpath($root . '/' . $relative);
+
+        // realpath resolves `..`, so containment is a clean prefix check on the canonical paths.
+        if ($root === false || $full === false || !str_starts_with($full, $root . '/')) {
+            $response->json(['error' => 'no such artifact file'], 404);
+
+            return;
+        }
+
+        if (!is_file($full)) {
+            $response->json(['error' => 'no such artifact file'], 404);
+
+            return;
+        }
+
+        $response->json(['path' => $relative, 'body' => (string) file_get_contents($full)]);
     }
 
     /**
@@ -410,6 +477,7 @@ final class Server
             'phase' => $record->phase(),
             'type' => $event->type,
             'level' => $event->level->value,
+            'tsMs' => $record->at(),
             'data' => $event->data,
         ];
     }

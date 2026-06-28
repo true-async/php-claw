@@ -110,7 +110,7 @@ final class TraceReader
     public function tail(string $runId, int $since): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT seq, span_id, parent_id, depth, phase, type, level, data
+            'SELECT seq, span_id, parent_id, depth, phase, type, level, data, created_at
              FROM trace WHERE run_id = :r AND seq > :s ORDER BY seq',
         );
         $stmt->execute(['r' => $runId, 's' => $since]);
@@ -126,6 +126,7 @@ final class TraceReader
                 'phase' => (string) $row['phase'],
                 'type' => (string) $row['type'],
                 'level' => (int) $row['level'],
+                'tsMs' => (int) $row['created_at'],
                 'data' => json_decode((string) $row['data'], true),
             ];
         }
