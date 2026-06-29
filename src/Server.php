@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw;
 
 use Async\Channel;
+use Async\Coroutine;
 use Async\OperationCanceledException;
 
 use function Async\spawn;
@@ -57,7 +58,12 @@ final class Server
     /** Live trace pub/sub: a run's LiveTraceSink publishes here, SSE streams subscribe (push, no poll). */
     private TraceBus $bus;
 
-    /** @var array<string, true> issue ids with an active run — guards against a concurrent double-start. */
+    /**
+     * Issue id → the detached run coroutine. Presence guards against a concurrent double-start; the
+     * handle itself lets {@see stop()} cancel a run in flight.
+     *
+     * @var array<string, Coroutine<mixed>>
+     */
     private array $active = [];
 
     /** @var array<string, Channel<string>> issue id → the open gate's answer channel ({@see answer()} feeds it). */
@@ -133,6 +139,18 @@ final class Server
 
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $matches)) {
                     $this->answer($request, $response, $matches[1], $matches[2]);
+
+                    return;
+                }
+
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/close$#', $path, $matches)) {
+                    $this->close($response, $matches[1], $matches[2]);
+
+                    return;
+                }
+
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/stop$#', $path, $matches)) {
+                    $this->stop($response, $matches[1], $matches[2]);
 
                     return;
                 }
@@ -571,7 +589,6 @@ final class Server
             return;
         }
 
-        $this->active[$issue->id] = true;
         /** @var Channel<string> $answers unbuffered: a gate's send() waits for the parked run's recv() */
         $answers = new Channel();
         $this->gates[$issue->id] = $answers;
@@ -580,7 +597,8 @@ final class Server
 
         // Spawn detached so the run survives this handler returning; the dashboard watches the run stream.
         // The run records its own final status, so there is nothing to catch — only the active/gate cleanup.
-        spawn(function () use ($store, $config, $agent, $issue, $frontend): void {
+        // The handle is kept in $active so stop() can cancel the run.
+        $this->active[$issue->id] = spawn(function () use ($store, $config, $agent, $issue, $frontend): void {
             try {
                 new IssueRunner($this->projectsDir, $store, $config, $agent, $frontend)->run($issue);
             } finally {
@@ -596,6 +614,53 @@ final class Server
      * while the issue is WaitingHuman (a gate is actually open); otherwise there is nothing to answer and
      * the unbuffered send would hang, so we reject with 409.
      */
+    /**
+     * POST .../issues/{id}/stop — cancel an in-flight run. Cancellation unwinds the run coroutine
+     * cooperatively (the IssueRunner propagates it); we then drop the issue back to Open so its card
+     * leaves the in-progress column and can be started again. A 409 if no run is active.
+     */
+    private function stop(HttpResponse $response, string $key, string $issueId): void
+    {
+        $coroutine = $this->active[$issueId] ?? null;
+
+        if ($coroutine === null) {
+            $response->json(['error' => 'no run is active for this issue'], 409);
+
+            return;
+        }
+
+        try {
+            $store = $this->storeFor($key);
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $coroutine->cancel();   // request cancellation; the run unwinds and the spawn's finally cleans up
+        $store->setIssueStatus($issueId, IssueStatus::Open);
+        $response->json(['ok' => true], 202);
+    }
+
+    /**
+     * POST .../issues/{id}/close — move an issue to the Closed (archive) column. A plain status write;
+     * the board's polling SSE feed carries the change to every client on its next tick.
+     */
+    private function close(HttpResponse $response, string $key, string $issueId): void
+    {
+        try {
+            $store = $this->storeFor($key);
+            $store->loadIssue($issueId);   // 404 if the issue does not exist
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $store->setIssueStatus($issueId, IssueStatus::Closed);
+        $response->json(['ok' => true], 202);
+    }
+
     private function answer(HttpRequest $request, HttpResponse $response, string $key, string $issueId): void
     {
         $channel = $this->gates[$issueId] ?? null;
