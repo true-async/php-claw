@@ -172,13 +172,36 @@ final class TraceReader
      */
     public function artifactRecords(string $runId): array
     {
-        $stmt = $this->pdo->prepare("SELECT data FROM trace WHERE run_id = ? AND type = 'artifact' ORDER BY seq");
+        // Walk the run in order, tracking the open `step` spans so each artifact is tagged with the
+        // step that produced it (the innermost step still open when the artifact event fired).
+        $stmt = $this->pdo->prepare('SELECT span_id, phase, type, data FROM trace WHERE run_id = ? ORDER BY seq');
         $stmt->execute([$runId]);
 
+        $openSteps = [];   // span_id => step name; insertion order = nesting, last is innermost
         $records = [];
 
-        foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $json) {
-            $artifact = json_decode((string) $json, true);
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $phase = (string) $row['phase'];
+            $type = (string) $row['type'];
+
+            if ($phase === 'enter' && $type === 'step') {
+                $data = json_decode((string) $row['data'], true);
+                $openSteps[(int) $row['span_id']] = \is_array($data) ? (string) ($data['name'] ?? '') : '';
+
+                continue;
+            }
+
+            if ($phase === 'exit') {
+                unset($openSteps[(int) $row['span_id']]);
+
+                continue;
+            }
+
+            if ($type !== 'artifact') {
+                continue;
+            }
+
+            $artifact = json_decode((string) $row['data'], true);
 
             if (!\is_array($artifact)) {
                 continue;
@@ -190,6 +213,7 @@ final class TraceReader
                 'ext' => (string) ($artifact['ext'] ?? ''),
                 'mime' => (string) ($artifact['mime'] ?? ''),
                 'meta' => '',
+                'step' => $openSteps === [] ? '' : (string) end($openSteps),
                 'body' => (string) ($artifact['value'] ?? ''),
             ];
         }
