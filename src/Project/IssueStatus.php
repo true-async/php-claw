@@ -18,6 +18,8 @@ enum IssueStatus: string
     case WaitingHuman = 'waiting';
     case Done = 'done';
     case Closed = 'closed';
+    /** Soft-deleted: kept in the db (history + runs preserved) but hidden from the board. */
+    case Deleted = 'deleted';
 
     /**
      * Resolve a case by its name (how the status round-trips through the project db). An unrecognized

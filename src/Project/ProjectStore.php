@@ -154,7 +154,8 @@ final class ProjectStore
      */
     public function allIssues(): array
     {
-        $stmt = $this->pdo->query('SELECT id, title, description, status FROM issues ORDER BY id');
+        // soft-deleted issues stay in the db (history + runs) but are hidden from the board
+        $stmt = $this->pdo->query("SELECT id, title, description, status FROM issues WHERE status != 'Deleted' ORDER BY id");
         $rows = $stmt === false ? [] : $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
         return array_values(array_map(
@@ -322,6 +323,7 @@ final class ProjectStore
         $stmt = $this->pdo->prepare('UPDATE issues SET status = :status WHERE id = :id');
         $stmt->execute(['status' => $status->name, 'id' => $issueId]);
     }
+
 
     /** A filesystem-safe, stable key derived from a folder's absolute path. */
     public static function keyFor(string $absolutePath): string

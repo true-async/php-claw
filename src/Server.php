@@ -154,6 +154,12 @@ final class Server
 
                     return;
                 }
+
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/delete$#', $path, $matches)) {
+                    $this->delete($response, $matches[1], $matches[2]);
+
+                    return;
+                }
                 $response->json(['error' => 'not found', 'path' => $path], 404);
 
                 return;
@@ -526,9 +532,11 @@ final class Server
         try {
             while (!$response->isClosed()) {
                 $changed = false;
+                $present = [];
 
                 foreach ($this->issues($key) as $issue) {
                     $id = (string) $issue['id'];
+                    $present[$id] = true;
                     $snapshot = \json_encode($issue, self::JSON);
 
                     if (($sentSnapshots[$id] ?? null) === $snapshot) {
@@ -540,6 +548,17 @@ final class Server
                     }
                     $sentSnapshots[$id] = $snapshot;
                     $response->sseEvent(data: $snapshot, event: 'issue');
+                    $changed = true;
+                }
+
+                // an id we sent before that is gone now = a deleted issue → tell the client to drop it
+                foreach ($sentSnapshots as $id => $_) {
+                    if (isset($present[$id]) || !$response->sendable()) {
+                        continue;
+                    }
+
+                    unset($sentSnapshots[$id]);
+                    $response->sseEvent(data: \json_encode(['id' => (int) $id], self::JSON), event: 'issue-removed');
                     $changed = true;
                 }
 
@@ -639,6 +658,27 @@ final class Server
 
         $coroutine->cancel();   // request cancellation; the run unwinds and the spawn's finally cleans up
         $store->setIssueStatus($issueId, IssueStatus::Open);
+        $response->json(['ok' => true], 202);
+    }
+
+    /**
+     * POST .../issues/{id}/delete — soft-delete an issue: cancel any in-flight run, then mark it Deleted.
+     * The row (and its runs/trace) stays in the db, but the board hides it; the SSE feed drops the card.
+     */
+    private function delete(HttpResponse $response, string $key, string $issueId): void
+    {
+        try {
+            $store = $this->storeFor($key);
+            $store->loadIssue($issueId);   // 404 if the issue does not exist
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $active = $this->active[$issueId] ?? null;
+        $active?->cancel();   // stop an in-flight run before hiding the issue
+        $store->setIssueStatus($issueId, IssueStatus::Deleted);
         $response->json(['ok' => true], 202);
     }
 
