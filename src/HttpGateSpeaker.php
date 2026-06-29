@@ -8,7 +8,7 @@ use Async\Channel;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Project\IssueStatus;
-use Claw\Project\ProjectStore;
+use Claw\Project\ProjectStoreInterface;
 use Claw\Trace\Tracer;
 
 /**
@@ -28,7 +28,7 @@ final readonly class HttpGateSpeaker implements SpeakerInterface
     /** @param Channel<string> $answers the live wakeup — POST .../answer sends the human reply here */
     public function __construct(
         private Tracer $tracer,
-        private ProjectStore $store,
+        private ProjectStoreInterface $store,
         private string $issueId,
         private Channel $answers,
     ) {

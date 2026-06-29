@@ -7,7 +7,7 @@ namespace Claw\Run;
 use Async\Channel;
 use Claw\Agent\SpeakerInterface;
 use Claw\HttpGateSpeaker;
-use Claw\Project\ProjectStore;
+use Claw\Project\ProjectStoreInterface;
 use Claw\Trace\LiveTraceSink;
 use Claw\Trace\TraceBus;
 use Claw\Trace\Tracer;
@@ -23,7 +23,7 @@ final readonly class HttpRunFrontend implements RunFrontendInterface
 {
     /** @param Channel<string> $answers the open gate's answer channel — POST .../answer sends the reply here */
     public function __construct(
-        private ProjectStore $store,
+        private ProjectStoreInterface $store,
         private string $issueId,
         private Channel $answers,
         private TraceBus $bus,

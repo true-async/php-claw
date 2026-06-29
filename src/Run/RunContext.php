@@ -6,7 +6,7 @@ namespace Claw\Run;
 
 use Claw\Project\Issue;
 use Claw\Project\Project;
-use Claw\Project\ProjectStore;
+use Claw\Project\ProjectStoreInterface;
 use Claw\Trace\Tracer;
 use Claw\Workflow\Environment;
 use Claw\Workflow\WorkflowStore;
@@ -22,7 +22,7 @@ final readonly class RunContext
     public function __construct(
         public Environment $env,
         public Tracer $tracer,
-        public ProjectStore $store,
+        public ProjectStoreInterface $store,
         public WorkflowStore $workflowStore,
         public string $runId,
         public Issue $issue,

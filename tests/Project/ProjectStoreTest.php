@@ -219,6 +219,52 @@ final class ProjectStoreTest
         }
     }
 
+    #[Test]
+    public function onePooledHandleIsSafeAcrossConcurrentCoroutines(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+
+            // One shared handle, sixteen coroutines writing at once. TrueAsync's PDO pool hands each
+            // coroutine its own connection, so the INSERT + lastInsertId() inside addIssue()/recordRun()
+            // must stay correct under interleaving — this is the guarantee that retired the per-run
+            // `storeFor()` handle. The delay forces a yield between the two inserts to stress it.
+            $coros = [];
+
+            for ($i = 0; $i < 16; $i++) {
+                $coros[] = \Async\spawn(static function () use ($store, $i): array {
+                    $issue = $store->addIssue("issue {$i}", "body {$i}");
+                    \Async\delay(1);
+                    $runId = $store->recordRun($issue->id, "Solver{$i}");
+
+                    return ['title' => "issue {$i}", 'issueId' => $issue->id, 'runId' => $runId];
+                });
+            }
+
+            $results = array_map(static fn ($c): array => \Async\await($c), $coros);
+
+            $issueIds = array_map(static fn (array $r): string => $r['issueId'], $results);
+            $runIds = array_map(static fn (array $r): string => $r['runId'], $results);
+
+            // distinct ids: lastInsertId() never returned another coroutine's row
+            Assert::same(count(array_unique($issueIds)), 16);
+            Assert::same(count(array_unique($runIds)), 16);
+
+            // each id resolves back to exactly that coroutine's own title (no cross-wiring)
+            foreach ($results as $r) {
+                Assert::same($store->loadIssue($r['issueId'])->title, $r['title']);
+            }
+
+            Assert::count($store->allIssues(), 16);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
     /** Register a project and return an open handle to it (init + discover). */
     private static function openProject(string $projectsDir, string $folder): ProjectStore
     {

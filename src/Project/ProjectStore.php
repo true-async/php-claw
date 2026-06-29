@@ -13,13 +13,14 @@ use Claw\Exceptions\ClawException;
  * kept inside the app's own home and keyed by the folder's absolute path (the way `.claude`
  * keys its per-project data by path).
  *
- * An instance is a HANDLE to one already-resolved project: it holds the open \PDO and the
- * project's metadata, so a whole command runs against a single connection. The path is
- * resolved and the db opened exactly ONCE — by {@see discover()} or {@see init()} — not on
- * every operation; that same connection ({@see pdo()}) also backs the durable workflow-run
- * state store and the trace store, so a run never reopens its own db.
+ * An instance is a HANDLE to one already-resolved project: it holds an open \PDO and the
+ * project's metadata. The \PDO has TrueAsync's connection pool enabled ({@see open()}), so the
+ * one handle is safe to share across concurrent coroutines — the dashboard's reads and a detached
+ * run's writes — without a connection per caller. The path is resolved and the db opened exactly
+ * ONCE — by {@see discover()} or {@see init()} — not on every operation; that same handle
+ * ({@see pdo()}) also backs the durable workflow-run state store and the trace store.
  */
-final class ProjectStore
+final class ProjectStore implements ProjectStoreInterface
 {
     private function __construct(
         private readonly \PDO $pdo,
@@ -324,7 +325,6 @@ final class ProjectStore
         $stmt->execute(['status' => $status->name, 'id' => $issueId]);
     }
 
-
     /** A filesystem-safe, stable key derived from a folder's absolute path. */
     public static function keyFor(string $absolutePath): string
     {
@@ -360,9 +360,26 @@ final class ProjectStore
 
     private static function open(string $dbPath): \PDO
     {
-        $pdo = new \PDO('sqlite:' . $dbPath);
-        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-        $pdo->exec('PRAGMA busy_timeout=4000');   // ride out a concurrent writer (the run) rather than fail
+        // TrueAsync's built-in PDO pool hands each coroutine its own connection on demand, so ONE shared
+        // handle is safe to use from concurrent runs and dashboard reads at once — no manual per-run
+        // connection. The pool keeps a coroutine's connection pinned across awaits, so a bare
+        // INSERT + lastInsertId() stays correct (verified).
+        //
+        // Everything that must apply to EVERY pooled connection goes in the construction options, since
+        // the pool reuses them per connection: ATTR_TIMEOUT is the busy timeout (a post-open `PRAGMA
+        // busy_timeout` would reach only the one connection that ran it). WAL is the exception — it is
+        // persisted in the db header, so a single PRAGMA sets it for every connection and every restart.
+        //
+        // ATTR_POOL_* are TrueAsync's PDO additions; PHPStan reads the core \PDO stub (the ide-helper's
+        // \PDO redeclaration is deliberately not scanned — see phpstan.dist.neon), so each is ignored.
+        $pdo = new \PDO('sqlite:' . $dbPath, null, null, [
+            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_TIMEOUT => 4,   // busy timeout (s) — ride out a concurrent writer rather than fail
+            \PDO::ATTR_POOL_ENABLED => true,   // @phpstan-ignore classConstant.notFound
+            \PDO::ATTR_POOL_MIN => 1,          // @phpstan-ignore classConstant.notFound
+            \PDO::ATTR_POOL_MAX => 8,          // @phpstan-ignore classConstant.notFound
+        ]);
+        $pdo->exec('PRAGMA journal_mode=WAL');
 
         return $pdo;
     }

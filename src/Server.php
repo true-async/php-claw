@@ -16,6 +16,7 @@ use Claw\Http\CurlHttpClient;
 use Claw\Project\IssueStatus;
 use Claw\Project\Project;
 use Claw\Project\ProjectStore;
+use Claw\Project\ProjectStoreInterface;
 use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
 use Claw\Trace\TraceBus;
@@ -69,8 +70,14 @@ final class Server
     /** @var array<string, Channel<string>> issue id → the open gate's answer channel ({@see answer()} feeds it). */
     private array $gates = [];
 
-    /** @var array<string, ProjectStore> read handles, one per project key, opened once and reused. */
-    private array $readStores = [];
+    /**
+     * One pooled store handle per project key, opened once and reused. The handle's \PDO has TrueAsync's
+     * connection pool enabled, so the SAME handle is shared by the dashboard's reads and a detached run's
+     * writes — the pool hands each coroutine its own connection. There is no read/write split to manage.
+     *
+     * @var array<string, ProjectStoreInterface>
+     */
+    private array $stores = [];
 
     /** @var array<string, TraceReader> trace readers over the read handles, cached so a stream re-uses one. */
     private array $readers = [];
@@ -268,7 +275,7 @@ final class Server
         }
 
         // Drop any cached miss so the new project is readable on the next request.
-        unset($this->readStores[$project->id], $this->readers[$project->id]);
+        unset($this->stores[$project->id], $this->readers[$project->id]);
 
         $response->json(['key' => $project->id, 'name' => $project->name, 'path' => $project->path], 201);
     }
@@ -285,14 +292,22 @@ final class Server
         $description = \is_array($payload) && isset($payload['description']) ? (string) $payload['description'] : '';
 
         try {
-            $issue = $this->readStore($key)->addIssue($title, $description);
+            $store = $this->store($key);
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        try {
+            $issue = $store->addIssue($title, $description);
         } catch (ClawException $e) {
             $response->json(['error' => $e->getMessage()], 400);
 
             return;
         }
 
-        $response->json(['id' => (int) $issue->id, 'title' => $issue->title, 'status' => IssueStatus::Open->value], 201);
+        $response->json(['id' => (int) $issue->id, 'title' => $issue->title, 'status' => $issue->status->value], 201);
     }
 
     /**
@@ -303,7 +318,7 @@ final class Server
      */
     private function issues(string $key): array
     {
-        $store = $this->readStore($key);
+        $store = $this->store($key);
         $reader = $this->reader($key);
         $state = new SqliteStateStore($store->pdo());
 
@@ -348,17 +363,22 @@ final class Server
         return $issues;
     }
 
-    /** A reused read handle for a project (the dashboard only SELECTs); opened once, cached by key. */
-    private function readStore(string $key): ProjectStore
+    /**
+     * The one pooled store handle for a project, opened once and cached by key. Used for reads AND
+     * writes from any coroutine — TrueAsync's PDO pool gives each its own connection, so there is no
+     * need for a fresh handle per run. An unknown project key is a {@see \RuntimeException} (a 404 at
+     * the call site).
+     */
+    private function store(string $key): ProjectStoreInterface
     {
-        return $this->readStores[$key] ??= ProjectStore::openByKey($this->projectsDir, $key)
+        return $this->stores[$key] ??= ProjectStore::openByKey($this->projectsDir, $key)
             ?? throw new \RuntimeException("unknown project: {$key}");
     }
 
     /** The trace reader over a project's read handle, cached so a stream does not re-open it per tail. */
     private function reader(string $key): TraceReader
     {
-        return $this->readers[$key] ??= new TraceReader($this->readStore($key)->pdo());
+        return $this->readers[$key] ??= new TraceReader($this->store($key)->pdo());
     }
 
     /**
@@ -375,7 +395,7 @@ final class Server
             return;
         }
 
-        $root = realpath($this->readStore($key)->project()->path);
+        $root = realpath($this->store($key)->project()->path);
         $full = realpath($root . '/' . $relative);
 
         // realpath resolves `..`, so containment is a clean prefix check on the canonical paths.
@@ -517,7 +537,7 @@ final class Server
     private function issuesStream(HttpResponse $response, string $key): void
     {
         try {
-            $this->readStore($key);   // resolve/validate the project before committing the stream
+            $this->store($key);   // resolve/validate the project before committing the stream
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -585,7 +605,7 @@ final class Server
     private function start(HttpResponse $response, string $key, string $issueId): void
     {
         try {
-            $store = $this->storeFor($key);
+            $store = $this->store($key);
             $issue = $store->loadIssue($issueId);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
@@ -629,11 +649,6 @@ final class Server
     }
 
     /**
-     * POST .../issues/{id}/answer — deliver the human's reply to the run parked at its gate. Valid only
-     * while the issue is WaitingHuman (a gate is actually open); otherwise there is nothing to answer and
-     * the unbuffered send would hang, so we reject with 409.
-     */
-    /**
      * POST .../issues/{id}/stop — cancel an in-flight run. Cancellation unwinds the run coroutine
      * cooperatively (the IssueRunner propagates it); we then drop the issue back to Open so its card
      * leaves the in-progress column and can be started again. A 409 if no run is active.
@@ -649,7 +664,7 @@ final class Server
         }
 
         try {
-            $store = $this->storeFor($key);
+            $store = $this->store($key);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -668,7 +683,7 @@ final class Server
     private function delete(HttpResponse $response, string $key, string $issueId): void
     {
         try {
-            $store = $this->storeFor($key);
+            $store = $this->store($key);
             $store->loadIssue($issueId);   // 404 if the issue does not exist
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
@@ -689,7 +704,7 @@ final class Server
     private function close(HttpResponse $response, string $key, string $issueId): void
     {
         try {
-            $store = $this->storeFor($key);
+            $store = $this->store($key);
             $store->loadIssue($issueId);   // 404 if the issue does not exist
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
@@ -701,6 +716,11 @@ final class Server
         $response->json(['ok' => true], 202);
     }
 
+    /**
+     * POST .../issues/{id}/answer — deliver the human's reply to the run parked at its gate. Valid only
+     * while the issue is WaitingHuman (a gate is actually open); otherwise there is nothing to answer and
+     * the unbuffered send would hang, so we reject with 409.
+     */
     private function answer(HttpRequest $request, HttpResponse $response, string $key, string $issueId): void
     {
         $channel = $this->gates[$issueId] ?? null;
@@ -712,7 +732,7 @@ final class Server
         }
 
         try {
-            $issue = $this->readStore($key)->loadIssue($issueId);
+            $issue = $this->store($key)->loadIssue($issueId);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -732,13 +752,4 @@ final class Server
         $response->json(['ok' => true], 202);
     }
 
-    /**
-     * Open a FRESH writable handle for a run (its own connection — a run mutates state across awaits, so
-     * it must not share the cached read handle). Not cached: each run gets its own.
-     */
-    private function storeFor(string $key): ProjectStore
-    {
-        return ProjectStore::openByKey($this->projectsDir, $key)
-            ?? throw new \RuntimeException("unknown project: {$key}");
-    }
 }
