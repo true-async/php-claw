@@ -16,7 +16,7 @@ use Claw\Exceptions\ClawException;
 use Claw\Exceptions\WorkflowFinished;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
-use Claw\Project\ProjectStore;
+use Claw\Project\ProjectStoreInterface;
 use Claw\Project\RunStatus;
 use Claw\Tool\RecallTool;
 use Claw\Tool\ToolFactory;
@@ -71,7 +71,7 @@ final readonly class IssueRunner
 
     public function __construct(
         private string $projectsDir,
-        private ProjectStore $store,
+        private ProjectStoreInterface $store,
         private Config $config,
         private AgentInterface $agent,
         private RunFrontendInterface $frontend,

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw;
 
 use Async\Channel;
+use Async\Coroutine;
 use Async\OperationCanceledException;
 
 use function Async\spawn;
@@ -15,6 +16,7 @@ use Claw\Http\CurlHttpClient;
 use Claw\Project\IssueStatus;
 use Claw\Project\Project;
 use Claw\Project\ProjectStore;
+use Claw\Project\ProjectStoreInterface;
 use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
 use Claw\Trace\TraceBus;
@@ -57,14 +59,25 @@ final class Server
     /** Live trace pub/sub: a run's LiveTraceSink publishes here, SSE streams subscribe (push, no poll). */
     private TraceBus $bus;
 
-    /** @var array<string, true> issue ids with an active run — guards against a concurrent double-start. */
+    /**
+     * Issue id → the detached run coroutine. Presence guards against a concurrent double-start; the
+     * handle itself lets {@see stop()} cancel a run in flight.
+     *
+     * @var array<string, Coroutine<mixed>>
+     */
     private array $active = [];
 
     /** @var array<string, Channel<string>> issue id → the open gate's answer channel ({@see answer()} feeds it). */
     private array $gates = [];
 
-    /** @var array<string, ProjectStore> read handles, one per project key, opened once and reused. */
-    private array $readStores = [];
+    /**
+     * One pooled store handle per project key, opened once and reused. The handle's \PDO has TrueAsync's
+     * connection pool enabled, so the SAME handle is shared by the dashboard's reads and a detached run's
+     * writes — the pool hands each coroutine its own connection. There is no read/write split to manage.
+     *
+     * @var array<string, ProjectStoreInterface>
+     */
+    private array $stores = [];
 
     /** @var array<string, TraceReader> trace readers over the read handles, cached so a stream re-uses one. */
     private array $readers = [];
@@ -133,6 +146,24 @@ final class Server
 
                 if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/answer$#', $path, $matches)) {
                     $this->answer($request, $response, $matches[1], $matches[2]);
+
+                    return;
+                }
+
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/close$#', $path, $matches)) {
+                    $this->close($response, $matches[1], $matches[2]);
+
+                    return;
+                }
+
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/stop$#', $path, $matches)) {
+                    $this->stop($response, $matches[1], $matches[2]);
+
+                    return;
+                }
+
+                if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/delete$#', $path, $matches)) {
+                    $this->delete($response, $matches[1], $matches[2]);
 
                     return;
                 }
@@ -244,7 +275,7 @@ final class Server
         }
 
         // Drop any cached miss so the new project is readable on the next request.
-        unset($this->readStores[$project->id], $this->readers[$project->id]);
+        unset($this->stores[$project->id], $this->readers[$project->id]);
 
         $response->json(['key' => $project->id, 'name' => $project->name, 'path' => $project->path], 201);
     }
@@ -261,14 +292,22 @@ final class Server
         $description = \is_array($payload) && isset($payload['description']) ? (string) $payload['description'] : '';
 
         try {
-            $issue = $this->readStore($key)->addIssue($title, $description);
+            $store = $this->store($key);
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        try {
+            $issue = $store->addIssue($title, $description);
         } catch (ClawException $e) {
             $response->json(['error' => $e->getMessage()], 400);
 
             return;
         }
 
-        $response->json(['id' => (int) $issue->id, 'title' => $issue->title, 'status' => IssueStatus::Open->value], 201);
+        $response->json(['id' => (int) $issue->id, 'title' => $issue->title, 'status' => $issue->status->value], 201);
     }
 
     /**
@@ -279,7 +318,7 @@ final class Server
      */
     private function issues(string $key): array
     {
-        $store = $this->readStore($key);
+        $store = $this->store($key);
         $reader = $this->reader($key);
         $state = new SqliteStateStore($store->pdo());
 
@@ -324,17 +363,22 @@ final class Server
         return $issues;
     }
 
-    /** A reused read handle for a project (the dashboard only SELECTs); opened once, cached by key. */
-    private function readStore(string $key): ProjectStore
+    /**
+     * The one pooled store handle for a project, opened once and cached by key. Used for reads AND
+     * writes from any coroutine — TrueAsync's PDO pool gives each its own connection, so there is no
+     * need for a fresh handle per run. An unknown project key is a {@see \RuntimeException} (a 404 at
+     * the call site).
+     */
+    private function store(string $key): ProjectStoreInterface
     {
-        return $this->readStores[$key] ??= ProjectStore::openByKey($this->projectsDir, $key)
+        return $this->stores[$key] ??= ProjectStore::openByKey($this->projectsDir, $key)
             ?? throw new \RuntimeException("unknown project: {$key}");
     }
 
     /** The trace reader over a project's read handle, cached so a stream does not re-open it per tail. */
     private function reader(string $key): TraceReader
     {
-        return $this->readers[$key] ??= new TraceReader($this->readStore($key)->pdo());
+        return $this->readers[$key] ??= new TraceReader($this->store($key)->pdo());
     }
 
     /**
@@ -351,7 +395,7 @@ final class Server
             return;
         }
 
-        $root = realpath($this->readStore($key)->project()->path);
+        $root = realpath($this->store($key)->project()->path);
         $full = realpath($root . '/' . $relative);
 
         // realpath resolves `..`, so containment is a clean prefix check on the canonical paths.
@@ -493,7 +537,7 @@ final class Server
     private function issuesStream(HttpResponse $response, string $key): void
     {
         try {
-            $this->readStore($key);   // resolve/validate the project before committing the stream
+            $this->store($key);   // resolve/validate the project before committing the stream
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -508,9 +552,11 @@ final class Server
         try {
             while (!$response->isClosed()) {
                 $changed = false;
+                $present = [];
 
                 foreach ($this->issues($key) as $issue) {
                     $id = (string) $issue['id'];
+                    $present[$id] = true;
                     $snapshot = \json_encode($issue, self::JSON);
 
                     if (($sentSnapshots[$id] ?? null) === $snapshot) {
@@ -522,6 +568,17 @@ final class Server
                     }
                     $sentSnapshots[$id] = $snapshot;
                     $response->sseEvent(data: $snapshot, event: 'issue');
+                    $changed = true;
+                }
+
+                // an id we sent before that is gone now = a deleted issue → tell the client to drop it
+                foreach ($sentSnapshots as $id => $_) {
+                    if (isset($present[$id]) || !$response->sendable()) {
+                        continue;
+                    }
+
+                    unset($sentSnapshots[$id]);
+                    $response->sseEvent(data: \json_encode(['id' => (int) $id], self::JSON), event: 'issue-removed');
                     $changed = true;
                 }
 
@@ -548,7 +605,7 @@ final class Server
     private function start(HttpResponse $response, string $key, string $issueId): void
     {
         try {
-            $store = $this->storeFor($key);
+            $store = $this->store($key);
             $issue = $store->loadIssue($issueId);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
@@ -571,7 +628,6 @@ final class Server
             return;
         }
 
-        $this->active[$issue->id] = true;
         /** @var Channel<string> $answers unbuffered: a gate's send() waits for the parked run's recv() */
         $answers = new Channel();
         $this->gates[$issue->id] = $answers;
@@ -580,7 +636,8 @@ final class Server
 
         // Spawn detached so the run survives this handler returning; the dashboard watches the run stream.
         // The run records its own final status, so there is nothing to catch — only the active/gate cleanup.
-        spawn(function () use ($store, $config, $agent, $issue, $frontend): void {
+        // The handle is kept in $active so stop() can cancel the run.
+        $this->active[$issue->id] = spawn(function () use ($store, $config, $agent, $issue, $frontend): void {
             try {
                 new IssueRunner($this->projectsDir, $store, $config, $agent, $frontend)->run($issue);
             } finally {
@@ -588,6 +645,74 @@ final class Server
             }
         });
 
+        $response->json(['ok' => true], 202);
+    }
+
+    /**
+     * POST .../issues/{id}/stop — cancel an in-flight run. Cancellation unwinds the run coroutine
+     * cooperatively (the IssueRunner propagates it); we then drop the issue back to Open so its card
+     * leaves the in-progress column and can be started again. A 409 if no run is active.
+     */
+    private function stop(HttpResponse $response, string $key, string $issueId): void
+    {
+        $coroutine = $this->active[$issueId] ?? null;
+
+        if ($coroutine === null) {
+            $response->json(['error' => 'no run is active for this issue'], 409);
+
+            return;
+        }
+
+        try {
+            $store = $this->store($key);
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $coroutine->cancel();   // request cancellation; the run unwinds and the spawn's finally cleans up
+        $store->setIssueStatus($issueId, IssueStatus::Open);
+        $response->json(['ok' => true], 202);
+    }
+
+    /**
+     * POST .../issues/{id}/delete — soft-delete an issue: cancel any in-flight run, then mark it Deleted.
+     * The row (and its runs/trace) stays in the db, but the board hides it; the SSE feed drops the card.
+     */
+    private function delete(HttpResponse $response, string $key, string $issueId): void
+    {
+        try {
+            $store = $this->store($key);
+            $store->loadIssue($issueId);   // 404 if the issue does not exist
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $active = $this->active[$issueId] ?? null;
+        $active?->cancel();   // stop an in-flight run before hiding the issue
+        $store->setIssueStatus($issueId, IssueStatus::Deleted);
+        $response->json(['ok' => true], 202);
+    }
+
+    /**
+     * POST .../issues/{id}/close — move an issue to the Closed (archive) column. A plain status write;
+     * the board's polling SSE feed carries the change to every client on its next tick.
+     */
+    private function close(HttpResponse $response, string $key, string $issueId): void
+    {
+        try {
+            $store = $this->store($key);
+            $store->loadIssue($issueId);   // 404 if the issue does not exist
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $store->setIssueStatus($issueId, IssueStatus::Closed);
         $response->json(['ok' => true], 202);
     }
 
@@ -607,7 +732,7 @@ final class Server
         }
 
         try {
-            $issue = $this->readStore($key)->loadIssue($issueId);
+            $issue = $this->store($key)->loadIssue($issueId);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -627,13 +752,4 @@ final class Server
         $response->json(['ok' => true], 202);
     }
 
-    /**
-     * Open a FRESH writable handle for a run (its own connection — a run mutates state across awaits, so
-     * it must not share the cached read handle). Not cached: each run gets its own.
-     */
-    private function storeFor(string $key): ProjectStore
-    {
-        return ProjectStore::openByKey($this->projectsDir, $key)
-            ?? throw new \RuntimeException("unknown project: {$key}");
-    }
 }
