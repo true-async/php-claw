@@ -111,6 +111,8 @@ final class Server
         $server->addHttpHandler($this->handle(...));
         $server->addWebSocketHandler($this->handleWs(...));
 
+        spawn($this->broadcastBoards(...));   // fan issue changes out to each project's room
+
         echo "claw dashboard API → http://{$host}:{$port}\n";
         echo "  projects: {$this->projectsDir}\n";
 
@@ -674,6 +676,76 @@ final class Server
                 'data' => $row,
             ], self::JSON));
         }
+    }
+
+    /**
+     * Fan issue changes out to each project's room (project/{key}/issues) so a WS dashboard follows every
+     * board over one connection. Runs for the server's lifetime: re-derive each project's issues on a slow
+     * tick and publish only what changed — the same diff the issues SSE stream does, but once per project
+     * instead of once per connection, and whether or not anyone is watching (a publish with no subscriber
+     * is a cheap no-op). New projects are picked up on the next tick.
+     */
+    private function broadcastBoards(): void
+    {
+        $sent = [];   // key → (issue id → the json it was last published as)
+
+        while ($this->httpServer !== null) {
+            foreach ($this->projects() as $project) {
+                try {
+                    $this->broadcastBoard($project['key'], $sent);
+                } catch (\Exception) {
+                    // one project that fails to load must not stop the others or end the loop
+                }
+            }
+
+            \Async\delay(2000);
+        }
+    }
+
+    /**
+     * Diff one project's issues against what was last published and emit the changes to its room.
+     *
+     * @param array<string, array<string, string>> $sent key → (issue id → last-published json), by reference
+     */
+    private function broadcastBoard(string $key, array &$sent): void
+    {
+        $present = [];
+
+        foreach ($this->issues($key) as $issue) {
+            $id = (string) $issue['id'];
+            $present[$id] = true;
+            $snapshot = \json_encode($issue, self::JSON);
+
+            if (($sent[$key][$id] ?? null) === $snapshot) {
+                continue;
+            }
+
+            $sent[$key][$id] = $snapshot;
+            $this->publishBoard($key, 'issue', $issue);
+        }
+
+        foreach ($sent[$key] ?? [] as $id => $_) {
+            if (isset($present[$id])) {
+                continue;
+            }
+
+            unset($sent[$key][$id]);
+            $this->publishBoard($key, 'issue-removed', ['id' => (int) $id]);
+        }
+    }
+
+    /**
+     * Publish one board event (issue / issue-removed) to a project's room.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function publishBoard(string $key, string $kind, array $data): void
+    {
+        $this->httpServer?->publish("project/{$key}/issues", \json_encode([
+            'topic' => "project/{$key}/issues",
+            'kind' => $kind,
+            'data' => $data,
+        ], self::JSON));
     }
 
     /**
