@@ -343,6 +343,7 @@ final class Server
             $issues[] = [
                 'id' => (int) $issue->id,
                 'title' => $issue->title,
+                'desc' => $issue->description,   // the human-written brief — shown in the dashboard drawer
                 'status' => $status,
                 'done' => $done,
                 'live' => $status === IssueStatus::InProgress->value,
