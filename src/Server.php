@@ -22,12 +22,15 @@ use Claw\Run\IssueRunner;
 use Claw\Trace\TraceBus;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceRecordInterface;
+use Claw\Trace\TraceWire;
 use Claw\Workflow\SqliteStateStore;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use TrueAsync\HttpServerException;
+use TrueAsync\WebSocket;
+use TrueAsync\WebSocketUpgrade;
 
 /**
  * JSON + SSE API over the project state databases, for the php-claw-ui dashboard.
@@ -58,6 +61,9 @@ final class Server
 
     /** Live trace pub/sub: a run's LiveTraceSink publishes here, SSE streams subscribe (push, no poll). */
     private TraceBus $bus;
+
+    /** The running server, held so a detached run can publish trace into its cross-worker room. */
+    private ?HttpServer $httpServer = null;
 
     /**
      * Issue id → the detached run coroutine. Presence guards against a concurrent double-start; the
@@ -100,7 +106,10 @@ final class Server
         $this->bus = new TraceBus();   // live trace push from the spawned runs to the SSE streams
 
         $server = new HttpServer($config);
+        $this->httpServer = $server;
+        $server->enableRooms();                        // cross-worker rooms: one WS tracks every project
         $server->addHttpHandler($this->handle(...));
+        $server->addWebSocketHandler($this->handleWs(...));
 
         echo "claw dashboard API → http://{$host}:{$port}\n";
         echo "  projects: {$this->projectsDir}\n";
@@ -504,27 +513,15 @@ final class Server
     }
 
     /**
-     * Format a live (record, seq) into the same wire shape {@see TraceReader::tail()} produces from a db
-     * row, so a pushed event is indistinguishable from a replayed one. The wire shape belongs here, at the
-     * edge — not in the bus or the sink.
+     * Format a live (record, seq) into the wire shape a replayed row has, so a pushed event is
+     * indistinguishable from one {@see TraceReader::tail()} reads back. Shared with the WebSocket room
+     * publish through {@see TraceWire}.
      *
      * @return array<string, mixed>
      */
     private function liveRow(TraceRecordInterface $record, int $seq): array
     {
-        $event = $record->event();
-
-        return [
-            'seq' => $seq,
-            'spanId' => $record->id(),
-            'parentId' => $record->parentId(),
-            'depth' => $record->depth(),
-            'phase' => $record->phase(),
-            'type' => $event->type,
-            'level' => $event->level->value,
-            'tsMs' => $record->at(),
-            'data' => $event->data,
-        ];
+        return TraceWire::row($record, $seq);
     }
 
     /**
@@ -597,6 +594,88 @@ final class Server
         }
     }
 
+    /** A (topic, json) publisher into the server's cross-worker rooms, or null before start(). */
+    private function roomPublisher(): ?\Closure
+    {
+        $server = $this->httpServer;
+
+        if ($server === null) {
+            return null;
+        }
+
+        return static function (string $topic, string $payload) use ($server): void {
+            $server->publish($topic, $payload);
+        };
+    }
+
+    /**
+     * The single WebSocket endpoint (/api/ws): one connection subscribes to project rooms and receives
+     * every live event over it. Control frames are JSON — {"t":"sub","topic":...,"since":N} and
+     * {"t":"unsub","topic":...}. Live rows arrive on the room from a run's LiveTraceSink; the mutating
+     * commands (start/stop/answer/...) stay REST, so this carries live subscription only.
+     */
+    public function handleWs(WebSocket $ws, HttpRequest $request, WebSocketUpgrade $upgrade): void
+    {
+        $path = \parse_url((string) $request->getUri(), PHP_URL_PATH) ?: '/';
+
+        if ($path !== '/api/ws') {
+            $upgrade->reject(404, 'unknown websocket endpoint');
+
+            return;
+        }
+
+        foreach ($ws as $message) {
+            if ($message === null) {
+                continue;
+            }
+
+            $cmd = \json_decode((string) $message->data, true);
+
+            if (!\is_array($cmd)) {
+                continue;
+            }
+
+            $topic = (string) ($cmd['topic'] ?? '');
+
+            if ($topic === '') {
+                continue;
+            }
+
+            try {
+                match ($cmd['t'] ?? '') {
+                    'sub' => $this->wsSubscribe($ws, $topic, (int) ($cmd['since'] ?? 0)),
+                    'unsub' => $ws->unsubscribe($topic),
+                    default => null,
+                };
+            } catch (\Exception) {
+                // a malformed topic or a gone project must not tear the connection down
+            }
+        }
+    }
+
+    /**
+     * Subscribe to a room, then — for a run trace topic — replay the journal past `since` to this socket.
+     * Subscribing BEFORE the replay means nothing published mid-replay is lost; the client de-dupes the
+     * overlap by seq, exactly as the SSE run stream does.
+     */
+    private function wsSubscribe(WebSocket $ws, string $topic, int $since): void
+    {
+        $ws->subscribe($topic);
+
+        if (!\preg_match('#^project/([^/]+)/run/([^/]+)/trace$#', $topic, $m)) {
+            return;
+        }
+
+        foreach ($this->reader($m[1])->tail($m[2], $since) as $row) {
+            $ws->send(\json_encode([
+                'topic' => $topic,
+                'kind' => 'trace',
+                'seq' => $row['seq'],
+                'data' => $row,
+            ], self::JSON));
+        }
+    }
+
     /**
      * POST .../issues/{id}/start — launch the issue's solver as a detached coroutine and return at once.
      * The dashboard watches progress on the run stream; the run records its own ledger row, trace and
@@ -633,7 +712,7 @@ final class Server
         $answers = new Channel();
         $this->gates[$issue->id] = $answers;
 
-        $frontend = new HttpRunFrontend($store, $issue->id, $answers, $this->bus);
+        $frontend = new HttpRunFrontend($store, $issue->id, $answers, $this->bus, $this->roomPublisher(), $key);
 
         // Spawn detached so the run survives this handler returning; the dashboard watches the run stream.
         // The run records its own final status, so there is nothing to catch — only the active/gate cleanup.
