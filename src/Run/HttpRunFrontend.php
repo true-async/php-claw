@@ -21,12 +21,18 @@ use Claw\Trace\TraceStore;
  */
 final readonly class HttpRunFrontend implements RunFrontendInterface
 {
-    /** @param Channel<string> $answers the open gate's answer channel — POST .../answer sends the reply here */
+    /**
+     * @param Channel<string> $answers the open gate's answer channel — POST .../answer sends the reply here
+     * @param (\Closure(string, string): void)|null $publishRoom publishes (topic, json) to a cross-worker
+     *        room; null keeps the run SSE/in-process only (see {@see LiveTraceSink})
+     */
     public function __construct(
         private ProjectStoreInterface $store,
         private string $issueId,
         private Channel $answers,
         private TraceBus $bus,
+        private ?\Closure $publishRoom = null,
+        private string $projectKey = '',
     ) {
     }
 
@@ -48,7 +54,7 @@ final readonly class HttpRunFrontend implements RunFrontendInterface
     public function traceSinks(\PDO $projectDb): array
     {
         // One sink that persists AND publishes: LiveTraceSink writes through the TraceStore, then pushes
-        // the persisted record (with its seq) to the bus — no separate TraceStore to order against.
-        return [new LiveTraceSink(new TraceStore($projectDb), $this->bus)];
+        // the persisted record (with its seq) to the bus and, when wired, to the run's cross-worker room.
+        return [new LiveTraceSink(new TraceStore($projectDb), $this->bus, $this->publishRoom, $this->projectKey)];
     }
 }

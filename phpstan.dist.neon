@@ -17,3 +17,9 @@ parameters:
         # HTTP server extension classes (HttpServer, HttpRequest, HttpResponse, …)
         # used by src/Server.php. A single file, so it sidesteps the root \PDO clash.
         - vendor/true-async/ide-helper/src/Server/true-async-server.php
+    ignoreErrors:
+        # HttpServer::enableRooms()/publish() are the server-side rooms API (true-async/server#137,
+        # in main). Real at runtime — drop this once true-async/ide-helper ships stubs for them.
+        -
+            message: '#Call to an undefined method TrueAsync\\HttpServer::(enableRooms|publish)\(\)#'
+            path: src/Server.php

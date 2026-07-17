@@ -19,9 +19,17 @@ namespace Claw\Trace;
  */
 final readonly class LiveTraceSink implements TraceSinkInterface
 {
+    private const int JSON = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR;
+
+    /**
+     * @param (\Closure(string, string): void)|null $publishRoom fans a row out to the run's cross-worker
+     *        room (topic, json) so a WS client on any worker gets it; null keeps this SSE/in-process only
+     */
     public function __construct(
         private TraceStore $store,
         private TraceBus $bus,
+        private ?\Closure $publishRoom = null,
+        private string $projectKey = '',
     ) {
     }
 
@@ -38,6 +46,17 @@ final readonly class LiveTraceSink implements TraceSinkInterface
             return;
         }
 
-        $this->bus->publish($record, $this->store->lastSeq());   // then notify, with the record and its persisted seq
+        $seq = $this->store->lastSeq();
+        $this->bus->publish($record, $seq);                      // in-process push to SSE streams (same worker)
+
+        if ($this->publishRoom !== null) {
+            $topic = "project/{$this->projectKey}/run/{$record->runId()}/trace";
+            ($this->publishRoom)($topic, \json_encode([
+                'topic' => $topic,
+                'kind' => 'trace',
+                'seq' => $seq,
+                'data' => TraceWire::row($record, $seq),
+            ], self::JSON));
+        }
     }
 }
