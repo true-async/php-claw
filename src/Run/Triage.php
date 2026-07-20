@@ -14,7 +14,9 @@ use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
 use Claw\Project\StrategyOutcome;
 use Claw\Tool\ProjectManagerTool;
+use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
+use Claw\Trace\TraceReader;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 
@@ -87,13 +89,25 @@ final readonly class Triage
      * down, out of quota or simply unhelpful must not take the ticket with it: an untriaged issue
      * is a usable issue, it just has no verdict yet and can be triaged again.
      */
-    public function analyse(Issue $issue): ?Strategy
+    public function analyse(Issue $issue, ?string $failedRunId = null): ?Strategy
     {
         $registry = new Registry();
         $registry->add(new ProjectManagerTool($this->store));
 
         foreach ($this->readOnlyTools() as $tool) {
             $registry->add($tool);
+        }
+
+        // On a re-triage, let it open the run that failed. The ledger only carries a one-line reason —
+        // usually an exception message — which is enough for "the solver crashed" and far too thin for
+        // "the tests are red on the substance". The journal holds what actually happened, and this is
+        // the door to it: read-only, scoped to that one run, so it can look without acting.
+        if ($failedRunId !== null) {
+            $registry->add(new RecallTool(
+                new TraceReader($this->store->pdo()),
+                $failedRunId,
+                "Title: {$issue->title}\n\nDescription: {$issue->description}",
+            ));
         }
 
         $env = new Environment()
@@ -159,6 +173,11 @@ final readonly class Triage
         );
 
         return "This ticket has been attempted before:\n" . implode("\n", $lines) . "\n\n"
+            . 'Those reasons are one line each. If the choice turns on WHY it failed — and it usually does '
+            . '— open the run itself with `recall`: `what=\'workflow\'` maps the steps, `what=\'step\'` with '
+            . "a name returns that step's history, `what='artifacts'` its outputs, `what='tool'` a tool's "
+            . 'calls. Do that before deciding when the one-line reason is not enough to tell a solvable '
+            . "failure from a hopeless one.\n\n"
             . 'A strategy that already failed cannot be chosen again, and neither can a cheaper one — the '
             . "store will refuse it. Your next verdict must do MORE than what broke.\n\n"
             . 'If there is nothing left to escalate to, or the failures show this needs a person to '
