@@ -207,18 +207,54 @@ final class TraceReader
                 continue;
             }
 
+            // METADATA ONLY — no body. These records ride in the issue list, which the board holds
+            // for every issue of every watched project and re-reads on each refresh; a run that wrote
+            // a generated solver class or a few files put all of that in the payload, and none of it
+            // is needed until someone opens an artifact. The body is fetched per artifact instead
+            // ({@see body()}), by the index this loop assigns.
+            $value = (string) ($artifact['value'] ?? '');
             $records[] = [
+                'n' => \count($records),   // stable within a run: the order artifacts were recorded
                 'name' => (string) ($artifact['label'] ?? ''),
                 'kind' => (string) ($artifact['kind'] ?? 'file'),
                 'ext' => (string) ($artifact['ext'] ?? ''),
                 'mime' => (string) ($artifact['mime'] ?? ''),
                 'meta' => '',
                 'step' => $openSteps === [] ? '' : (string) end($openSteps),
-                'body' => (string) ($artifact['value'] ?? ''),
+                // A file artifact's value is its PATH, which is short and is what the viewer shows in
+                // the header, so it stays. A text/evidence body does not.
+                'path' => ($artifact['kind'] ?? '') === 'file' ? $value : '',
+                'size' => \strlen($value),
+                'source' => (string) ($artifact['source'] ?? ''),
+                'note' => (string) ($artifact['note'] ?? ''),
             ];
         }
 
         return $records;
+    }
+
+    /**
+     * One artifact's body, by its index within the run. Split from {@see artifactRecords()} so the
+     * board can list artifacts without carrying their contents: a viewer asks for a body when someone
+     * opens it, and never for the ones they do not.
+     *
+     * Null when the run has no artifact at that index.
+     */
+    public function artifactBody(string $runId, int $index): ?string
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT data FROM trace WHERE run_id = ? AND type = 'artifact' ORDER BY seq",
+        );
+        $stmt->execute([$runId]);
+        $rows = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+
+        if (!isset($rows[$index])) {
+            return null;
+        }
+
+        $artifact = json_decode((string) $rows[$index], true);
+
+        return \is_array($artifact) ? (string) ($artifact['value'] ?? '') : null;
     }
 
     /** The workflow's name and the steps it has run so far (in order) — a quick map of the run. */
