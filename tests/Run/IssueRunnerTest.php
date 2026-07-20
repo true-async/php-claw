@@ -105,6 +105,83 @@ final class IssueRunnerTest
         }
     }
 
+    #[Test]
+    public function aFailedRunNeverLeavesTheIssueClaimingToBeInProgress(): void
+    {
+        // A run sets the issue InProgress at the start. When it fails, something has to take that
+        // back — otherwise the board shows work that is not happening and nothing later moves it.
+        //
+        // The path that broke: the reset sat behind an early return that fires when no strategy is in
+        // force. A SECOND failure hits exactly that (the first already marked the strategy failed), so
+        // the ticket stuck at InProgress with no live run and no way out. Seen on a real board.
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+
+            // A solver class is loaded ONCE per process, and its name comes from the issue id — so an
+            // id another test already used would silently reuse THAT test's class instead of this
+            // one's. Burn a few ids so this test gets a class name of its own.
+            for ($i = 0; $i < 5; $i++) {
+                $store->addIssue("filler {$i}");
+            }
+            $issue = $store->addIssue('a task that will not work');
+
+            // A solver that throws on its only step: the run fails for a real reason, not a missing file.
+            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $solver = self::solverName($issue->id);
+            $workflows->write($solver, self::throwingSolverCode($solver), true);
+
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), new RecordingRunFrontend());
+
+            // Twice: the second is the case that used to strand the ticket, because by then the
+            // strategy has already been marked failed and there is nothing left to fail.
+            Assert::same($runner->run($issue), 1);
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);   // handed back, not stuck
+
+            Assert::same($runner->run($store->loadIssue($issue->id)), 1);
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);
+
+            // and both runs are recorded as failed, so the ledger tells the same story as the board
+            foreach ($store->recentRuns() as $run) {
+                Assert::same($run['status'], RunStatus::Failed->value);
+            }
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    private static function throwingSolverCode(string $class): string
+    {
+        return <<<PHP
+            <?php
+
+            declare(strict_types=1);
+
+            namespace ClawWorkflow\\Common;
+
+            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\WorkflowAbstract;
+
+            final class {$class} extends WorkflowAbstract
+            {
+                public function name(): string
+                {
+                    return 'throwing-solver';
+                }
+
+                #[Step]
+                public function implement(): void
+                {
+                    throw new \\RuntimeException('the step could not do the work');
+                }
+            }
+
+            PHP;
+    }
+
     private static function registerProject(string $projectsDir, string $projectFolder): ProjectStore
     {
         ProjectStore::init($projectsDir, $projectFolder);

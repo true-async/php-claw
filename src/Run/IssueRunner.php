@@ -297,6 +297,15 @@ final readonly class IssueRunner
      */
     private function giveBackToProjectManager(Issue $issue, string $reason, string $runId): void
     {
+        // FIRST, stop the issue claiming to be in progress. The run set it to InProgress at the start
+        // and it has just failed, so leaving it there strands the ticket: the board shows work that is
+        // not happening, and nothing later moves it. This used to sit behind the early return below,
+        // so a SECOND failure — where the strategy was already marked failed by the first — left the
+        // ticket stuck at InProgress with no run and no way out.
+        if ($this->store->loadIssue($issue->id)->status === IssueStatus::InProgress) {
+            $this->store->setIssueStatus($issue->id, IssueStatus::Open);
+        }
+
         if (!$this->store->failStrategy($issue->id, $reason)) {
             return;   // nothing was in force — the issue was never triaged, so there is nothing to escalate
         }
@@ -317,6 +326,7 @@ final readonly class IssueRunner
 
         if ($children === []) {
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::WaitingHuman);
             $this->frontend->report(
                 "issue #{$ctx->issue->id} was judged too big to solve in one run, but has no sub-issues yet — "
                 . 'it must be split before it can be worked on',
@@ -412,6 +422,7 @@ final readonly class IssueRunner
         } catch (\Throwable $e) {
             $ctx->tracer->exit($gen);
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->giveBackToProjectManager($ctx->issue, 'generation failed: ' . $e->getMessage(), $ctx->runId);
             $this->frontend->report('generation failed: ' . $e->getMessage(), true);
 
             return 1;
@@ -420,6 +431,7 @@ final readonly class IssueRunner
 
         if (!is_file($solverPath)) {
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->giveBackToProjectManager($ctx->issue, 'no solver workflow was produced', $ctx->runId);
             $this->frontend->report('no solver workflow was produced', true);
 
             return 1;
@@ -427,6 +439,9 @@ final readonly class IssueRunner
 
         if (!$this->frontend->approveSolver($solverPath, (string) file_get_contents($solverPath))) {
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Generated);
+            // Waiting on a person to review the generated solver — not in progress, and saying so is
+            // what puts the ticket in the column where someone will actually look at it.
+            $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::WaitingHuman);
             $this->frontend->report("Saved. Not run — review it, then run issue #{$ctx->issue->id} again.", false);
 
             return 0;
