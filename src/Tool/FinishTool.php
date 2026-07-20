@@ -23,8 +23,11 @@ final readonly class FinishTool implements ToolInterface
     public function description(): string
     {
         return 'Declare the task fully solved and finish the workflow now, skipping any remaining '
-            . 'steps. Call this ONLY when the work is actually complete (and, where it matters, '
-            . 'verified — e.g. the file is valid, the tests pass). Pass a short summary of what was done.';
+            . 'steps. Call this ONLY when the work is actually complete AND verified by evidence you '
+            . 'have seen — the tests were run and are green, not merely a clean syntax check. Your '
+            . 'summary is handed to a reviewer who checks it against the real files before the run is '
+            . 'allowed to end; an unearned claim is sent back as rework. Pass a short summary of what '
+            . 'was done and how you verified it.';
     }
 
     public function inputSchema(): array

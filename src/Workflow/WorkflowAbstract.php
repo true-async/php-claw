@@ -37,6 +37,11 @@ use Claw\Trace\Tracer;
  * A critic, though, IS machinery here: a step can declare {@see Step::$critic}, and the driver judges
  * the step's RESULT (the method's return value) against it on the reviewer role; while it falls short,
  * the supervisor (the ask channel) guides a re-run — a declarative aspect, not a hand-written sub-step.
+ *
+ * The critic is a gate the step cannot open from the inside. A worker that ends the run with the `done`
+ * tool does not escape review: the signal is held, the critic judges the work with that claim in hand,
+ * and only a passing verdict lets the run finish (see {@see step()}). Otherwise the party being reviewed
+ * would decide whether the review happens.
  */
 abstract class WorkflowAbstract implements WorkflowInterface
 {
@@ -195,7 +200,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $index = $this->backTo === null ? $index + 1 : $this->rewindTo($names, $index);
             }
         } catch (WorkflowFinished $finished) {
-            // the model called the `done` tool: the task is solved, skip any remaining steps.
+            // the model called `done` AND the step's critic let it stand: the task is solved, skip the rest.
             $this->tracer()?->log('done', $finished->summary, [], Level::Notice);
         }
     }
@@ -284,6 +289,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $maxRounds = $this->maxRounds($step);
             $workHistory = [];
             $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
+            $finished = null;   // the `done` this attempt raised, held until the critic settles it
 
             if ($this->reentryStep === $name) {
                 $resume = $this->stepHistory[$name] ?? [];   // a back() into this step continues its prior conversation
@@ -296,7 +302,18 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
                 $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
-                $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
+                $finished = null;               // each attempt must EARN the right to end the run afresh
+
+                try {
+                    $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
+                } catch (WorkflowFinished $signal) {
+                    // The worker called `done`: it declares the WHOLE TASK solved. That is a CLAIM, not a
+                    // verdict — and the one making it is the very work under review. So the signal is HELD
+                    // here and the critic runs anyway; only a passing review lets it end the run (below).
+                    // Without this, `done` walked straight past the gate: a worker that ran `php -l` and
+                    // called it a day closed issues whose test step never ran.
+                    $finished = $signal;
+                }
                 $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
 
                 if ($rubric === null) {
@@ -312,7 +329,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
                     $findings = "step '{$name}' produced nothing: no model/tool work and no artifact. A step "
                         . 'must do real work and leave a result; if it needs no review, it should carry no critic.';
                 } else {
-                    $findings = $this->critic($name, $rubric, $artifacts);
+                    $findings = $this->critic($name, $rubric, $artifacts, $finished?->summary);
                 }
 
                 if ($findings === null) {
@@ -344,6 +361,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
+
+        // The step is closed and snapshotted; only NOW may a reviewed `done` end the run. Re-raising
+        // after the bookkeeping (rather than from inside the step) is what makes the finish durable —
+        // the finishing step used to leave no trace in the snapshot at all.
+        if ($finished !== null) {
+            throw $finished;
+        }
     }
 
     /** Read a value from the run's environment — this scope, then the parent project settings. */
@@ -490,6 +514,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $this->enforceBudget();                  // the loop charged the total — stop the run if that tipped it over
 
             return $result->text ?? '';
+        } catch (WorkflowFinished $signal) {
+            // `done` cut the exchange short, so the assignment above never ran. Record the conversation
+            // the signal carried anyway: it is the only evidence of what the worker did, and the critic
+            // waiting in step() reviews exactly this.
+            $this->lastHistory = $signal->history;
+
+            throw $signal;
         } finally {
             $tracer?->exit($span);
         }
@@ -812,14 +843,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * step wrote, run `php -l` or the tests) rather than judge a blurb. Its standing role, prepended
      * here, is to REVIEW only: inspect and report, never do or fix the work itself. It judges the step's
      * reviewable output — its rendered artifacts (`$output`, see {@see renderArtifacts()}).
+     *
+     * $doneClaim is the summary a worker passed to `done` when it declared the whole task solved, or null
+     * if it simply returned. It is handed over as a claim to CHECK, not as a fact: a worker that mistakes
+     * a clean `php -l` for a finished task is exactly what this review exists to catch.
      */
-    private function critic(string $name, string $rubric, string $artifacts): ?string
+    private function critic(string $name, string $rubric, string $artifacts, ?string $doneClaim = null): ?string
     {
         $verdict = trim($this->ai(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
             . "Artifacts it recorded:\n{$artifacts}\n\n"
+            . $this->renderDoneClaim($doneClaim)
             . $this->renderParams($this->stepParams[$name] ?? [])
             . 'Judge it against the rubric. The artifacts and params above are your context — usually enough. '
             . "If, and ONLY IF, that is not enough to judge, you may call recall(what='step', name='{$name}') "
@@ -831,6 +867,25 @@ abstract class WorkflowAbstract implements WorkflowInterface
         ));
 
         return strtoupper($verdict) === 'OK' ? null : $verdict;
+    }
+
+    /**
+     * The `done` claim put to the critic, or '' when the step just returned. Spelled out as a claim under
+     * test — the worker ends the WHOLE run with it, so an unearned one is the costliest thing the review
+     * can miss, and naming the usual mistake (a lint pass read as a finished task) is worth the tokens.
+     */
+    private function renderDoneClaim(?string $doneClaim): string
+    {
+        if ($doneClaim === null) {
+            return '';
+        }
+
+        return 'The worker ENDED THE WHOLE RUN here: it called `done`, declaring the entire task solved and '
+            . "every remaining step unnecessary, with this summary:\n{$doneClaim}\n\n"
+            . 'Treat that as a CLAIM to verify, not a fact. It only holds if the task\'s real deliverable '
+            . 'exists AND has been proven to work — running a syntax check, or asserting success without '
+            . 'evidence, is NOT proof. If the rubric calls for tests, confirm they were actually run and '
+            . "green; run them yourself if you must. If the claim does not hold, say so in your findings.\n\n";
     }
 
     /**

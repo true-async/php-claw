@@ -7,6 +7,7 @@ namespace Tests\Workflow;
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\Budget;
+use Claw\Agent\Role;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
@@ -818,6 +819,101 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aCriticStillReviewsAStepThatCalledDone(): void
+    {
+        // `done` is a CLAIM, not a bypass: the step's critic runs on it, sees the summary, and only
+        // then may the run end. Without this the worker graded its own work by ending the run.
+        $doneCall = new ToolUseBlock('d1', 'done', ['summary' => 'lint is clean']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$doneCall], [$doneCall], StopReason::ToolUse, new Usage()),
+            $this->answer('OK'),   // the critic approves the claim
+        );
+        $store = new InMemoryStateStore();
+        $registry = new Registry();
+        $registry->add(new FinishTool());
+        $wf = new class ($this->config(worker: $worker, registry: $registry, store: $store), 'r1') extends WorkflowAbstract {
+            public bool $secondRan = false;
+
+            public function name(): string
+            {
+                return 'fin';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function first(): void
+            {
+                $this->ai('do the whole task');
+            }
+
+            #[Step]
+            public function second(): void
+            {
+                $this->secondRan = true;
+            }
+        };
+
+        $wf->run();
+
+        Assert::same(\count($worker->requests), 2);                          // the critic really was consulted
+        Assert::true(str_contains($this->lastUserText($worker), 'lint is clean'));   // it was shown the claim
+        Assert::false($wf->secondRan);                                       // an APPROVED done still ends the run
+        Assert::same($store->load('r1')['done'], ['first']);                 // and the finishing step is snapshotted
+    }
+
+    #[Test]
+    public function aDoneTheCriticRejectsDoesNotEndTheRun(): void
+    {
+        // The worker declared victory, the critic refuted it. The claim dies with the attempt that made
+        // it: the step reworks, and the run carries on to the steps `done` would have skipped.
+        $doneCall = new ToolUseBlock('d1', 'done', ['summary' => 'shipped it']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$doneCall], [$doneCall], StopReason::ToolUse, new Usage()),
+            $this->answer('the tests were never run'),   // critic rejects
+            $this->answer('reworked, tests green'),      // the step's second attempt
+            $this->answer('OK'),                         // critic approves
+        );
+        $registry = new Registry();
+        $registry->add(new FinishTool());
+        $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
+            public int $attempts = 0;
+            public bool $secondRan = false;
+
+            public function name(): string
+            {
+                return 'fin';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function first(): void
+            {
+                ++$this->attempts;
+                $this->ai('do the whole task');
+            }
+
+            #[Step]
+            public function second(): void
+            {
+                $this->secondRan = true;
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($wf->attempts, 2);   // the rejected attempt reworked
+        Assert::true($wf->secondRan);     // a refuted `done` does NOT skip the remaining steps
+    }
+
+    #[Test]
     public function aStepWhoseCriticPassesRunsOnce(): void
     {
         $worker = new ScriptedAgent(
@@ -975,6 +1071,28 @@ final class WorkflowAbstractTest
         }
 
         return $names;
+    }
+
+    /** The text of the last user turn the agent was sent — how a prompt is asserted on. */
+    private function lastUserText(ScriptedAgent $worker): string
+    {
+        $last = end($worker->requests);
+        $messages = $last === false ? [] : $last->messages;
+        $text = '';
+
+        foreach ($messages as $message) {
+            if ($message->role !== Role::User) {
+                continue;
+            }
+
+            foreach ($message->content as $block) {
+                if ($block instanceof TextBlock) {
+                    $text = $block->text;
+                }
+            }
+        }
+
+        return $text;
     }
 
     private function answer(string $text): AgentResponse
