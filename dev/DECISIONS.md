@@ -175,3 +175,22 @@ invented a replacement class out of the error text alone.
 reviewed by a person and shared by every ticket that picks it. A per-run rewrite would leave the
 original in place for the next ticket while this one quietly finished on the model's version — and
 the defect nobody was told about would still be on the shelf.
+
+---
+
+## 2026-07-20 — A history that stops mid-turn still answers every tool it asked for
+
+**Decision.** When the turn budget is spent right after the model requested tools, the loop
+appends a result block for every unanswered call before returning.
+
+**Why.** That history does not end there. A critic re-run continues it, and so does the handoff.
+Both backends reject an assistant message carrying `tool_calls` with no matching `tool_result`,
+so continuing it produces a 400 — nowhere near where the damage was done.
+
+Measured: a live run stopped at turn 19 immediately after the model asked to write a file, the
+critic rejected the step, and the re-run died on *"An assistant message with 'tool_calls' must be
+followed by tool messages"*. Two steps of misdirection later, that surfaced as "the solver crashed"
+and sent the supervisor to rewrite perfectly good code.
+
+The `done` path already closed its calls for exactly this reason, with a comment saying so. This
+exit was the one that did not.
