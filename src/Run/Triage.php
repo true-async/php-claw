@@ -19,8 +19,8 @@ use Claw\Tool\ListWorkflowsTool;
 use Claw\Tool\ProjectManagerTool;
 use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
-use Claw\Trace\TraceReader;
 use Claw\Trace\Tracer;
+use Claw\Trace\TraceReader;
 use Claw\Trace\TraceStore;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
@@ -302,11 +302,11 @@ final readonly class Triage
         }
 
         if ($lines === []) {
-            return "Ready-made workflows: none exist yet, so `library` is not available — this ticket "
+            return 'Ready-made workflows: none exist yet, so `library` is not available — this ticket '
                 . "must be solved another way.\n\n";
         }
 
-        return "READY-MADE WORKFLOWS already written and tested, which `library` would run as they "
+        return 'READY-MADE WORKFLOWS already written and tested, which `library` would run as they '
             . "stand.\nUse `list_workflows` to read one in full before choosing it:\n\n"
             . implode("\n", $lines) . "\n\n";
     }
