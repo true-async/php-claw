@@ -14,12 +14,14 @@ use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
 use Claw\Project\StrategyOutcome;
+use Claw\Tool\ListWorkflowsTool;
 use Claw\Tool\ProjectManagerTool;
 use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
 use Claw\Trace\TraceReader;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
+use Claw\Workflow\WorkflowStore;
 
 /**
  * The ProjectManager's analysis pass: read a freshly opened ticket and decide HOW it should be
@@ -86,7 +88,10 @@ final readonly class Triage
         - `direct`    — one agent with the project's tools can just do it. A localized, mechanical
                         change: a typo, a flag, a small method, a config value. This is the cheapest
                         path and should be your default for anything small.
-        - `library`   — a ready-made, tested workflow fits this task as it stands.
+        - `library`   — one of the ready-made, tested workflows fits this task as it stands. Do not
+                        guess at this: call `list_workflows` with the type you chose and read what is
+                        actually there. Choosing it means naming one of them, and a name that is not
+                        on that list is refused.
         - `generate`  — nothing off the shelf fits, so a solver workflow must be written for it.
                         Right for real implementation work with several concerns to carry.
         - `decompose` — genuinely too big for one run, and splitting it produces parts that can be
@@ -134,8 +139,14 @@ final readonly class Triage
      */
     public function analyse(Issue $issue, ?string $failedRunId = null): ?Strategy
     {
+        // Both tools are handed the SAME shelves: the one that shows what is available and the one that
+        // records the choice. Any gap between those two lists is a verdict that lists fine and runs wrong.
+        $project = $this->store->project();
+        $libraries = WorkflowStore::libraries($this->config->library, $project->path, $project->id);
+
         $registry = new Registry();
-        $registry->add(new ProjectManagerTool($this->store));
+        $registry->add(new ProjectManagerTool($this->store, $libraries));
+        $registry->add(new ListWorkflowsTool($libraries));
 
         foreach ($this->readOnlyTools() as $tool) {
             $registry->add($tool);

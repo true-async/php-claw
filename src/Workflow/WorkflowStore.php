@@ -5,20 +5,28 @@ declare(strict_types=1);
 namespace Claw\Workflow;
 
 use Claw\Exceptions\WorkflowException;
+use Claw\Project\IssueType;
 
 /**
  * Where workflows live on disk, and the only door for writing them.
  *
- * Two scopes: a shared "Common" folder visible to everyone, and a private folder
- * per session. Each scope maps to its own namespace, so two sessions can hold a
- * workflow of the same name without a class-redeclaration clash in the single
- * TrueAsync process:
+ * A store has a shared scope and a private per-session one. Several stores are alive at once — the
+ * dashboard holds every registered project open in one process — so each store's shared scope carries
+ * its OWN namespace segment. That is not tidiness: with one segment between them, two folders holding
+ * a workflow of the same name would resolve to whichever autoloader registered first, and nothing
+ * would report it.
  *
- *   common  -> ClawWorkflow\Common\<Name>           @ <base>/Common/<Name>.php
- *   session -> ClawWorkflow\Session\S<sid>\<Name>   @ <base>/Session/S<sid>/<Name>.php
+ *   solvers  -> ClawWorkflow\Common\<Name>            @ <appHome>/<key>-workflows/Common/<Name>.php
+ *   session  -> ClawWorkflow\Session\S<sid>\<Name>    @ <base>/Session/S<sid>/<Name>.php
+ *   library  -> ClawWorkflow\Library\<Name>           @ <CLAW_LIBRARY>/<Name>.php
+ *   project  -> ClawWorkflow\Project\P<key>\<Name>    @ <project>/.claw/workflows/<Name>.php
  *
- * A workflow file is pulled in by a plain namespace->path autoloader, so each
- * class is included exactly once per process.
+ * The two libraries are read here and written by people; `Common` is where a run's GENERATED solver
+ * lands, which is why its name says less than it should — renaming the segment would orphan the files
+ * already on disk that declare it.
+ *
+ * A workflow file is pulled in by a plain namespace->path autoloader, so each class is included
+ * exactly once per process.
  */
 final class WorkflowStore
 {
@@ -29,12 +37,66 @@ final class WorkflowStore
 
     private readonly string $sessionSegment;
 
+    /**
+     * @param string  $sharedSegment the namespace segment of this store's SHARED scope. It is a
+     *                               parameter because several stores are alive in one process — a
+     *                               project's generated solvers, the global library, and each project's
+     *                               own — and two of them holding a class of the same name would
+     *                               otherwise resolve to whichever autoloader was registered first,
+     *                               silently. Distinct segments make that collision impossible.
+     * @param ?string $sharedDir     where that scope's files are, when it is not the default
+     *                               `<baseDir>/Common`. A library's files sit directly in the folder
+     *                               the user configured; nothing should force them into a subdirectory
+     *                               named after our namespace.
+     */
     public function __construct(
         private readonly string $baseDir,
         string $sessionId,
+        private readonly string $sharedSegment = 'Common',
+        private readonly ?string $sharedDir = null,
     ) {
         $this->sessionSegment = 'S' . self::sanitize($sessionId);
         $this->registerAutoloader();
+    }
+
+    /**
+     * Where a project keeps its OWN ready-made workflows: inside the project itself, so they are
+     * versioned with the code they serve, travel with a checkout, and can be read and edited by the
+     * person whose repository it is.
+     */
+    public const string PROJECT_LIBRARY = '.claw/workflows';
+
+    /**
+     * Both shelves a ticket can be solved off, in the order a name clash is resolved: the global
+     * library first, the project's own second and winning.
+     *
+     * @return list<self>
+     */
+    public static function libraries(string $globalDir, string $projectPath, string $projectKey): array
+    {
+        return [
+            self::library($globalDir),
+            self::projectLibrary($projectPath . '/' . self::PROJECT_LIBRARY, $projectKey),
+        ];
+    }
+
+    /**
+     * The GLOBAL library: hand-written, tested workflows every project can be offered, at the path
+     * `CLAW_LIBRARY` points to. Read-only in practice — it is filled by people, not by runs.
+     */
+    public static function library(string $dir): self
+    {
+        return new self($dir, '', 'Library', $dir);
+    }
+
+    /**
+     * A PROJECT's own library, living inside that project's repository, so it is versioned with the
+     * code it serves and travels with a checkout. Keyed by project because the dashboard holds every
+     * registered project open in one process.
+     */
+    public static function projectLibrary(string $dir, string $projectKey): self
+    {
+        return new self($dir, '', 'Project\\P' . self::sanitize($projectKey), $dir);
     }
 
     /**
@@ -82,8 +144,129 @@ final class WorkflowStore
     public function namespaceFor(bool $shared): string
     {
         return $shared
-            ? self::NS_ROOT . '\\Common'
+            ? self::NS_ROOT . '\\' . $this->sharedSegment
             : self::NS_ROOT . '\\Session\\' . $this->sessionSegment;
+    }
+
+    /**
+     * The ready-made workflows this store offers, with everything the ProjectManager chooses by. Only
+     * classes marked {@see LibraryWorkflow} are listed — a library folder also holds base classes and
+     * helpers, and being in a directory is not a decision to be choosable.
+     *
+     * Reflection means LOADING each class, so a file that cannot be loaded is not skipped quietly: a
+     * library nobody can see the broken half of is worse than one that says what is wrong with it. The
+     * same goes for a missing description — an entry the model cannot judge is an entry it picks blind.
+     *
+     * Loading also means a class is read ONCE per process: were two shelves to hold the same
+     * fully-qualified name, both would report whichever file was read first. That is what the per-shelf
+     * namespace segments prevent, and it is why they are not cosmetic.
+     *
+     * @return list<array{name: string, class: string, description: string, serves: list<IssueType>}>
+     *
+     * @throws WorkflowException
+     */
+    public function catalogue(): array
+    {
+        $entries = [];
+
+        foreach (glob($this->commonDir() . '/*.php') ?: [] as $file) {
+            $name = basename($file, '.php');
+
+            if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name) !== 1) {
+                continue;   // not a class file we could have written; not ours to complain about
+            }
+
+            $class = $this->classFor($name, true);
+
+            if (!class_exists($class)) {
+                throw new WorkflowException(
+                    "workflow library: {$file} does not declare {$class} — the class must be named after "
+                    . 'its file and live in that folder\'s namespace',
+                );
+            }
+
+            $reflection = new \ReflectionClass($class);
+            $attribute = $reflection->getAttributes(LibraryWorkflow::class)[0] ?? null;
+
+            if ($attribute === null) {
+                continue;   // present but not offered: a base class, a helper, something half-written
+            }
+
+            $description = self::describe($reflection);
+            $serves = $attribute->newInstance()->serves;
+
+            if ($description === '' || $serves === []) {
+                throw new WorkflowException(
+                    "workflow library: {$class} is offered but cannot be chosen — it needs a docblock "
+                    . 'describing when to use it, and at least one issue type in its LibraryWorkflow attribute',
+                );
+            }
+
+            $entries[] = ['name' => $name, 'class' => $class, 'description' => $description, 'serves' => $serves];
+        }
+
+        return $entries;
+    }
+
+    /**
+     * What may be offered for a ticket of this type, gathered from several libraries and keyed by the
+     * name the ProjectManager will quote back.
+     *
+     * The type is the filter, and it is the reason a wrong pick is not available rather than merely
+     * discouraged: a workflow that does not serve this kind of work never reaches the list, so it
+     * cannot be chosen off it. Later stores WIN a name clash — the caller passes the global library
+     * first and the project's own second, because a project that ships a workflow under a name the
+     * global library also uses meant its own.
+     *
+     * @param list<self> $stores
+     *
+     * @return array<string, array{name: string, class: string, description: string, serves: list<IssueType>}>
+     *
+     * @throws WorkflowException
+     */
+    public static function offered(array $stores, IssueType $type): array
+    {
+        $offered = [];
+
+        foreach ($stores as $store) {
+            foreach ($store->catalogue() as $entry) {
+                if (\in_array($type, $entry['serves'], true)) {
+                    $offered[$entry['name']] = $entry;
+                }
+            }
+        }
+
+        return $offered;
+    }
+
+    /**
+     * A class's docblock as prose. Annotation lines are dropped at the first one: everything below
+     * `@param` is written for a static analyser, and pasting it into a prompt spends tokens on syntax
+     * the reader has no use for.
+     *
+     * @param \ReflectionClass<object> $class
+     */
+    private static function describe(\ReflectionClass $class): string
+    {
+        $doc = $class->getDocComment();
+
+        if ($doc === false) {
+            return '';   // comments stripped (opcache.save_comments=0) reads the same as none written
+        }
+
+        $lines = [];
+
+        foreach (preg_split('/\R/', $doc) ?: [] as $line) {
+            $line = trim((string) preg_replace('#^\s*(/\*\*+|\*+/|\*)#', '', $line));
+
+            if (str_starts_with($line, '@')) {
+                break;
+            }
+
+            $lines[] = $line;
+        }
+
+        return trim(implode("\n", $lines));
     }
 
     /** The short class name — the segment after the last namespace separator of a fully-qualified name. */
@@ -96,7 +279,7 @@ final class WorkflowStore
 
     private function commonDir(): string
     {
-        return $this->baseDir . '/Common';
+        return $this->sharedDir ?? $this->baseDir . '/Common';
     }
 
     private function sessionDir(): string
@@ -105,27 +288,39 @@ final class WorkflowStore
     }
 
     /**
-     * Map ClawWorkflow\... to a file under baseDir. The class name is built only
-     * from validated identifiers, so no path traversal is possible.
+     * Map this store's two scopes to their two directories. Each scope registers its OWN namespace
+     * prefix rather than assuming the file path mirrors the namespace, which is what lets a library
+     * keep its files directly in the configured folder. The class name is built only from validated
+     * identifiers, so no path traversal is possible.
      */
     private function registerAutoloader(): void
     {
-        if (isset(self::$autoloaded[$this->baseDir])) {
+        // Keyed by scope, not by directory alone: two stores may share a base and differ in segment.
+        $key = $this->baseDir . '|' . $this->sharedSegment;
+
+        if (isset(self::$autoloaded[$key])) {
             return;
         }
-        self::$autoloaded[$this->baseDir] = true;
+        self::$autoloaded[$key] = true;
 
-        $base = $this->baseDir;
-        spl_autoload_register(static function (string $class) use ($base): void {
-            if (!str_starts_with($class, self::NS_ROOT . '\\')) {
+        $scopes = [
+            $this->namespaceFor(true) . '\\' => $this->commonDir(),
+            $this->namespaceFor(false) . '\\' => $this->sessionDir(),
+        ];
+
+        spl_autoload_register(static function (string $class) use ($scopes): void {
+            foreach ($scopes as $prefix => $dir) {
+                if (!str_starts_with($class, $prefix)) {
+                    continue;
+                }
+
+                $path = $dir . '/' . str_replace('\\', '/', substr($class, \strlen($prefix))) . '.php';
+
+                if (is_file($path)) {
+                    require $path;
+                }
+
                 return;
-            }
-
-            $relative = substr($class, \strlen(self::NS_ROOT) + 1);
-            $path = $base . '/' . str_replace('\\', '/', $relative) . '.php';
-
-            if (is_file($path)) {
-                require $path;
             }
         });
     }

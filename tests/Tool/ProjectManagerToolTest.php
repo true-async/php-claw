@@ -15,6 +15,7 @@ use Claw\Project\Strategy;
 use Claw\Project\StrategyOutcome;
 use Claw\Tool\ProjectManagerTool;
 use Claw\Tool\Risk;
+use Claw\Workflow\WorkflowStore;
 use Testo\Assert;
 use Testo\Test;
 
@@ -455,6 +456,99 @@ final class ProjectManagerToolTest
             Assert::same($tool->risk(), Risk::Mutating);
             Assert::same(new Policy()->check($tool, ['action' => 'create_issue'])->decision, Decision::Confirm);
         });
+    }
+
+    #[Test]
+    public function aLibraryVerdictHasToNameAWorkflowThatExistsAndDoesThatKindOfWork(): void
+    {
+        $this->withStore(function (ProjectStore $store): void {
+            $library = self::tempDir();
+
+            try {
+                self::writeWorkflow($library, 'ShelvedBugFix', 'IssueType::Bug');
+                $tool = new ProjectManagerTool($store, [WorkflowStore::library($library)]);
+                $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
+
+                $verdict = ['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'reason' => 'a known shape'];
+
+                // Naming nothing: the verdict means a SPECIFIC workflow fits, so it cannot be anonymous.
+                $refusal = $this->refusal($tool, [...$verdict, 'strategy' => 'library']);
+                Assert::true(str_contains($refusal, 'list_workflows'));
+                Assert::true(str_contains($refusal, 'ShelvedBugFix'));   // says what IS available
+
+                // Naming something that is not there.
+                Assert::true(str_contains(
+                    $this->refusal($tool, [...$verdict, 'strategy' => 'library', 'workflow' => 'Imaginary']),
+                    "'Imaginary' is not one",
+                ));
+
+                // Naming a real workflow that does not serve this type. This is the invariant the whole
+                // filter exists for: the pair recorded can never be a workflow that does not do this work.
+                Assert::true(str_contains(
+                    $this->refusal($tool, [...$verdict, 'type' => 'research', 'strategy' => 'library', 'workflow' => 'ShelvedBugFix']),
+                    "nothing ready-made serves a 'research' ticket",
+                ));
+
+                // Nothing was recorded by any of those.
+                $afterTheRefusals = $store->currentStrategy('1');
+                Assert::same($afterTheRefusals, null);
+
+                $tool->handle([...$verdict, 'strategy' => 'library', 'workflow' => 'ShelvedBugFix']);
+
+                $current = $store->currentStrategy('1');
+                Assert::true($current !== null);
+                Assert::same($current['strategy'], Strategy::Library);
+                Assert::same($current['workflow'], 'ShelvedBugFix');   // the runner reads exactly this
+            } finally {
+                self::rmrf($library);
+            }
+        });
+    }
+
+    #[Test]
+    public function aSpentLadderIsReportedAsSpentRatherThanAsAMissingWorkflow(): void
+    {
+        // Order matters in a refusal. Once `generate` has failed, `library` is refused whatever it names,
+        // so answering "no such workflow" would send the model hunting for one that could not be recorded.
+        $this->withStore(function (ProjectStore $store): void {
+            $tool = new ProjectManagerTool($store);
+            $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'bespoke']);
+            $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'the solver crashed']);
+
+            $refusal = $this->refusal($tool, [
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'library',
+                'workflow' => 'Whatever', 'reason' => 'try the shelf',
+            ]);
+
+            Assert::true(str_contains($refusal, 'does not escalate past'));
+        });
+    }
+
+    /**
+     * A one-class library folder: enough for the tool to have something real to resolve against. The
+     * class name must be unique across the whole suite — PHP loads a class once per process, so a name
+     * another test also writes would resolve to whichever file was read first.
+     */
+    private static function writeWorkflow(string $dir, string $name, string $serves): void
+    {
+        file_put_contents($dir . '/' . $name . '.php', <<<PHP
+            <?php
+
+            namespace ClawWorkflow\\Library;
+
+            use Claw\\Project\\IssueType;
+            use Claw\\Workflow\\LibraryWorkflow;
+
+            /**
+             * Does the one thing it says on the tin.
+             */
+            #[LibraryWorkflow({$serves})]
+            final class {$name}
+            {
+            }
+
+            PHP);
     }
 
     /** Run $body against a real store in a throwaway project, cleaning up afterwards. */

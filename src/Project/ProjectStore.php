@@ -279,31 +279,35 @@ final class ProjectStore implements ProjectStoreInterface
      * person must sign off before it runs. Appended, never overwritten — {@see strategyAttempts()}
      * is what a retry reads to escalate instead of repeating itself.
      */
-    public function setStrategy(string $issueId, Strategy $strategy, string $reason, bool $needsHuman): void
-    {
-        // A strategy that already failed cannot be chosen again, and neither can a cheaper one: the same
-        // approach fails the same way, so a retry is only worth spending on if it does MORE than what
-        // broke. This rule was documented in three places and checked in none — which made it a
-        // suggestion to the model rather than a bound, the exact failure this system keeps hitting.
-        foreach ($this->strategyAttempts($issueId) as $attempt) {
-            if ($attempt['outcome'] === StrategyOutcome::Failed && $strategy->rank() <= $attempt['strategy']->rank()) {
-                throw new ClawException(sprintf(
-                    "strategy '%s' does not escalate past '%s', which already failed here (%s) — the next "
-                    . 'attempt must do more than the one that broke, not the same thing again',
-                    $strategy->value,
-                    $attempt['strategy']->value,
-                    $attempt['outcomeReason'],
-                ));
-            }
+    public function setStrategy(
+        string $issueId,
+        Strategy $strategy,
+        string $reason,
+        bool $needsHuman,
+        string $workflow = '',
+    ): void {
+        $this->assertEscalates($issueId, $strategy);
+
+        // A `library` verdict that does not name a workflow is unroutable, and it used to be recordable:
+        // the router had no arm for it and quietly generated a bespoke solver instead — the one thing the
+        // verdict meant to avoid. Refusing it here rather than at run time is deliberate; the model reads
+        // the refusal while it still has the ticket in mind, instead of a person inheriting a dead ticket
+        // an hour later. The check is in the STORE because the tool is not the only door.
+        if ($strategy === Strategy::Library && trim($workflow) === '') {
+            throw new ClawException(
+                "the 'library' strategy means a specific ready-made workflow fits, so it has to name one — "
+                . 'list what is available first, or choose a strategy that does the work from scratch',
+            );
         }
 
         $stmt = $this->pdo->prepare(
-            'INSERT INTO issue_strategy (issue_id, strategy, reason, needs_human, outcome, created_at)
-             VALUES (:issue, :strategy, :reason, :needs_human, :outcome, :created_at)',
+            'INSERT INTO issue_strategy (issue_id, strategy, workflow, reason, needs_human, outcome, created_at)
+             VALUES (:issue, :strategy, :workflow, :reason, :needs_human, :outcome, :created_at)',
         );
         $stmt->execute([
             'issue' => $issueId,
             'strategy' => $strategy->value,
+            'workflow' => trim($workflow),
             'reason' => $reason,
             'needs_human' => $needsHuman ? 1 : 0,
             'outcome' => StrategyOutcome::Pending->value,
@@ -323,14 +327,41 @@ final class ProjectStore implements ProjectStoreInterface
     }
 
     /**
+     * Refuse a strategy that does not escalate past one that already failed here. The same approach
+     * fails the same way, so a retry is only worth spending on if it does MORE than what broke; and a
+     * cheaper one is a step backwards. This rule was documented in three places and checked in none —
+     * which made it a suggestion to the model rather than a bound.
+     *
+     * Public because it has to be asked BEFORE the rest of a verdict is worked out: checking whether a
+     * named workflow exists first would answer a spent ladder with "no such workflow", sending the model
+     * off to find one that would be refused anyway.
+     *
+     * @throws ClawException
+     */
+    public function assertEscalates(string $issueId, Strategy $strategy): void
+    {
+        foreach ($this->strategyAttempts($issueId) as $attempt) {
+            if ($attempt['outcome'] === StrategyOutcome::Failed && $strategy->rank() <= $attempt['strategy']->rank()) {
+                throw new ClawException(sprintf(
+                    "strategy '%s' does not escalate past '%s', which already failed here (%s) — the next "
+                    . 'attempt must do more than the one that broke, not the same thing again',
+                    $strategy->value,
+                    $attempt['strategy']->value,
+                    $attempt['outcomeReason'],
+                ));
+            }
+        }
+    }
+
+    /**
      * The verdict currently in force for an issue, or null if it was never triaged.
      *
-     * @return ?array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
+     * @return ?array{strategy: Strategy, workflow: string, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
      */
     public function currentStrategy(string $issueId): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT strategy, reason, needs_human, outcome, outcome_reason FROM issue_strategy
+            'SELECT strategy, workflow, reason, needs_human, outcome, outcome_reason FROM issue_strategy
              WHERE issue_id = :issue ORDER BY id DESC LIMIT 1',
         );
         $stmt->execute(['issue' => $issueId]);
@@ -343,12 +374,12 @@ final class ProjectStore implements ProjectStoreInterface
      * Every verdict passed on an issue, oldest first — what was tried and how it ended. A re-triage
      * reads this so it escalates rather than choosing a strategy that has already failed.
      *
-     * @return list<array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}>
+     * @return list<array{strategy: Strategy, workflow: string, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}>
      */
     public function strategyAttempts(string $issueId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT strategy, reason, needs_human, outcome, outcome_reason FROM issue_strategy
+            'SELECT strategy, workflow, reason, needs_human, outcome, outcome_reason FROM issue_strategy
              WHERE issue_id = :issue ORDER BY id',
         );
         $stmt->execute(['issue' => $issueId]);
@@ -405,12 +436,13 @@ final class ProjectStore implements ProjectStoreInterface
     /**
      * @param array<string, mixed> $row
      *
-     * @return array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
+     * @return array{strategy: Strategy, workflow: string, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
      */
     private function hydrateStrategy(array $row): array
     {
         return [
             'strategy' => Strategy::stored((string) $row['strategy']),
+            'workflow' => (string) ($row['workflow'] ?? ''),
             'reason' => (string) $row['reason'],
             'needsHuman' => (bool) $row['needs_human'],
             'outcome' => StrategyOutcome::stored((string) $row['outcome']),
@@ -832,6 +864,7 @@ final class ProjectStore implements ProjectStoreInterface
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 issue_id       INTEGER NOT NULL,
                 strategy       TEXT NOT NULL,
+                workflow       TEXT NOT NULL DEFAULT '',
                 reason         TEXT NOT NULL DEFAULT '',
                 needs_human    INTEGER NOT NULL DEFAULT 0,
                 outcome        TEXT NOT NULL DEFAULT 'pending',
@@ -841,6 +874,7 @@ final class ProjectStore implements ProjectStoreInterface
             )",
         );
         self::addMissingColumns($pdo, 'issue_strategy', [
+            'workflow' => "TEXT NOT NULL DEFAULT ''",
             'outcome_reason' => "TEXT NOT NULL DEFAULT ''",
             'settled_at' => 'INTEGER',
         ]);

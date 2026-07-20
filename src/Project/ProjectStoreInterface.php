@@ -77,21 +77,39 @@ interface ProjectStoreInterface
      * Record the ProjectManager's verdict for an issue — how it is to be solved, why, and whether a
      * person must sign off. Appended, never overwritten.
      *
-     * @throws \Claw\Exceptions\ClawException when the strategy does not escalate past one that failed here
+     * @param string $workflow the ready-made workflow chosen; required by, and only meaningful to,
+     *                         {@see Strategy::Library}, which is unroutable without one
+     *
+     * @throws \Claw\Exceptions\ClawException when the strategy does not escalate past one that failed
+     *                                        here, or names no workflow while being `library`
      */
-    public function setStrategy(string $issueId, Strategy $strategy, string $reason, bool $needsHuman): void;
+    public function setStrategy(
+        string $issueId,
+        Strategy $strategy,
+        string $reason,
+        bool $needsHuman,
+        string $workflow = '',
+    ): void;
+
+    /**
+     * Refuse a strategy that does not escalate past one that already failed here — asked on its own so
+     * it can be checked before the rest of a verdict is worked out.
+     *
+     * @throws \Claw\Exceptions\ClawException
+     */
+    public function assertEscalates(string $issueId, Strategy $strategy): void;
 
     /**
      * The verdict currently in force for an issue, or null if it was never triaged.
      *
-     * @return ?array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
+     * @return ?array{strategy: Strategy, workflow: string, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
      */
     public function currentStrategy(string $issueId): ?array;
 
     /**
      * Every verdict passed on an issue, oldest first — what was tried and how it ended.
      *
-     * @return list<array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}>
+     * @return list<array{strategy: Strategy, workflow: string, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}>
      */
     public function strategyAttempts(string $issueId): array;
 

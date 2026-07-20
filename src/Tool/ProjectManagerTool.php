@@ -10,6 +10,7 @@ use Claw\Project\IssueStatus;
 use Claw\Project\IssueType;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
+use Claw\Workflow\WorkflowStore;
 
 /**
  * The ProjectManager's hands on the ticket ledger: open an issue (including a sub-issue of one too
@@ -31,8 +32,15 @@ use Claw\Project\Strategy;
  */
 final readonly class ProjectManagerTool implements ToolInterface
 {
-    public function __construct(private ProjectStoreInterface $store)
-    {
+    /**
+     * @param list<WorkflowStore> $libraries the shelves a `library` verdict is checked against — global
+     *                                       first, then the project's own. Empty means nothing ready-made
+     *                                       exists, and that strategy simply cannot be recorded.
+     */
+    public function __construct(
+        private ProjectStoreInterface $store,
+        private array $libraries = [],
+    ) {
     }
 
     public function name(): string
@@ -48,8 +56,8 @@ final readonly class ProjectManagerTool implements ToolInterface
             . "action='set_strategy' (issue, type, strategy, reason, optional needs_human) records WHAT KIND "
             . 'of work an issue is and HOW it is to be solved — type is one of bug, feature, refactor, '
             . 'design, research, chore; strategy is one of direct (one agent, a localized change), library '
-            . '(a ready-made workflow fits), generate (write a bespoke solver), decompose (split into '
-            . 'sub-issues); '
+            . '(a ready-made workflow fits — then `workflow` must name it, exactly as `list_workflows` gave '
+            . 'it), generate (write a bespoke solver), decompose (split into sub-issues); '
             . "action='needs_human' (issue, reason) parks the ticket for a PERSON — use it when the ticket "
             . 'cannot be worked on as written (it says nothing actionable, contradicts itself, or asks about '
             . 'something the project does not have) or when the call is not yours to make. This is a real '
@@ -86,6 +94,11 @@ final readonly class ProjectManagerTool implements ToolInterface
                     'type' => 'string',
                     'enum' => ['direct', 'library', 'generate', 'decompose'],
                     'description' => 'how the issue is to be solved; required for set_strategy',
+                ],
+                'workflow' => [
+                    'type' => 'string',
+                    'description' => 'name of the ready-made workflow to run, exactly as `list_workflows` '
+                        . "gave it; required when strategy is 'library' and ignored otherwise",
                 ],
                 'reason' => ['type' => 'string', 'description' => 'why — the justification for this decision'],
                 'needs_human' => [
@@ -174,11 +187,56 @@ final readonly class ProjectManagerTool implements ToolInterface
         // The type is written first and separately BECAUSE it survives what follows: setStrategy() refuses
         // a verdict that does not escalate past one that already failed, and the classification is right
         // either way — the retry that follows a refusal is about how to solve the ticket, not what it is.
+        // Asked before the workflow name is resolved, so a ticket whose ladder is spent hears that it is
+        // spent rather than being sent to hunt for a workflow that would be refused on arrival.
+        $this->store->assertEscalates($issueId, $strategy);
         $this->store->setIssueType($issueId, $type);
-        $this->store->setStrategy($issueId, $strategy, $reason, $needsHuman);
+
+        // `library` is the one verdict that has to say WHICH — and the name is checked against what
+        // actually serves this type, so the pair recorded here cannot be a workflow that does not do
+        // this kind of work. The list the model chose from was filtered the same way.
+        $workflow = $strategy === Strategy::Library
+            ? $this->resolveWorkflow($this->text($input, 'workflow'), $type)
+            : '';
+
+        $this->store->setStrategy($issueId, $strategy, $reason, $needsHuman, $workflow);
 
         return "Issue #{$issueId} is a {$type->value} and will be solved by: {$strategy->value}"
+            . ($workflow === '' ? '' : " ({$workflow})")
             . ($needsHuman ? ' (a person must approve first).' : '.');
+    }
+
+    /**
+     * Check that a chosen ready-made workflow exists AND serves the kind of work just recorded. Both
+     * halves matter: an unknown name would be a verdict the runner cannot carry out, and a known one
+     * that does not serve this type would be a verdict it carries out wrongly. The refusal lists what
+     * IS available, because a refusal a model cannot act on just costs another exchange.
+     *
+     * @throws ToolException
+     */
+    private function resolveWorkflow(string $name, IssueType $type): string
+    {
+        $name = trim($name);
+
+        try {
+            $offered = WorkflowStore::offered($this->libraries, $type);
+        } catch (ClawException $e) {
+            throw new ToolException('project_manager: ' . $e->getMessage(), 0, $e);
+        }
+
+        if (isset($offered[$name])) {
+            return $name;
+        }
+
+        $available = $offered === []
+            ? "nothing ready-made serves a '{$type->value}' ticket"
+            : 'available for this type: ' . implode(', ', array_keys($offered));
+
+        throw new ToolException(
+            "project_manager: strategy='library' needs the name of a ready-made workflow that handles a "
+            . "'{$type->value}' ticket" . ($name === '' ? '' : ", and '{$name}' is not one") . " — {$available}. "
+            . 'Use `list_workflows` to see them, or choose a strategy that does the work from scratch.',
+        );
     }
 
     /**

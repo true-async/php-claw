@@ -134,8 +134,24 @@ final readonly class IssueRunner
             ->set(EnvKey::TurnTimeLimit, (float) $this->config->turnSeconds)
             ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy));
 
-        $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issue->id) . 'Solver';
-        $solverClass = $workflowStore->classFor($solverName, true);
+        // The verdict is read BEFORE the run is recorded, because for a `library` ticket it decides what
+        // the run IS: the ledger row, the resume lookup and the trace all key off the workflow's name, and
+        // recording a ready-made run under a generated solver's name would misfile all three.
+        $verdict = $this->store->currentStrategy($issue->id);
+        $strategy = $verdict['strategy'] ?? null;
+
+        if ($strategy === Strategy::Library) {
+            $library = $this->libraryWorkflow($issue, (string) ($verdict['workflow'] ?? ''));
+
+            if ($library === null) {
+                return 1;   // the recorded workflow is gone; the ticket is a person's now, see libraryWorkflow()
+            }
+
+            [$solverName, $solverClass] = $library;
+        } else {
+            $solverName = 'Issue' . (string) preg_replace('/[^A-Za-z0-9]/', '', $issue->id) . 'Solver';
+            $solverClass = $workflowStore->classFor($solverName, true);
+        }
 
         // Resume an interrupted run (status still 'running') for this issue's solver, else start a new
         // one. The run id ties the ledger row, the trace, and the durable state snapshot together — so
@@ -180,13 +196,54 @@ final readonly class IssueRunner
 
         // Route on the ProjectManager's verdict. An untriaged issue keeps the old behaviour — generate
         // a solver — so a ticket opened before triage existed, or one whose analysis failed, still runs.
-        $strategy = $this->store->currentStrategy($issue->id)['strategy'] ?? null;
-
         return match ($strategy) {
             Strategy::Direct => $this->runDirect($ctx),
             Strategy::Decompose => $this->reportDecomposition($ctx),
+            // A ready-made workflow needs no generation and no approval gate: it was written by a person
+            // and reviewed once, which is the whole reason this strategy is cheaper than generating one.
+            Strategy::Library => $this->runSolver($ctx),
             default => $this->runGenerated($ctx),
         };
+    }
+
+    /**
+     * Resolve the ready-made workflow a `library` verdict named, as [name, class].
+     *
+     * Returning null means the verdict cannot be carried out: the workflow that was on the shelf at
+     * triage is not on it now — deleted, renamed, or the project was checked out somewhere without it.
+     * That is not something a retry fixes and not something to silently generate around (which is
+     * exactly what this strategy used to do), so the ticket goes to a person with the reason.
+     *
+     * @return ?array{0: string, 1: string}
+     */
+    private function libraryWorkflow(Issue $issue, string $name): ?array
+    {
+        $libraries = WorkflowStore::libraries(
+            $this->config->library,
+            $this->store->project()->path,
+            $this->store->project()->id,
+        );
+
+        try {
+            foreach ($libraries as $library) {
+                foreach ($library->catalogue() as $entry) {
+                    if ($entry['name'] === $name) {
+                        return [$entry['name'], $entry['class']];
+                    }
+                }
+            }
+
+            $reason = $name === ''
+                ? 'the verdict chose a ready-made workflow but recorded no name'
+                : "the ready-made workflow '{$name}' is no longer in any library";
+        } catch (ClawException $e) {
+            $reason = 'the workflow library cannot be read: ' . $e->getMessage();
+        }
+
+        $this->frontend->report("Cannot run issue #{$issue->id}: {$reason}.", true);
+        $this->store->setIssueStatus($issue->id, IssueStatus::WaitingHuman);
+
+        return null;
     }
 
     /**
