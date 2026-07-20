@@ -156,6 +156,24 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 $this->turnBudget->spend($response->usage->inputTokens + $response->usage->outputTokens);
 
                 if ($this->turnBudget->isExhausted()) {
+                    // Stopping here leaves the turn half-done: the model asked for tools that will now
+                    // never run. This history is CONTINUED later — a critic re-run, a handoff — and a
+                    // tool_use with no matching tool_result is rejected outright by both backends, so
+                    // every requested call is answered before we go. The same closing the `done` path
+                    // does below, for the same reason; only this exit was missing it, and a real run
+                    // died on the 400 two steps later.
+                    if ($response->toolCalls !== []) {
+                        $unanswered = array_map(
+                            static fn (ToolUseBlock $call): ToolResultBlock => new ToolResultBlock(
+                                $call->id,
+                                'not run: the turn budget was spent before this call',
+                                true,
+                            ),
+                            $response->toolCalls,
+                        );
+                        $history[] = new Message(Role::User, $unanswered);
+                    }
+
                     $this->tracer?->exit($turn);
 
                     return new TurnResult($history, $response->text, new Usage($totalInput, $totalOutput, $totalCached));

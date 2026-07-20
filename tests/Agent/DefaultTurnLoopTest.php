@@ -112,6 +112,36 @@ final class DefaultTurnLoopTest
     }
 
     #[Test]
+    public function aHistoryCutShortByTheTurnBudgetStillAnswersEveryToolItAskedFor(): void
+    {
+        // The budget can trip right after the model asked for a tool, so the tool never runs. The
+        // history is not thrown away — a critic re-run and the handoff both CONTINUE it — and both
+        // backends reject a tool_use with no matching tool_result. Measured: a real run stopped on
+        // exactly this at turn 19 and died two steps later on
+        // "An assistant message with 'tool_calls' must be followed by tool messages".
+        $use = new ToolUseBlock('call_1', 'write_file', ['path' => 'x']);
+        $agent = new ScriptedAgent(
+            new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(60, 60)),
+        );
+
+        // A budget the first round-trip spends outright.
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', turnBudget: new Budget(100));
+
+        $result = $loop->run([Message::userText('go')]);
+
+        $messages = $result->history;
+        $last = $messages[\count($messages) - 1];
+        Assert::same($last->role, Role::User);   // the results turn, not the dangling assistant one
+
+        // Every id the model asked for is answered, which is the invariant the backend enforces.
+        $answered = array_map(
+            static fn (ToolResultBlock $block): string => $block->toolUseId,
+            array_filter($last->content, static fn (object $b): bool => $b instanceof ToolResultBlock),
+        );
+        Assert::same(array_values($answered), ['call_1']);
+    }
+
+    #[Test]
     public function aToolFailingWithDifferentErrorsIsLeftToKeepIterating(): void
     {
         // A tool failing with a DIFFERENT error each time is the model iterating toward a fix — the
