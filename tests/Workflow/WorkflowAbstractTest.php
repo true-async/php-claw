@@ -382,6 +382,35 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function anUnconfiguredProjectManagerFallsBackToAStrongRoleNotTheCheapDefault(): void
+    {
+        // 'project-manager' decides a ticket's whole strategy, so leaving it unset must NOT drop it to
+        // the default (cheap) model the way an ordinary role does — it walks its fallback chain first.
+        $worker = new ScriptedAgent($this->answer('ok'), $this->answer('ok'), $this->answer('ok'));
+        $env = $this->config(worker: $worker)->set(EnvKey::Agents, ['worker-smart' => 'strong-model']);
+        $wf = new ProbeWorkflow($env, 'r1');
+
+        $wf->callAi('hi', [], 'project-manager');
+        Assert::same($worker->requests[0]->model, 'strong-model');   // chain reached worker-smart
+
+        // An explicit setting still wins over the chain.
+        $own = new ProbeWorkflow(
+            $this->config(worker: $worker)->set(EnvKey::Agents, [
+                'project-manager' => 'pm-model',
+                'worker-smart' => 'strong-model',
+            ]),
+            'r1',
+        );
+        $own->callAi('hi', [], 'project-manager');
+        Assert::same($worker->requests[1]->model, 'pm-model');
+
+        // With no strong role configured at all there is nothing better to reach for: the default.
+        $bare = new ProbeWorkflow($this->config(worker: $worker), 'r1');
+        $bare->callAi('hi', [], 'project-manager');
+        Assert::same($worker->requests[2]->model, 'm');
+    }
+
+    #[Test]
     public function askRoutesToTheChannelAndReturnsItsAnswer(): void
     {
         $channel = new class () implements SpeakerInterface {

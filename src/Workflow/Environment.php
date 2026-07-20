@@ -28,6 +28,17 @@ use Claw\Tool\ToolCall;
  */
 final class Environment
 {
+    /**
+     * Roles to try, in order, when a role is not configured — before settling for the scope's default
+     * model. Only roles that MUST be strong need an entry: the default model is the cheap tier, so a
+     * strong role left unconfigured would otherwise silently run on it. See {@see findAgentModel()}.
+     *
+     * @var array<string, list<string>>
+     */
+    private const array ROLE_FALLBACKS = [
+        'project-manager' => ['supervisor-smart', 'worker-smart', 'planner', 'reviewer'],
+    ];
+
     /** @var array<string, mixed> values set in THIS scope, keyed by the string key */
     private array $values = [];
 
@@ -123,6 +134,42 @@ final class Environment
         $id = $this->find(EnvKey::ModelId);
 
         return \is_string($id) ? $id : '';
+    }
+
+    /**
+     * The model a named agent role runs on: the role's own {@see EnvKey::Agents} entry, else the first
+     * configured role in its fallback chain, else the scope's default model.
+     *
+     * The chain exists because falling straight back to the default model is WRONG for a role whose
+     * whole point is being strong. `project-manager` decides the strategy for a ticket — whether one
+     * agent suffices, or a bespoke workflow is generated, or the work is decomposed into a tree of
+     * sub-tickets with a divided budget. Silently resolving that to the cheap default would put the
+     * costliest decision in the system on the weakest model. So an unconfigured strong role walks the
+     * chain to another strong role before it settles for the default.
+     */
+    public function findAgentModel(string $role): string
+    {
+        foreach ([$role, ...(self::ROLE_FALLBACKS[$role] ?? [])] as $candidate) {
+            $model = $this->configuredAgent($candidate);
+
+            if ($model !== null) {
+                return $model;
+            }
+        }
+
+        return $this->findModelId();
+    }
+
+    /** The model configured for a role in {@see EnvKey::Agents}, or null when the role is unset/blank. */
+    private function configuredAgent(string $role): ?string
+    {
+        $agents = $this->find(EnvKey::Agents);
+
+        if (!\is_array($agents) || !isset($agents[$role]) || !\is_string($agents[$role]) || $agents[$role] === '') {
+            return null;
+        }
+
+        return $agents[$role];
     }
 
     public function findSystemPrompt(): string

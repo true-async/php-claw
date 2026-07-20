@@ -295,10 +295,7 @@ final readonly class IssueRunner
      */
     private function supervisorSpeaker(Environment $env): SpeakerInterface
     {
-        $configured = $this->config->agents['supervisor'] ?? null;
-        $model = \is_string($configured) && $configured !== '' ? $configured : $this->config->model;
-
-        $loop = new DefaultTurnLoop($this->agent, $env->executor(), $model, self::SUPERVISOR_SYSTEM);
+        $loop = new DefaultTurnLoop($this->agent, $env->executor(), $env->findAgentModel('supervisor'), self::SUPERVISOR_SYSTEM);
         $supervisor = new AgentSpeaker(SpeakerRole::Supervisor, $loop);
 
         return new class ($supervisor) implements SpeakerInterface {
