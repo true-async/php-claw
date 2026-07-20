@@ -50,6 +50,7 @@ use TrueAsync\HttpServerException;
  *   GET  /api/projects/{key}/runs/{runId}/artifacts
  *   POST /api/projects/{key}/issues/{id}/start               (launch the solver, 202)
  *   POST /api/projects/{key}/issues/{id}/answer              (reply to the run's open gate)
+ *   POST /api/projects/{key}/description                     (rewrite the project's Markdown brief)
  */
 final class Server
 {
@@ -128,6 +129,12 @@ final class Server
             if ($method === 'POST') {
                 if ($path === '/api/projects') {
                     $this->createProject($request, $response);
+
+                    return;
+                }
+
+                if (\preg_match('#^/api/projects/([^/]+)/description$#', $path, $matches)) {
+                    $this->setProjectDescription($request, $response, $matches[1]);
 
                     return;
                 }
@@ -241,10 +248,14 @@ final class Server
     private function projects(): array
     {
         return array_map(
+            // description is the project's brief, sent as the raw MARKDOWN that was authored — the
+            // dashboard renders it. Sending pre-rendered HTML would put the escaping decision on the
+            // server and leave the client no safe way to re-render it.
             static fn (Project $project): array => [
                 'key' => $project->id,
                 'name' => $project->name,
                 'path' => $project->path,
+                'description' => $project->description,
             ],
             ProjectStore::all($this->projectsDir),
         );
@@ -259,6 +270,7 @@ final class Server
     {
         $payload = \json_decode($request->getBody(), true);
         $folder = \is_array($payload) && isset($payload['path']) ? (string) $payload['path'] : '';
+        $description = \is_array($payload) && isset($payload['description']) ? (string) $payload['description'] : '';
 
         if ($folder === '') {
             $response->json(['error' => 'a project folder path is required'], 400);
@@ -267,7 +279,7 @@ final class Server
         }
 
         try {
-            $project = ProjectStore::init($this->projectsDir, $folder);
+            $project = ProjectStore::init($this->projectsDir, $folder, $description);
         } catch (ClawException $e) {
             $response->json(['error' => $e->getMessage()], 400);
 
@@ -277,7 +289,38 @@ final class Server
         // Drop any cached miss so the new project is readable on the next request.
         unset($this->stores[$project->id], $this->readers[$project->id]);
 
-        $response->json(['key' => $project->id, 'name' => $project->name, 'path' => $project->path], 201);
+        $response->json([
+            'key' => $project->id,
+            'name' => $project->name,
+            'path' => $project->path,
+            'description' => $project->description,
+        ], 201);
+    }
+
+    /**
+     * POST /api/projects/{key}/description — rewrite a project's brief. The body carries the Markdown
+     * SOURCE; the dashboard renders it, so nothing here escapes or transforms it.
+     */
+    private function setProjectDescription(HttpRequest $request, HttpResponse $response, string $key): void
+    {
+        $payload = \json_decode($request->getBody(), true);
+
+        if (!\is_array($payload) || !\array_key_exists('description', $payload)) {
+            $response->json(['error' => 'a description is required'], 400);
+
+            return;
+        }
+
+        try {
+            $store = $this->store($key);
+            $store->setDescription((string) $payload['description']);
+        } catch (\Exception $e) {
+            $response->json(['error' => $e->getMessage()], 404);
+
+            return;
+        }
+
+        $response->json(['key' => $key, 'description' => $store->project()->description]);
     }
 
     /**

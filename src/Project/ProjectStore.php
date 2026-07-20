@@ -47,7 +47,7 @@ final class ProjectStore implements ProjectStoreInterface
      *
      * @throws ClawException
      */
-    public static function init(string $projectsDir, string $projectPath): Project
+    public static function init(string $projectsDir, string $projectPath, string $description = ''): Project
     {
         $abs = realpath($projectPath);
 
@@ -79,7 +79,7 @@ final class ProjectStore implements ProjectStoreInterface
                 'id' => $id,
                 'name' => $name,
                 'path' => $abs,
-                'description' => '',
+                'description' => $description,
                 'created_at' => time(),
             ]);
         } catch (\PDOException $e) {
@@ -89,7 +89,7 @@ final class ProjectStore implements ProjectStoreInterface
             throw new ClawException("ProjectStore: cannot create {$dbPath}: " . $e->getMessage(), 0, $e);
         }
 
-        return new Project($id, $name, $abs);
+        return new Project($id, $name, $abs, $description);
     }
 
     /**
@@ -156,6 +156,25 @@ final class ProjectStore implements ProjectStoreInterface
     public function project(): Project
     {
         return $this->project;
+    }
+
+    /**
+     * Rewrite the project's description — its brief, authored as Markdown and rendered for reading.
+     * Kept as raw source rather than rendered HTML: the store holds what the author wrote, and how it
+     * is displayed is the reader's business.
+     *
+     * @throws ClawException
+     */
+    public function setDescription(string $description): void
+    {
+        try {
+            $stmt = $this->pdo->prepare('UPDATE project SET description = :description WHERE id = :id');
+            $stmt->execute(['description' => $description, 'id' => $this->project->id]);
+        } catch (\PDOException $e) {
+            throw new ClawException('ProjectStore: cannot update the description: ' . $e->getMessage(), 0, $e);
+        }
+
+        $this->project->description = $description;   // the open handle must not serve a stale brief
     }
 
     /**
