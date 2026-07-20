@@ -64,8 +64,13 @@ final readonly class IssueRunner
         what you touched, run them.
 
         When the change exists and you have SEEN it work, call `done` with a short summary of what you
-        changed and what you ran to verify it. If the ticket turns out to be bigger than it looked, say
-        so plainly instead of half-doing it.
+        changed and what you ran to verify it.
+
+        If you CANNOT finish — the ticket is unclear, it asks for something that is not there, or it
+        turns out to be far bigger than it looked — do NOT just answer in prose. Use the `[question]`
+        protocol described above: it reaches a person, and your reply comes back so you can carry on.
+        Prose with no tool call and no marker ends the attempt with nothing done, and the ticket goes
+        back for re-triage.
         PROMPT;
 
     /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
@@ -223,12 +228,18 @@ final readonly class IssueRunner
             $ctx->env->find(EnvKey::Ask) instanceof SpeakerInterface ? $ctx->env->find(EnvKey::Ask) : null,
         );
 
+        // `done` is the ONLY thing that finishes this path. The turn loop returns normally whenever
+        // the model stops without calling a tool — which is what it does when it has a question, or
+        // gives up, or simply wanders off — and treating that as success closed a ticket whose
+        // description was gibberish, on the strength of the model replying "can you clarify?".
+        $declaredDone = false;
+
         try {
             $loop->run([Message::userText(
                 "Title: {$ctx->issue->title}\n\nDescription: {$ctx->issue->description}",
             )]);
         } catch (WorkflowFinished) {
-            // the model called `done`: the normal way this path ends
+            $declaredDone = true;
         } catch (\Cancellation $cancellation) {
             throw $cancellation;
         } catch (\Throwable $e) {
@@ -239,8 +250,27 @@ final readonly class IssueRunner
 
             return 1;
         }
-
         $ctx->tracer->exit($span);
+
+        if (!$declaredDone) {
+            // Not a crash, so there is no error to report — the model simply never claimed the work
+            // was finished. Hand it back: the ProjectManager escalates, or decides a person is needed,
+            // which is the right answer when the ticket itself is the problem.
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->giveBackToProjectManager(
+                $ctx->issue,
+                'the direct attempt ended without declaring the task done — the worker stopped without '
+                . 'calling `done`, usually because it needed something the ticket does not say',
+                $ctx->runId,
+            );
+            $this->frontend->report(
+                "run #{$ctx->runId} ended without finishing issue #{$ctx->issue->id}; handed back for triage",
+                true,
+            );
+
+            return 1;
+        }
+
         $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
         $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Done);
         $ctx->store->settleAncestors($ctx->issue->id);
