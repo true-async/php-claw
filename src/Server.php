@@ -450,8 +450,12 @@ final class Server
                 'depth' => $issue->depth,
                 'done' => $done,
                 'live' => $status === IssueStatus::InProgress->value,
+                // Numbered WITHIN the issue, not by the global runs.id — an issue's first run showing
+                // as "run #47" says nothing to the person reading the card. The trace still keys off
+                // the real id; this is the label.
                 'runs' => array_map(
-                    static fn (array $run): array => ['n' => (int) $run['id'], 'status' => $run['status']],
+                    static fn (int $i, array $run): array => ['n' => $i + 1, 'id' => (int) $run['id'], 'status' => $run['status']],
+                    array_keys($runs),
                     $runs,
                 ),
                 'tokensIn' => $tokens['in'],
