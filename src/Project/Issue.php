@@ -23,6 +23,7 @@ final class Issue
      * @param list<string> $runs   ids of workflow runs spawned for this issue
      * @param ?string      $parent id of the issue this was decomposed out of; null for a root issue
      * @param int          $depth  distance from the root — 0 for a root issue, parent's depth + 1 otherwise
+     * @param ?IssueType   $type   what kind of work this is; null until the ProjectManager has typed it
      */
     public function __construct(
         public readonly string $id,
@@ -33,6 +34,7 @@ final class Issue
         public array $runs = [],
         public readonly ?string $parent = null,
         public readonly int $depth = 0,
+        public ?IssueType $type = null,
     ) {
     }
 }

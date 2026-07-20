@@ -9,6 +9,7 @@ use Claw\Exceptions\ToolException;
 use Claw\Permission\Decision;
 use Claw\Permission\Policy;
 use Claw\Project\IssueStatus;
+use Claw\Project\IssueType;
 use Claw\Project\ProjectStore;
 use Claw\Project\Strategy;
 use Claw\Project\StrategyOutcome;
@@ -146,6 +147,7 @@ final class ProjectManagerToolTest
             $tool->handle([
                 'action' => 'set_strategy',
                 'issue' => '1',
+                'type' => 'feature',
                 'strategy' => 'decompose',
                 'reason' => 'too big for one run',
                 'needs_human' => true,
@@ -156,11 +158,16 @@ final class ProjectManagerToolTest
             Assert::same($current['strategy'], Strategy::Decompose);
             Assert::same($current['reason'], 'too big for one run');
             Assert::true($current['needsHuman']);
+            Assert::same($store->loadIssue('1')->type, IssueType::Feature);   // the same call types the ticket
 
-            // A typo is an error the model reads back and corrects, not a silent default.
+            // A typo is an error the model reads back and corrects, not a silent default — in either field.
             Assert::true(str_contains(
-                $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'wing-it', 'reason' => 'x']),
+                $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'wing-it', 'reason' => 'x']),
                 "unknown strategy 'wing-it'",
+            ));
+            Assert::true(str_contains(
+                $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'emergency', 'strategy' => 'direct', 'reason' => 'x']),
+                "unknown issue type 'emergency'",
             ));
 
             // The verdict is reviewed, so it has to carry a justification.
@@ -177,7 +184,7 @@ final class ProjectManagerToolTest
         $this->withStore(function (ProjectStore $store): void {
             $tool = new ProjectManagerTool($store);
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'direct', 'reason' => 'looks small']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'direct', 'reason' => 'looks small']);
             $store->setIssueStatus('1', IssueStatus::InProgress);
 
             $out = $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'needs a real parser']);
@@ -193,7 +200,7 @@ final class ProjectManagerToolTest
             Assert::same($attempts[0]['outcomeReason'], 'needs a real parser');
 
             // A second verdict is appended, so the history a retry escalates from survives.
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'generate', 'reason' => 'direct failed']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'direct failed']);
             $attempts = $store->strategyAttempts('1');
             Assert::count($attempts, 2);
             Assert::same($attempts[0]['strategy'], Strategy::Direct);
@@ -208,7 +215,7 @@ final class ProjectManagerToolTest
         $this->withStore(function (ProjectStore $store): void {
             $tool = new ProjectManagerTool($store);
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'direct', 'reason' => 'small']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'direct', 'reason' => 'small']);
             $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'the first failure']);
 
             $out = $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'a stray second report']);
@@ -228,21 +235,21 @@ final class ProjectManagerToolTest
         $this->withStore(function (ProjectStore $store): void {
             $tool = new ProjectManagerTool($store);
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'generate', 'reason' => 'bespoke']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'generate', 'reason' => 'bespoke']);
             $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'the solver kept crashing']);
 
             // The same strategy again, and a cheaper one, are both refused...
-            $again = $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'generate', 'reason' => 'one more go']);
+            $again = $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'generate', 'reason' => 'one more go']);
             Assert::true(str_contains($again, 'does not escalate past'));
             Assert::true(str_contains($again, 'the solver kept crashing'));   // says what broke last time
 
             Assert::true(str_contains(
-                $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'direct', 'reason' => 'try small']),
+                $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'direct', 'reason' => 'try small']),
                 'does not escalate past',
             ));
 
             // ...and only a strategy that does MORE is accepted.
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'decompose', 'reason' => 'split it']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'decompose', 'reason' => 'split it']);
             $current = $store->currentStrategy('1');
             Assert::true($current !== null);
             Assert::same($current['strategy'], Strategy::Decompose);
@@ -257,7 +264,7 @@ final class ProjectManagerToolTest
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
             $tool->handle([
-                'action' => 'set_strategy', 'issue' => '1', 'strategy' => 'decompose',
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'decompose',
                 'reason' => 'too big', 'needs_human' => true,
             ]);
 
@@ -279,14 +286,14 @@ final class ProjectManagerToolTest
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
             foreach (['direct', 'generate', 'decompose'] as $strategy) {
-                $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => $strategy, 'reason' => 'next rung']);
+                $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => $strategy, 'reason' => 'next rung']);
                 $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => "{$strategy} did not work"]);
             }
 
             // Every rung is now spent — nothing escalates past decompose, including decompose itself.
             foreach (['direct', 'library', 'generate', 'decompose'] as $strategy) {
                 Assert::true(str_contains(
-                    $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'strategy' => $strategy, 'reason' => 'again']),
+                    $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => $strategy, 'reason' => 'again']),
                     'does not escalate past',
                 ));
             }
@@ -303,7 +310,7 @@ final class ProjectManagerToolTest
         $this->withStore(function (ProjectStore $store): void {
             $tool = new ProjectManagerTool($store);
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => 'direct', 'reason' => 'small']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'direct', 'reason' => 'small']);
             $store->setIssueStatus('1', IssueStatus::Closed);   // a person ruled won't-fix
 
             $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'a straggler run reporting in']);
@@ -324,7 +331,7 @@ final class ProjectManagerToolTest
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
             $tool->handle([
-                'action' => 'set_strategy', 'issue' => '1', 'strategy' => 'direct',
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'direct',
                 'reason' => 'small', 'needs_human' => 'false',
             ]);
             $current = $store->currentStrategy('1');
@@ -333,7 +340,7 @@ final class ProjectManagerToolTest
 
             // and omitting it defaults to false
             $tool->handle([
-                'action' => 'set_strategy', 'issue' => '1', 'strategy' => 'generate', 'reason' => 'bigger',
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'bigger',
             ]);
             $current = $store->currentStrategy('1');
             Assert::true($current !== null);

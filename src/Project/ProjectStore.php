@@ -187,7 +187,7 @@ final class ProjectStore implements ProjectStoreInterface
     {
         // soft-deleted issues stay in the db (history + runs) but are hidden from the board
         $stmt = $this->pdo->query(
-            "SELECT id, title, description, status, parent_id, depth FROM issues WHERE status != 'Deleted' ORDER BY id",
+            "SELECT id, title, description, status, type, parent_id, depth FROM issues WHERE status != 'Deleted' ORDER BY id",
         );
         $rows = $stmt === false ? [] : $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
@@ -203,7 +203,7 @@ final class ProjectStore implements ProjectStoreInterface
     public function childIssues(string $issueId): array
     {
         $stmt = $this->pdo->prepare(
-            "SELECT id, title, description, status, parent_id, depth
+            "SELECT id, title, description, status, type, parent_id, depth
              FROM issues WHERE parent_id = :parent AND status != 'Deleted' ORDER BY id",
         );
         $stmt->execute(['parent' => $issueId]);
@@ -503,6 +503,7 @@ final class ProjectStore implements ProjectStoreInterface
             [],
             ($row['parent_id'] ?? null) === null ? null : (string) $row['parent_id'],
             (int) ($row['depth'] ?? 0),
+            IssueType::stored((string) ($row['type'] ?? '')),
         );
     }
 
@@ -624,7 +625,7 @@ final class ProjectStore implements ProjectStoreInterface
     {
         try {
             $stmt = $this->pdo->prepare(
-                'SELECT id, title, description, status, parent_id, depth FROM issues WHERE id = :id',
+                'SELECT id, title, description, status, type, parent_id, depth FROM issues WHERE id = :id',
             );
             $stmt->execute(['id' => $issueId]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
@@ -649,6 +650,7 @@ final class ProjectStore implements ProjectStoreInterface
             $runs,
             ($row['parent_id'] ?? null) === null ? null : (string) $row['parent_id'],
             (int) ($row['depth'] ?? 0),
+            IssueType::stored((string) ($row['type'] ?? '')),
         );
     }
 
@@ -716,6 +718,18 @@ final class ProjectStore implements ProjectStoreInterface
     {
         $stmt = $this->pdo->prepare('UPDATE issues SET status = :status WHERE id = :id');
         $stmt->execute(['status' => $status->name, 'id' => $issueId]);
+    }
+
+    /**
+     * Record what kind of work an issue is. Overwrites: unlike a strategy, whose every verdict is kept
+     * so a retry can see what already failed, the type is one answer about the ticket — a correction to
+     * it (by a later triage, or by a person who knows better) replaces the wrong answer rather than
+     * queueing behind it.
+     */
+    public function setIssueType(string $issueId, IssueType $type): void
+    {
+        $stmt = $this->pdo->prepare('UPDATE issues SET type = :type WHERE id = :id');
+        $stmt->execute(['type' => $type->value, 'id' => $issueId]);
     }
 
     /** A filesystem-safe, stable key derived from a folder's absolute path. */
@@ -795,14 +809,20 @@ final class ProjectStore implements ProjectStoreInterface
                 title       TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 status      TEXT NOT NULL,
+                type        TEXT NOT NULL DEFAULT '',
                 parent_id   INTEGER,
                 depth       INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL
             )",
         );
+        // An issue's type is a single column and not a ledger, unlike its strategy: it is a property of
+        // the ticket that does not change with an attempt. The empty string is "not typed yet" — what a
+        // ticket reads as between its creation and its triage, and what every row in an existing db
+        // gets when this column is added to it.
         self::addMissingColumns($pdo, 'issues', [
             'parent_id' => 'INTEGER',
             'depth' => 'INTEGER NOT NULL DEFAULT 0',
+            'type' => "TEXT NOT NULL DEFAULT ''",
         ]);
         // Every ProjectManager verdict for an issue, newest last — a LEDGER, not a single column, so a
         // retry can see which strategies were already tried and why they failed. Overwriting one field
