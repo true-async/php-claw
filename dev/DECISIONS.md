@@ -4,29 +4,35 @@ Why things are the way they are. Newest last.
 
 ---
 
-## 2026-07-20 — The ProjectManager runs when a ticket is created
+## 2026-07-20 — Creating a ticket and triaging it are two stages, not one
 
-**Decision.** Triage is not a separate command. Opening a ticket *is* the trigger: the
-ProjectManager fires the moment an issue is created, from either door — the dashboard's
-create button (`POST /api/projects/{key}/issues`) and the CLI (`claw -i`) behave
-identically.
+**Decision.** Two steps, in order:
 
-It reads the ticket, decides how the work should be done, and records a `Strategy` on the
-issue: `direct` (one agent, a localized change), `library` (a ready-made workflow fits),
-`generate` (write a bespoke solver — today's only path), or `decompose` (split into
-sub-issues). Running the issue later routes on that verdict instead of always generating.
+1. **The ticket is created**, and that is all. It is written to the ledger and appears on
+   the board at once. Creation stays fast and costs nothing — the same from either door,
+   the dashboard's create button (`POST /api/projects/{key}/issues`) and `claw -i`.
+2. **The ProjectManager then analyses it** and decides how the work should be done —
+   whether a workflow is needed at all. When it decides, it **changes the ticket's state**,
+   and the board shows that immediately over the existing issue stream.
 
-**Why.** A verdict that arrives at run time is a verdict nobody can look at. Deciding at
-creation puts the strategy on the board next to the ticket, where it can be read and
-overridden before it spends anything. It also removes a command: there is no state in
-which a ticket exists but has not been triaged.
+The verdict is a `Strategy`: `direct` (one agent, a localized change), `library` (a
+ready-made workflow fits), `generate` (write a bespoke solver — today's only path), or
+`decompose` (split into sub-issues). Running the issue later routes on that verdict instead
+of always generating.
 
-**Cost, accepted.** Ticket creation now costs a model call and is no longer instant. The
-create path has to stop being synchronous, or the caller waits on the model.
+**Why two stages.** Folding the analysis into creation would make the create call wait on a
+model — the button would hang for seconds, and a failed model call would mean no ticket. A
+ticket the user typed must exist whether or not anything downstream succeeds. Separating
+them also makes the decision watchable: it lands as a state change the person sees arrive,
+rather than as a property that was quietly there from the start.
 
-**Open.** Sub-issues created *by* a decomposition are themselves tickets, so they trigger
-the ProjectManager in turn. That recursion is bounded by the depth and breadth caps in
-`ProjectStore::addIssue()`, but the interaction has not been built or measured yet.
+**Open.**
+
+- What the intermediate state is called — whether triage adds an `IssueStatus` of its own,
+  or writes only the strategy and reuses the existing statuses. Not yet decided.
+- Sub-issues created *by* a decomposition are themselves tickets, so they are triaged in
+  turn. That recursion is bounded by the depth and breadth caps in
+  `ProjectStore::addIssue()`, but the interaction has not been built or measured.
 
 ---
 
