@@ -860,13 +860,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . $this->renderParams($this->stepParams[$name] ?? [])
             . 'An artifact is what the step SAYS it did. It is a claim, not evidence: a step writes its own '
             . 'artifact text and can assert success it never achieved — one reported "All tests passed" '
-            . 'while the suite was erroring, and was believed. So wherever the rubric turns on a CHECKABLE '
-            . 'FACT — the tests pass, the file contains something, the lint is clean, the command succeeds — '
-            . 'you MUST establish it yourself with a tool and judge the OUTPUT YOU SAW, never the summary. '
-            . "Replying OK on a fact you did not check is the one failure this review cannot have.\n\n"
-            . 'Verify against the PROJECT (read the changed files, run the tests or `php -l`), which is cheap '
-            . "and conclusive. Do NOT go spelunking the journal: recall(what='step', name='{$name}') is "
-            . "available ONCE if you need to see what the step did, and not beyond that.\n\n"
+            . 'while the suite was erroring, and was believed. So when the step CLAIMS to have ALREADY '
+            . 'achieved something checkable — the tests pass, the lint is clean, a file now contains '
+            . 'something, a command succeeded — you MUST establish it yourself with a tool and judge the '
+            . 'OUTPUT YOU SAW, never the summary. Replying OK on a claim you did not check is the one '
+            . "failure this review cannot have.\n\n"
+            . 'The RUBRIC decides what counts, and it OUTRANKS this instruction. In particular: if it tells '
+            . 'you the artifact is code or a plan that has NOT run yet, the project as it stands is not '
+            . 'evidence about it. Judge it on its own terms and do NOT hold the current state of the files, '
+            . "or a red test suite, against work that was never supposed to have happened yet.\n\n"
+            . 'Where verification does apply, verify against the PROJECT (read the changed files, run the '
+            . 'tests or `php -l`), which is cheap and conclusive. Do NOT go spelunking the journal: '
+            . "recall(what='step', name='{$name}') is available ONCE if you need to see what the step did, "
+            . "and not beyond that.\n\n"
             . 'If it satisfies the rubric, reply with exactly: OK. Otherwise reply with the concrete problems '
             . 'that must be fixed.',
             null,   // every tool — a critic is a normal AI and must be able to verify, not just read

@@ -636,6 +636,13 @@ final class WorkflowAbstractTest
         Assert::true(str_contains($prompt, 'MUST establish it yourself with a tool'));
         // and the old instruction that caused the rubber-stamping must not come back
         Assert::false(str_contains($prompt, 'usually enough'));
+
+        // The demand to verify must stay SUBORDINATE to the rubric. A real run showed why: the critic
+        // reviewing a generated solver ran the project's tests, found them red — which they are, the
+        // solver has not run yet — and rejected the source over it. A false pass became a false
+        // failure, so the carve-out for not-yet-run artifacts is part of the contract too.
+        Assert::true(str_contains($prompt, 'OUTRANKS this instruction'));
+        Assert::true(str_contains($prompt, 'has NOT run yet'));
     }
 
     #[Test]
