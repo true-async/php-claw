@@ -129,7 +129,7 @@ final readonly class IssueRunner
             ->set(EnvKey::MaxHistory, $this->config->maxHistory)
             ->set(EnvKey::Store, new SqliteStateStore($projectDb))
             ->set(EnvKey::Agents, $this->config->agents)
-            ->set(EnvKey::Budget, new Budget($this->config->budgetTokens, (float) $this->config->budgetSeconds))
+            ->set(EnvKey::Budget, new Budget($this->treeAllowance($issue), (float) $this->config->budgetSeconds))
             ->set(EnvKey::TurnTokenLimit, $this->config->turnTokens)
             ->set(EnvKey::TurnTimeLimit, (float) $this->config->turnSeconds)
             ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy));
@@ -337,6 +337,34 @@ final readonly class IssueRunner
         ), false);
 
         return 0;
+    }
+
+    /**
+     * The tokens this run may spend: the configured budget MINUS everything already spent anywhere in
+     * this issue's tree.
+     *
+     * A decomposed ticket becomes N tickets, each of which is triaged, run, and may decompose again.
+     * Giving each of them the full configured budget bounds nothing — it bounds each run while the
+     * tree multiplies underneath. One pool for the whole tree is what makes the total finite: the
+     * root's budget is the ceiling however the work is split.
+     *
+     * A root issue with no sub-issues is the common case, and there the pool is simply its own spend,
+     * so this changes nothing for it beyond charging its earlier runs — which is right: a ticket
+     * retried five times has spent five times.
+     *
+     * Returns 1 rather than 0 when the pool is exhausted, because 0 means UNLIMITED to {@see Budget}
+     * and handing an over-budget run no limit at all is precisely backwards. One token is spent
+     * immediately, so the run stops at its first check.
+     */
+    private function treeAllowance(Issue $issue): int
+    {
+        if ($this->config->budgetTokens <= 0) {
+            return 0;   // no budget configured: unlimited, as before
+        }
+
+        $spent = $this->store->treeTokensSpent($this->store->rootIssue($issue->id));
+
+        return max(1, $this->config->budgetTokens - $spent);
     }
 
     /**

@@ -67,6 +67,12 @@ interface ProjectStoreInterface
     /** Reopen the ancestors of an issue that came back to life — the counterpart to settleAncestors(). */
     public function reopenAncestors(string $issueId): void;
 
+    /** Tokens spent by every run under an issue's whole tree — the shared pool a decomposition draws from. */
+    public function treeTokensSpent(string $issueId): int;
+
+    /** The root of an issue's tree — itself when it has no parent. */
+    public function rootIssue(string $issueId): string;
+
     /**
      * Record the ProjectManager's verdict for an issue — how it is to be solved, why, and whether a
      * person must sign off. Appended, never overwritten.
