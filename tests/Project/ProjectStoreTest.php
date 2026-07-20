@@ -220,6 +220,166 @@ final class ProjectStoreTest
     }
 
     #[Test]
+    public function aSubIssueRecordsItsParentAndDerivesItsDepth(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+
+            $root = $store->addIssue('big thing');
+            $child = $store->addIssue('part one', '', $root->id);
+            $grandchild = $store->addIssue('part one, bit a', '', $child->id);
+
+            Assert::same($root->parent, null);
+            Assert::same($root->depth, 0);
+            Assert::same($child->parent, $root->id);
+            Assert::same($child->depth, 1);
+            Assert::same($grandchild->depth, 2);   // derived from the parent, not supplied by the caller
+
+            // and it round-trips through the db, not just the returned object
+            Assert::same($store->loadIssue($grandchild->id)->depth, 2);
+            Assert::same($store->loadIssue($grandchild->id)->parent, $child->id);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function childIssuesReturnsOnlyTheDirectChildren(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+
+            $root = $store->addIssue('root');
+            $first = $store->addIssue('first', '', $root->id);
+            $second = $store->addIssue('second', '', $root->id);
+            $store->addIssue('nested', '', $first->id);   // a grandchild, not a child
+            $store->addIssue('unrelated');
+
+            $children = $store->childIssues($root->id);
+
+            Assert::count($children, 2);
+            Assert::same($children[0]->id, $first->id);
+            Assert::same($children[1]->id, $second->id);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function aParentIsSettledOnlyOnceEveryChildHasLanded(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+
+            $root = $store->addIssue('root');
+            $first = $store->addIssue('first', '', $root->id);
+            $second = $store->addIssue('second', '', $root->id);
+
+            // One child done, one still open: the parent must stay open.
+            $store->setIssueStatus($first->id, IssueStatus::Done);
+            $store->settleAncestors($first->id);
+            Assert::same($store->loadIssue($root->id)->status, IssueStatus::Open);
+
+            // The last child lands, so the parent closes with it.
+            $store->setIssueStatus($second->id, IssueStatus::Done);
+            $store->settleAncestors($second->id);
+            Assert::same($store->loadIssue($root->id)->status, IssueStatus::Done);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function settlingWalksUpTheWholeChainButNeverReopensAHumanDecision(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+
+            $root = $store->addIssue('root');
+            $middle = $store->addIssue('middle', '', $root->id);
+            $leaf = $store->addIssue('leaf', '', $middle->id);
+
+            $store->setIssueStatus($leaf->id, IssueStatus::Done);
+            $store->settleAncestors($leaf->id);
+
+            Assert::same($store->loadIssue($middle->id)->status, IssueStatus::Done);   // one level up
+            Assert::same($store->loadIssue($root->id)->status, IssueStatus::Done);     // and the next
+
+            // A parent a human already Closed is left alone: a finishing child must not reopen that call.
+            $closed = $store->addIssue('closed parent');
+            $under = $store->addIssue('under it', '', $closed->id);
+            $store->setIssueStatus($closed->id, IssueStatus::Closed);
+            $store->setIssueStatus($under->id, IssueStatus::Done);
+            $store->settleAncestors($under->id);
+
+            Assert::same($store->loadIssue($closed->id)->status, IssueStatus::Closed);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function openingADbFromBeforeTheTreeColumnsMigratesItInPlace(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $key = $store->project()->id;
+
+            // Rebuild `issues` in the pre-tree shape, with a row in it — exactly what an already
+            // registered project looks like on upgrade. CREATE TABLE IF NOT EXISTS would skip such a
+            // table forever, so without the ALTER every read of parent_id/depth would fail.
+            $pdo = $store->pdo();
+            $pdo->exec('DROP TABLE issues');
+            $pdo->exec(
+                "CREATE TABLE issues (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title       TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status      TEXT NOT NULL,
+                    created_at  INTEGER NOT NULL
+                )",
+            );
+            $pdo->exec(
+                "INSERT INTO issues (title, description, status, created_at)
+                 VALUES ('legacy', 'from before the tree', 'Open', 1)",
+            );
+
+            $reopened = ProjectStore::openByKey($projectsDir, $key);
+            Assert::true($reopened !== null);
+
+            $legacy = $reopened->loadIssue('1');
+            Assert::same($legacy->title, 'legacy');
+            Assert::same($legacy->parent, null);   // an existing issue reads as a root
+            Assert::same($legacy->depth, 0);
+
+            // and the migrated table takes new sub-issues
+            Assert::same($reopened->addIssue('new child', '', '1')->depth, 1);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
     public function onePooledHandleIsSafeAcrossConcurrentCoroutines(): void
     {
         $projectsDir = self::tempDir();

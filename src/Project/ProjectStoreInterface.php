@@ -37,11 +37,25 @@ interface ProjectStoreInterface
     public function pdo(): \PDO;
 
     /**
-     * Open a new issue and return it — the store assigns its id.
+     * Open a new issue and return it — the store assigns its id. Pass $parent to open it as a
+     * sub-issue of an existing one; its depth is derived from the parent, never supplied.
      *
      * @throws \Claw\Exceptions\ClawException
      */
-    public function addIssue(string $title, string $description = ''): Issue;
+    public function addIssue(string $title, string $description = '', ?string $parent = null): Issue;
+
+    /**
+     * The issues decomposed directly out of this one, oldest first (soft-deleted ones hidden).
+     *
+     * @return list<Issue>
+     */
+    public function childIssues(string $issueId): array;
+
+    /**
+     * Close the ancestors of an issue that just finished: a parent is Done only when every child is.
+     * Walks up, stopping at the first ancestor that still has open work.
+     */
+    public function settleAncestors(string $issueId): void;
 
     /**
      * Load one issue with the ids of the runs spawned for it.

@@ -156,19 +156,91 @@ final class ProjectStore implements ProjectStoreInterface
     public function allIssues(): array
     {
         // soft-deleted issues stay in the db (history + runs) but are hidden from the board
-        $stmt = $this->pdo->query("SELECT id, title, description, status FROM issues WHERE status != 'Deleted' ORDER BY id");
+        $stmt = $this->pdo->query(
+            "SELECT id, title, description, status, parent_id, depth FROM issues WHERE status != 'Deleted' ORDER BY id",
+        );
         $rows = $stmt === false ? [] : $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
-        return array_values(array_map(
-            fn (array $row): Issue => new Issue(
-                (string) $row['id'],
-                $this->project->id,
-                (string) $row['title'],
-                (string) $row['description'],
-                IssueStatus::fromName((string) $row['status']),
-            ),
-            $rows,
-        ));
+        return array_values(array_map($this->hydrate(...), $rows));
+    }
+
+    /**
+     * The issues decomposed directly out of this one, oldest first — one level, not the whole subtree.
+     * Soft-deleted children are left out: a deleted sub-issue must not hold its parent open forever.
+     *
+     * @return list<Issue>
+     */
+    public function childIssues(string $issueId): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT id, title, description, status, parent_id, depth
+             FROM issues WHERE parent_id = :parent AND status != 'Deleted' ORDER BY id",
+        );
+        $stmt->execute(['parent' => $issueId]);
+
+        return array_values(array_map($this->hydrate(...), $stmt->fetchAll(\PDO::FETCH_ASSOC)));
+    }
+
+    /**
+     * Settle the ancestors of an issue that just finished: a parent is Done only when EVERY child is,
+     * so this walks up and closes each ancestor whose children have all landed, stopping at the first
+     * that still has open work. Decomposition is the only thing that creates parents, so for a root
+     * issue (the common case) this returns after one cheap lookup.
+     *
+     * A parent that is itself Closed or Deleted is left alone — a human already ruled on it, and a
+     * finishing child must not reopen that decision.
+     */
+    public function settleAncestors(string $issueId): void
+    {
+        $parentId = $this->parentOf($issueId);
+
+        while ($parentId !== null) {
+            $parent = $this->loadIssue($parentId);
+
+            if ($parent->status === IssueStatus::Closed || $parent->status === IssueStatus::Deleted) {
+                return;
+            }
+
+            foreach ($this->childIssues($parentId) as $child) {
+                if ($child->status !== IssueStatus::Done && $child->status !== IssueStatus::Closed) {
+                    return;   // a sibling is still in flight — the parent stays open
+                }
+            }
+
+            $this->setIssueStatus($parentId, IssueStatus::Done);
+            $parentId = $this->parentOf($parentId);
+        }
+    }
+
+    /** The id of the issue this one was decomposed out of, or null for a root issue. */
+    private function parentOf(string $issueId): ?string
+    {
+        $stmt = $this->pdo->prepare('SELECT parent_id FROM issues WHERE id = :id');
+        $stmt->execute(['id' => $issueId]);
+        $parent = $stmt->fetchColumn();
+
+        return ($parent === false || $parent === null) ? null : (string) $parent;
+    }
+
+    /**
+     * Build an Issue from a row of the issues table. Runs are NOT read here — {@see allIssues()} and
+     * {@see childIssues()} stay single cheap queries; {@see loadIssue()} adds them for the one issue
+     * that needs them.
+     *
+     * @param array<string, mixed> $row
+     */
+    private function hydrate(array $row): Issue
+    {
+        return new Issue(
+            (string) $row['id'],
+            $this->project->id,
+            (string) $row['title'],
+            (string) $row['description'],
+            IssueStatus::fromName((string) $row['status']),
+            [],
+            ($row['parent_id'] ?? null) === null ? null : (string) $row['parent_id'],
+            (int) ($row['depth'] ?? 0),
+        );
     }
 
     /**
@@ -203,7 +275,7 @@ final class ProjectStore implements ProjectStoreInterface
      *
      * @throws ClawException
      */
-    public function addIssue(string $title, string $description = ''): Issue
+    public function addIssue(string $title, string $description = '', ?string $parent = null): Issue
     {
         $title = trim($title);
 
@@ -211,15 +283,22 @@ final class ProjectStore implements ProjectStoreInterface
             throw new ClawException('issue title must not be empty');
         }
 
+        // Depth is DERIVED from the parent, never supplied: the caller cannot understate how deep a
+        // decomposition has gone and so cannot talk its way past the depth cap. The parent is loaded
+        // rather than trusted, which also rejects a sub-issue hung off an id that does not exist.
+        $depth = $parent === null ? 0 : $this->loadIssue($parent)->depth + 1;
+
         try {
             $stmt = $this->pdo->prepare(
-                'INSERT INTO issues (title, description, status, created_at)
-                 VALUES (:title, :description, :status, :created_at)',
+                'INSERT INTO issues (title, description, status, parent_id, depth, created_at)
+                 VALUES (:title, :description, :status, :parent, :depth, :created_at)',
             );
             $stmt->execute([
                 'title' => $title,
                 'description' => $description,
                 'status' => IssueStatus::Open->name,
+                'parent' => $parent,
+                'depth' => $depth,
                 'created_at' => time(),
             ]);
             $issueId = (string) $this->pdo->lastInsertId();
@@ -227,14 +306,16 @@ final class ProjectStore implements ProjectStoreInterface
             throw new ClawException('ProjectStore: cannot add issue: ' . $e->getMessage(), 0, $e);
         }
 
-        return new Issue($issueId, $this->project->id, $title, $description);
+        return new Issue($issueId, $this->project->id, $title, $description, IssueStatus::Open, [], $parent, $depth);
     }
 
     /** Load one issue (with the ids of the runs spawned for it). @throws ClawException */
     public function loadIssue(string $issueId): Issue
     {
         try {
-            $stmt = $this->pdo->prepare('SELECT title, description, status FROM issues WHERE id = :id');
+            $stmt = $this->pdo->prepare(
+                'SELECT id, title, description, status, parent_id, depth FROM issues WHERE id = :id',
+            );
             $stmt->execute(['id' => $issueId]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
@@ -256,6 +337,8 @@ final class ProjectStore implements ProjectStoreInterface
             (string) $row['description'],
             IssueStatus::fromName((string) $row['status']),
             $runs,
+            ($row['parent_id'] ?? null) === null ? null : (string) $row['parent_id'],
+            (int) ($row['depth'] ?? 0),
         );
     }
 
@@ -402,9 +485,15 @@ final class ProjectStore implements ProjectStoreInterface
                 title       TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 status      TEXT NOT NULL,
+                parent_id   INTEGER,
+                depth       INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL
             )",
         );
+        self::addMissingColumns($pdo, 'issues', [
+            'parent_id' => 'INTEGER',
+            'depth' => 'INTEGER NOT NULL DEFAULT 0',
+        ]);
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS runs (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -414,5 +503,27 @@ final class ProjectStore implements ProjectStoreInterface
                 created_at  INTEGER NOT NULL
             )',
         );
+    }
+
+    /**
+     * Add columns a newer version introduced to a table that already exists. `CREATE TABLE IF NOT
+     * EXISTS` is a no-op on an existing db, so a db created before a column existed would never gain
+     * it and every read of that column would fail — this is what keeps an already-registered project
+     * usable across an upgrade. SQLite has no `ADD COLUMN IF NOT EXISTS`, so the current columns are
+     * read first and only the missing ones are added.
+     *
+     * @param array<string, string> $columns name => column definition
+     */
+    private static function addMissingColumns(\PDO $pdo, string $table, array $columns): void
+    {
+        $stmt = $pdo->query("PRAGMA table_info({$table})");
+        $rows = $stmt === false ? [] : $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $existing = array_map(static fn (array $row): string => (string) $row['name'], $rows);
+
+        foreach ($columns as $name => $definition) {
+            if (!\in_array($name, $existing, true)) {
+                $pdo->exec("ALTER TABLE {$table} ADD COLUMN {$name} {$definition}");
+            }
+        }
     }
 }
