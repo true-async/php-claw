@@ -64,8 +64,13 @@ final readonly class IssueRunner
         what you touched, run them.
 
         When the change exists and you have SEEN it work, call `done` with a short summary of what you
-        changed and what you ran to verify it. If the ticket turns out to be bigger than it looked, say
-        so plainly instead of half-doing it.
+        changed and what you ran to verify it.
+
+        If you CANNOT finish — the ticket is unclear, it asks for something that is not there, or it
+        turns out to be far bigger than it looked — do NOT just answer in prose. Use the `[question]`
+        protocol described above: it reaches a person, and your reply comes back so you can carry on.
+        Prose with no tool call and no marker ends the attempt with nothing done, and the ticket goes
+        back for re-triage.
         PROMPT;
 
     /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
