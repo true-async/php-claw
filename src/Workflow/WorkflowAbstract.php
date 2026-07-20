@@ -689,16 +689,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return $this->localTools = $tools;
     }
 
-    /** The model id configured for a named agent role, or null to keep the scope's default. */
+    /**
+     * The model id a named agent role runs on. Resolution — including the fallback chain that keeps a
+     * strong role off the cheap default — belongs to {@see Environment::findAgentModel()}, which the
+     * run pipeline shares; null here means "the scope's default already", so the caller leaves
+     * {@see EnvKey::ModelId} untouched rather than re-setting it to itself.
+     */
     private function agentModel(string $agent): ?string
     {
-        $agents = $this->env->find(EnvKey::Agents);
+        $model = $this->env->findAgentModel($agent);
 
-        if (\is_array($agents) && isset($agents[$agent]) && \is_string($agents[$agent]) && $agents[$agent] !== '') {
-            return $agents[$agent];
-        }
-
-        return null;
+        return $model === $this->env->findModelId() ? null : $model;
     }
 
     /** The run's total budget (token+time), if one is configured — else null (unlimited). */
