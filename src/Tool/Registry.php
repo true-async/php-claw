@@ -41,6 +41,28 @@ final class Registry
     }
 
     /**
+     * The tools named in prose, for the system prompt. The API already advertises them, but a model
+     * that is only handed a schema reaches for a tool inconsistently — it notices some and overlooks
+     * others, and a model that overlooks the one tool that RECORDS a decision answers in prose
+     * instead, leaving the work it did with nothing to show for it. Naming them up front is what
+     * made that reliable elsewhere in this system, so it lives here rather than in one caller.
+     *
+     * Empty string when there are no tools, so a caller can concatenate it unconditionally.
+     */
+    public function briefing(string $heading = 'Tools available to you — call them by name when useful'): string
+    {
+        $tools = $this->all();
+
+        if ($tools === []) {
+            return '';
+        }
+
+        $lines = array_map(static fn (ToolInterface $t): string => "- {$t->name()}: {$t->description()}", $tools);
+
+        return "\n\n{$heading}:\n" . implode("\n", $lines);
+    }
+
+    /**
      * The advertised specs for every tool in this registry — name, description, input schema.
      * Narrowing is the registry's job, not a filter here: a scope holds a registry narrowed via
      * {@see only()}, so the registry IS the palette and specs() advertises all of it.

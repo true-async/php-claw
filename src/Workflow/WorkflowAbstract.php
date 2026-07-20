@@ -531,7 +531,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // The handoff from the previous step is fed in automatically — the selective context carry-over —
         // plus the available tools named up front so the model reliably reaches for the right one
         // (recall, done, ...) instead of only sometimes noticing them.
-        $system = $scope->findSystemPrompt() . $this->handoffContext() . $this->toolBriefing($palette);
+        $system = $scope->findSystemPrompt() . $this->handoffContext() . $palette->briefing('Tools available to you this step — call them by name when useful');
 
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
@@ -645,20 +645,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         return "\n\nThe previous step handed this to you (what it did and what to watch for):\n" . $this->incomingHandoff;
-    }
-
-    /** A one-line-per-tool briefing appended to the system prompt, or '' when the call has no tools. */
-    private function toolBriefing(Registry $palette): string
-    {
-        $tools = $palette->all();
-
-        if ($tools === []) {
-            return '';
-        }
-
-        $lines = array_map(static fn (ToolInterface $t): string => "- {$t->name()}: {$t->description()}", $tools);
-
-        return "\n\nTools available to you this step — call them by name when useful:\n" . implode("\n", $lines);
     }
 
     /** The run's hierarchical tracer, if one is configured — else null (no tracing). */

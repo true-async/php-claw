@@ -10,6 +10,7 @@ use Claw\Agent\Message;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Project\Issue;
+use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
 use Claw\Project\StrategyOutcome;
@@ -48,8 +49,23 @@ final readonly class Triage
         Your ONLY job is to decide HOW it should be solved — not to solve it, not to write code,
         not to plan the implementation.
 
-        Look at the project if it helps (read_file, list_files) and judge the SIZE and SHAPE of the
-        work, then choose exactly one strategy:
+        FIRST, decide whether the ticket is WORKABLE AT ALL, against this project. This is the more
+        important half of your job, and the one that is easy to skip.
+
+        A ticket is NOT workable when it does not say what to do: nonsense or random characters, a
+        bare word with no request in it, a description that contradicts itself, or a request about
+        something this project plainly does not contain. Read the project brief and look at the
+        files before you conclude either way — a term that means nothing to you may be perfectly
+        ordinary here.
+
+        If it is not workable, do NOT pick a strategy in the hope that a worker will figure it out.
+        Use the `project_manager` tool with the action `needs_human`, passing the issue id and a
+        reason saying what is missing, and stop there. That is a real answer, not a failure — it is
+        the only useful one for a ticket nobody can act on. An unworkable ticket handed to a worker
+        burns money inventing a task: one reading just "ку" had a solver write tests for code nobody
+        asked for and run them five times.
+
+        If it IS workable, judge the SIZE and SHAPE of the work and choose exactly one strategy:
 
         - `direct`    — one agent with the project's tools can just do it. A localized, mechanical
                         change: a typo, a flag, a small method, a config value. This is the cheapest
@@ -66,12 +82,22 @@ final readonly class Triage
         Also decide whether a PERSON must approve before the work runs. Say yes when the decision is
         expensive or hard to undo — a decomposition almost always is — and no for small, obvious work.
 
-        Then RECORD the verdict with the `project_manager` tool:
-        project_manager(action='set_strategy', issue='<id>', strategy='<one of the four>',
-        reason='<why, in one or two sentences>', needs_human=<true|false>).
+        Then record the verdict by CALLING the `project_manager` tool with the action `set_strategy`,
+        passing the issue id, the strategy you chose, your reason, and whether a person must approve.
 
-        Reply with nothing else. The decision does not exist until that call is made — everything
-        downstream branches on the recorded strategy, and prose is not something code can act on.
+        HOW YOU WORK — the rules, plainly:
+
+        1. You act ONLY by calling the tools listed below. Reading files, and recording your verdict,
+           are both tool calls. You have no other way to affect anything.
+        2. Your verdict is real only once the `project_manager` call RETURNS. Describing the call,
+           printing it as JSON or in a code block, or explaining what you would call — none of that
+           counts. It is text, and text changes nothing: the ticket stays as it was and the judging
+           you just did is thrown away.
+        3. Every run ends with exactly ONE `project_manager` call: `set_strategy` for a workable
+           ticket, `needs_human` for one that is not. Never both, never neither.
+        4. Look before you judge. `list_files` and `read_file` are there for that, and a ticket that
+           reads as nonsense to you may be ordinary in this project.
+        5. Say nothing else. No preamble, no summary after the call.
         PROMPT;
 
     public function __construct(
@@ -116,16 +142,32 @@ final readonly class Triage
             ->set(EnvKey::ModelId, $this->config->model)
             ->set(EnvKey::Agents, $this->config->agents);
 
+        // The tools are named in the prompt as well as advertised through the API. A model handed
+        // only a schema reaches for them inconsistently — this one judged a ticket correctly and then
+        // PRINTED the recording call as a JSON block instead of making it, leaving the ticket
+        // untouched. Naming them up front is what fixed the same problem for workflow steps.
         $loop = new DefaultTurnLoop(
             $this->agent,
             $env->executor(),
             $env->findAgentModel('project-manager'),
-            self::SYSTEM,
+            self::SYSTEM . $registry->briefing('The tools you have — these are your only way to act'),
             $registry->specs(),
         );
 
         try {
-            $loop->run([Message::userText($this->brief($issue))]);
+            $result = $loop->run([Message::userText($this->brief($issue))]);
+
+            // A model that judged the ticket correctly but WROTE OUT the call instead of making it
+            // leaves the ticket untouched and its reasoning wasted — seen in practice, printing the
+            // call as a JSON block. Say so plainly once and let it correct itself; the analysis is
+            // already in the history, so this costs a short exchange rather than a fresh one.
+            if (!$this->settled($issue)) {
+                $loop->run([...$result->history, Message::userText(
+                    'You answered in text and did not call the tool, so nothing was recorded and the '
+                    . 'ticket is unchanged. Make the actual `project_manager` tool call now — writing '
+                    . 'it out as JSON or code does not count.',
+                )]);
+            }
         } catch (\Cancellation $cancellation) {
             throw $cancellation;
         } catch (\Throwable) {
@@ -133,6 +175,19 @@ final readonly class Triage
         }
 
         return $this->store->currentStrategy($issue->id)['strategy'] ?? null;
+    }
+
+    /**
+     * Did the analysis actually change anything? Either verdict counts: a recorded strategy, or the
+     * ticket parked for a person. Anything else means the exchange ended with the ticket untouched.
+     */
+    private function settled(Issue $issue): bool
+    {
+        if ($this->store->currentStrategy($issue->id) !== null) {
+            return true;
+        }
+
+        return $this->store->loadIssue($issue->id)->status === IssueStatus::WaitingHuman;
     }
 
     /** The ticket as the ProjectManager sees it, with the id it must quote back to record a verdict. */
@@ -143,7 +198,14 @@ final readonly class Triage
             ? '(no description was given — judge from the title alone)'
             : $issue->description;
 
+        // The project's own brief. Without it "is this ticket workable" is judged against nothing,
+        // and a term that is ordinary in this project reads as nonsense — or the reverse.
+        $about = trim($project->description) === ''
+            ? "(this project has no description — judge from its files)\n\n"
+            : "What this project is:\n{$project->description}\n\n";
+
         return "Project: {$project->name} ({$project->path})\n\n"
+            . $about
             . "Ticket #{$issue->id}\nTitle: {$issue->title}\n\nDescription:\n{$description}\n\n"
             . $this->history($issue)
             . "Decide the strategy and record it with project_manager(action='set_strategy', issue='{$issue->id}', …).";
