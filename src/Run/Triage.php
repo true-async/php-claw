@@ -11,6 +11,7 @@ use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
+use Claw\Project\IssueType;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
 use Claw\Project\StrategyOutcome;
@@ -18,7 +19,9 @@ use Claw\Tool\ListWorkflowsTool;
 use Claw\Tool\ProjectManagerTool;
 use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
+use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
+use Claw\Trace\TraceStore;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\WorkflowStore;
@@ -88,10 +91,11 @@ final readonly class Triage
         - `direct`    — one agent with the project's tools can just do it. A localized, mechanical
                         change: a typo, a flag, a small method, a config value. This is the cheapest
                         path and should be your default for anything small.
-        - `library`   — one of the ready-made, tested workflows fits this task as it stands. Do not
-                        guess at this: call `list_workflows` with the type you chose and read what is
-                        actually there. Choosing it means naming one of them, and a name that is not
-                        on that list is refused.
+        - `library`   — one of the ready-made, tested workflows listed in the ticket brief fits this
+                        task as it stands. Prefer it over `generate` whenever one genuinely fits: it
+                        was written and reviewed by a person, so it is both cheaper and more reliable
+                        than writing a new solver. Read it in full with `list_workflows` first, and
+                        name it when you record the verdict.
         - `generate`  — nothing off the shelf fits, so a solver workflow must be written for it.
                         Right for real implementation work with several concerns to carry.
         - `decompose` — genuinely too big for one run, and splitting it produces parts that can be
@@ -170,6 +174,15 @@ final readonly class Triage
             ->set(EnvKey::ModelId, $this->config->model)
             ->set(EnvKey::Agents, $this->config->agents);
 
+        // Triage is recorded like anything else that spends money and decides something. It is not a
+        // run, so it has no run row and no ledger id — it is keyed by the ticket instead, and read back
+        // with `claw log triage-<issue>`. Without this the most consequential decision in the system was
+        // the one thing nobody could look at: which tools the ProjectManager reached for, whether it
+        // opened the workflow library at all, and what it read before choosing.
+        $tracer = new Tracer(self::traceId($issue), new TraceStore($this->store->pdo()));
+        $env->set(EnvKey::Tracer, $tracer);
+        $span = $tracer->enterWorkflow('triage');
+
         // The tools are named in the prompt as well as advertised through the API. A model handed
         // only a schema reaches for them inconsistently — this one judged a ticket correctly and then
         // PRINTED the recording call as a JSON block instead of making it, leaving the ticket
@@ -180,10 +193,11 @@ final readonly class Triage
             $env->findAgentModel('project-manager'),
             self::SYSTEM . $registry->briefing('The tools you have — these are your only way to act'),
             $registry->specs(),
+            tracer: $tracer,
         );
 
         try {
-            $result = $loop->run([Message::userText($this->brief($issue))]);
+            $result = $loop->run([Message::userText($this->brief($issue, $libraries))]);
 
             // A model that judged the ticket correctly but WROTE OUT the call instead of making it
             // leaves the ticket untouched and its reasoning wasted — seen in practice, printing the
@@ -200,9 +214,22 @@ final readonly class Triage
             throw $cancellation;
         } catch (\Throwable) {
             return null;   // see the docblock: a ticket outlives a failed analysis
+        } finally {
+            $tracer->exit($span);   // a failed analysis is worth reading too — often more so
         }
 
         return $this->store->currentStrategy($issue->id)['strategy'] ?? null;
+    }
+
+    /**
+     * Where an issue's triage is recorded. Not a run id: triage deliberately puts no row in the runs
+     * ledger, so its trace is keyed by the ticket it judged and read with `claw log triage-<issue>`.
+     * A re-triage overwrites nothing — the records simply accumulate under the same key, oldest first,
+     * which is what you want when asking why a ticket was routed differently the second time.
+     */
+    public static function traceId(Issue $issue): string
+    {
+        return 'triage-' . $issue->id;
     }
 
     /**
@@ -218,8 +245,12 @@ final readonly class Triage
         return $this->store->loadIssue($issue->id)->status === IssueStatus::WaitingHuman;
     }
 
-    /** The ticket as the ProjectManager sees it, with the id it must quote back to record a verdict. */
-    private function brief(Issue $issue): string
+    /**
+     * The ticket as the ProjectManager sees it, with the id it must quote back to record a verdict.
+     *
+     * @param list<WorkflowStore> $libraries
+     */
+    private function brief(Issue $issue, array $libraries): string
     {
         $project = $this->store->project();
         $description = trim($issue->description) === ''
@@ -235,8 +266,57 @@ final readonly class Triage
         return "Project: {$project->name} ({$project->path})\n\n"
             . $about
             . "Ticket #{$issue->id}\nTitle: {$issue->title}\n\nDescription:\n{$description}\n\n"
+            . $this->shelf($libraries)
             . $this->history($issue)
-            . "Decide the strategy and record it with project_manager(action='set_strategy', issue='{$issue->id}', …).";
+            . "Decide the strategy and record it, quoting issue id {$issue->id}.";
+    }
+
+    /**
+     * The ready-made workflows, SHOWN rather than offered behind a tool call.
+     *
+     * Measured, on a traced triage: `list_workflows` was never called once. The reason is circular —
+     * the prompt says to call it before choosing `library`, but a model with no reason to think
+     * anything is on the shelf never chooses `library`, so it never calls the tool, so it never learns
+     * what is on the shelf. A capability reachable only by asking for it is a capability nobody asks
+     * for. The shelf is small and this costs a few hundred tokens; `list_workflows` remains for the
+     * full description of one that looks promising.
+     *
+     * @param list<WorkflowStore> $libraries
+     */
+    private function shelf(array $libraries): string
+    {
+        $lines = [];
+
+        try {
+            foreach ($libraries as $library) {
+                foreach ($library->catalogue() as $entry) {
+                    $serves = implode(', ', array_map(static fn (IssueType $t): string => $t->value, $entry['serves']));
+                    $lines[] = "- {$entry['name']} (for: {$serves}) — " . self::firstLine($entry['description']);
+                }
+            }
+        } catch (ClawException $e) {
+            // A broken shelf must not take the triage with it: the ticket still needs a verdict, and
+            // every other strategy is still available. Say what is wrong instead of showing nothing.
+            return "Ready-made workflows: the library could not be read ({$e->getMessage()}), so the "
+                . "`library` strategy is not available for this ticket.\n\n";
+        }
+
+        if ($lines === []) {
+            return 'Ready-made workflows: none exist yet, so `library` is not available — this ticket '
+                . "must be solved another way.\n\n";
+        }
+
+        return 'READY-MADE WORKFLOWS already written and tested, which `library` would run as they '
+            . "stand.\nUse `list_workflows` to read one in full before choosing it:\n\n"
+            . implode("\n", $lines) . "\n\n";
+    }
+
+    /** A catalogue entry's opening sentence — enough to judge whether it is worth reading in full. */
+    private static function firstLine(string $description): string
+    {
+        $first = strtok(trim($description), "\n");
+
+        return $first === false ? '' : trim($first);
     }
 
     /**
