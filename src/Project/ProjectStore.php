@@ -22,6 +22,17 @@ use Claw\Exceptions\ClawException;
  */
 final class ProjectStore implements ProjectStoreInterface
 {
+    /**
+     * How deep decomposition may nest: depth 0 is the original ticket, so this allows a task, its
+     * parts, and their parts. Enforced HERE rather than in the tool that a model calls, because
+     * {@see addIssue()} is the only door ALL callers share — the CLI and the dashboard open issues
+     * through it too, and a cap only one caller honours is not a cap.
+     */
+    public const int MAX_DEPTH = 2;
+
+    /** How many sub-issues one issue may be split into. A split into more parts than this is a plan, not a task. */
+    public const int MAX_CHILDREN = 8;
+
     private function __construct(
         private readonly \PDO $pdo,
         private readonly Project $project,
@@ -182,10 +193,14 @@ final class ProjectStore implements ProjectStoreInterface
     }
 
     /**
-     * Settle the ancestors of an issue that just finished: a parent is Done only when EVERY child is,
-     * so this walks up and closes each ancestor whose children have all landed, stopping at the first
+     * Settle the ancestors of an issue that just landed: a parent is finished only when EVERY child is,
+     * so this walks up and settles each ancestor whose children have all landed, stopping at the first
      * that still has open work. Decomposition is the only thing that creates parents, so for a root
      * issue (the common case) this returns after one cheap lookup.
+     *
+     * A parent settles to Done only if at least one child was actually DONE; children that were all
+     * merely Closed settle it to Closed. Reporting a parent as Done when every part of it was abandoned
+     * would claim work that nobody did.
      *
      * A parent that is itself Closed or Deleted is left alone — a human already ruled on it, and a
      * finishing child must not reopen that decision.
@@ -193,23 +208,184 @@ final class ProjectStore implements ProjectStoreInterface
     public function settleAncestors(string $issueId): void
     {
         $parentId = $this->parentOf($issueId);
+        $seen = [];   // parent_id is not constrained to be acyclic, and a cycle here would hang the run
 
-        while ($parentId !== null) {
+        while ($parentId !== null && !isset($seen[$parentId])) {
+            $seen[$parentId] = true;
             $parent = $this->loadIssue($parentId);
 
             if ($parent->status === IssueStatus::Closed || $parent->status === IssueStatus::Deleted) {
                 return;
             }
 
+            $anyDone = false;
+
             foreach ($this->childIssues($parentId) as $child) {
                 if ($child->status !== IssueStatus::Done && $child->status !== IssueStatus::Closed) {
                     return;   // a sibling is still in flight — the parent stays open
                 }
+                $anyDone = $anyDone || $child->status === IssueStatus::Done;
             }
 
-            $this->setIssueStatus($parentId, IssueStatus::Done);
+            $this->setIssueStatus($parentId, $anyDone ? IssueStatus::Done : IssueStatus::Closed);
             $parentId = $this->parentOf($parentId);
         }
+    }
+
+    /**
+     * Reopen the ancestors of an issue that has come back to life. The counterpart to
+     * {@see settleAncestors()}: without it, reopening the last sub-issue leaves its parent reported
+     * finished while live work sits under it. Walks up while each ancestor is settled, and stops at
+     * one a person Closed or Deleted — the same decision this must not overturn.
+     */
+    public function reopenAncestors(string $issueId): void
+    {
+        $parentId = $this->parentOf($issueId);
+        $seen = [];
+
+        while ($parentId !== null && !isset($seen[$parentId])) {
+            $seen[$parentId] = true;
+
+            if ($this->loadIssue($parentId)->status !== IssueStatus::Done) {
+                return;   // already open, or a human ruling we leave alone
+            }
+
+            $this->setIssueStatus($parentId, IssueStatus::Open);
+            $parentId = $this->parentOf($parentId);
+        }
+    }
+
+    /**
+     * Record the ProjectManager's verdict for an issue: how it is to be solved, why, and whether a
+     * person must sign off before it runs. Appended, never overwritten — {@see strategyAttempts()}
+     * is what a retry reads to escalate instead of repeating itself.
+     */
+    public function setStrategy(string $issueId, Strategy $strategy, string $reason, bool $needsHuman): void
+    {
+        // A strategy that already failed cannot be chosen again, and neither can a cheaper one: the same
+        // approach fails the same way, so a retry is only worth spending on if it does MORE than what
+        // broke. This rule was documented in three places and checked in none — which made it a
+        // suggestion to the model rather than a bound, the exact failure this system keeps hitting.
+        foreach ($this->strategyAttempts($issueId) as $attempt) {
+            if ($attempt['outcome'] === StrategyOutcome::Failed && $strategy->rank() <= $attempt['strategy']->rank()) {
+                throw new ClawException(sprintf(
+                    "strategy '%s' does not escalate past '%s', which already failed here (%s) — the next "
+                    . 'attempt must do more than the one that broke, not the same thing again',
+                    $strategy->value,
+                    $attempt['strategy']->value,
+                    $attempt['outcomeReason'],
+                ));
+            }
+        }
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO issue_strategy (issue_id, strategy, reason, needs_human, outcome, created_at)
+             VALUES (:issue, :strategy, :reason, :needs_human, :outcome, :created_at)',
+        );
+        $stmt->execute([
+            'issue' => $issueId,
+            'strategy' => $strategy->value,
+            'reason' => $reason,
+            'needs_human' => $needsHuman ? 1 : 0,
+            'outcome' => StrategyOutcome::Pending->value,
+            'created_at' => time(),
+        ]);
+    }
+
+    /**
+     * The verdict currently in force for an issue, or null if it was never triaged.
+     *
+     * @return ?array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
+     */
+    public function currentStrategy(string $issueId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT strategy, reason, needs_human, outcome, outcome_reason FROM issue_strategy
+             WHERE issue_id = :issue ORDER BY id DESC LIMIT 1',
+        );
+        $stmt->execute(['issue' => $issueId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
+        return \is_array($row) ? $this->hydrateStrategy($row) : null;
+    }
+
+    /**
+     * Every verdict passed on an issue, oldest first — what was tried and how it ended. A re-triage
+     * reads this so it escalates rather than choosing a strategy that has already failed.
+     *
+     * @return list<array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}>
+     */
+    public function strategyAttempts(string $issueId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT strategy, reason, needs_human, outcome, outcome_reason FROM issue_strategy
+             WHERE issue_id = :issue ORDER BY id',
+        );
+        $stmt->execute(['issue' => $issueId]);
+
+        return array_values(array_map($this->hydrateStrategy(...), $stmt->fetchAll(\PDO::FETCH_ASSOC)));
+    }
+
+    /**
+     * Mark the verdict in force for an issue as failed. The attempt stays in the ledger so the next
+     * verdict can see it and escalate past it. Returns false when there was no verdict in force to
+     * fail — a second report in a row, or an issue that was never triaged.
+     *
+     * The failure reason gets its OWN column: it must not overwrite the reason the strategy was
+     * CHOSEN for, because the next escalation is decided from both — what we expected to work, and
+     * what actually broke — and one column can only hold the second.
+     *
+     * The issue reopens so it is triaged again rather than sitting silently InProgress. One a person
+     * already Closed or Deleted is left where it is: a late failure report must not resurrect a
+     * ticket someone ruled on.
+     */
+    public function failStrategy(string $issueId, string $reason): bool
+    {
+        // Only the row still in force may be failed, and only once. Without the outcome predicate a
+        // repeated report would rewrite the first failure, erasing an attempt from the very ledger the
+        // next escalation is chosen from.
+        $stmt = $this->pdo->prepare(
+            'UPDATE issue_strategy SET outcome = :failed, outcome_reason = :reason, settled_at = :now
+             WHERE id = (
+                 SELECT id FROM issue_strategy
+                 WHERE issue_id = :issue AND outcome = :pending ORDER BY id DESC LIMIT 1
+             )',
+        );
+        $stmt->execute([
+            'failed' => StrategyOutcome::Failed->value,
+            'reason' => $reason,
+            'now' => time(),
+            'issue' => $issueId,
+            'pending' => StrategyOutcome::Pending->value,
+        ]);
+
+        if ($stmt->rowCount() === 0) {
+            return false;
+        }
+
+        $status = $this->loadIssue($issueId)->status;
+
+        if ($status !== IssueStatus::Closed && $status !== IssueStatus::Deleted) {
+            $this->setIssueStatus($issueId, IssueStatus::Open);
+        }
+
+        return true;
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     *
+     * @return array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
+     */
+    private function hydrateStrategy(array $row): array
+    {
+        return [
+            'strategy' => Strategy::stored((string) $row['strategy']),
+            'reason' => (string) $row['reason'],
+            'needsHuman' => (bool) $row['needs_human'],
+            'outcome' => StrategyOutcome::stored((string) $row['outcome']),
+            'outcomeReason' => (string) ($row['outcome_reason'] ?? ''),
+        ];
     }
 
     /** The id of the issue this one was decomposed out of, or null for a root issue. */
@@ -283,11 +459,58 @@ final class ProjectStore implements ProjectStoreInterface
             throw new ClawException('issue title must not be empty');
         }
 
-        // Depth is DERIVED from the parent, never supplied: the caller cannot understate how deep a
-        // decomposition has gone and so cannot talk its way past the depth cap. The parent is loaded
-        // rather than trusted, which also rejects a sub-issue hung off an id that does not exist.
-        $depth = $parent === null ? 0 : $this->loadIssue($parent)->depth + 1;
+        if ($parent === null) {
+            return $this->insertIssue($title, $description, null, 0);
+        }
 
+        // The caps are checked and the row written inside ONE transaction. Checking first and inserting
+        // after would not bound anything: the \PDO is pooled across coroutines, so two concurrent
+        // decompositions would both read "7 children", both pass, and both insert. BEGIN IMMEDIATE takes
+        // the write lock up front, which serialises the pair.
+        $this->pdo->beginTransaction();
+
+        try {
+            // Depth is DERIVED from the parent, never supplied: a caller cannot understate how deep a
+            // decomposition has gone and so cannot talk its way past the cap. Loading the parent also
+            // rejects a sub-issue hung off an id that does not exist.
+            $depth = $this->loadIssue($parent)->depth + 1;
+
+            if ($depth > self::MAX_DEPTH) {
+                throw new ClawException(sprintf(
+                    'issue #%s is already at decomposition depth %d and the limit is %d — do not split it '
+                    . 'further; choose a strategy that DOES the work (direct, library or generate)',
+                    $parent,
+                    $depth - 1,
+                    self::MAX_DEPTH,
+                ));
+            }
+
+            $children = \count($this->childIssues($parent));
+
+            if ($children >= self::MAX_CHILDREN) {
+                throw new ClawException(sprintf(
+                    'issue #%s already has %d sub-issues and the limit is %d — fold the remaining work into '
+                    . 'the existing sub-issues rather than opening more',
+                    $parent,
+                    $children,
+                    self::MAX_CHILDREN,
+                ));
+            }
+
+            $issue = $this->insertIssue($title, $description, $parent, $depth);
+            $this->pdo->commit();
+
+            return $issue;
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();   // a refused decomposition must leave nothing half-created
+
+            throw $e;
+        }
+    }
+
+    /** Write one issue row and return the issue the store assigned an id to. @throws ClawException */
+    private function insertIssue(string $title, string $description, ?string $parent, int $depth): Issue
+    {
         try {
             $stmt = $this->pdo->prepare(
                 'INSERT INTO issues (title, description, status, parent_id, depth, created_at)
@@ -494,6 +717,26 @@ final class ProjectStore implements ProjectStoreInterface
             'parent_id' => 'INTEGER',
             'depth' => 'INTEGER NOT NULL DEFAULT 0',
         ]);
+        // Every ProjectManager verdict for an issue, newest last — a LEDGER, not a single column, so a
+        // retry can see which strategies were already tried and why they failed. Overwriting one field
+        // would lose exactly the history an escalation decision is made from.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS issue_strategy (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id       INTEGER NOT NULL,
+                strategy       TEXT NOT NULL,
+                reason         TEXT NOT NULL DEFAULT '',
+                needs_human    INTEGER NOT NULL DEFAULT 0,
+                outcome        TEXT NOT NULL DEFAULT 'pending',
+                outcome_reason TEXT NOT NULL DEFAULT '',
+                settled_at     INTEGER,
+                created_at     INTEGER NOT NULL
+            )",
+        );
+        self::addMissingColumns($pdo, 'issue_strategy', [
+            'outcome_reason' => "TEXT NOT NULL DEFAULT ''",
+            'settled_at' => 'INTEGER',
+        ]);
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS runs (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -503,6 +746,13 @@ final class ProjectStore implements ProjectStoreInterface
                 created_at  INTEGER NOT NULL
             )',
         );
+
+        // Every access these tables get is a lookup by one of these keys — a parent's children, an
+        // issue's verdicts, an issue's runs — so without them each is a full scan, and settleAncestors
+        // scans once per level it walks.
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues (parent_id)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_issue_strategy_issue ON issue_strategy (issue_id)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_runs_issue ON runs (issue_id)');
     }
 
     /**

@@ -52,10 +52,41 @@ interface ProjectStoreInterface
     public function childIssues(string $issueId): array;
 
     /**
-     * Close the ancestors of an issue that just finished: a parent is Done only when every child is.
+     * Settle the ancestors of an issue that just landed: a parent finishes only when every child has.
      * Walks up, stopping at the first ancestor that still has open work.
      */
     public function settleAncestors(string $issueId): void;
+
+    /** Reopen the ancestors of an issue that came back to life — the counterpart to settleAncestors(). */
+    public function reopenAncestors(string $issueId): void;
+
+    /**
+     * Record the ProjectManager's verdict for an issue — how it is to be solved, why, and whether a
+     * person must sign off. Appended, never overwritten.
+     *
+     * @throws \Claw\Exceptions\ClawException when the strategy does not escalate past one that failed here
+     */
+    public function setStrategy(string $issueId, Strategy $strategy, string $reason, bool $needsHuman): void;
+
+    /**
+     * The verdict currently in force for an issue, or null if it was never triaged.
+     *
+     * @return ?array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}
+     */
+    public function currentStrategy(string $issueId): ?array;
+
+    /**
+     * Every verdict passed on an issue, oldest first — what was tried and how it ended.
+     *
+     * @return list<array{strategy: Strategy, reason: string, needsHuman: bool, outcome: StrategyOutcome, outcomeReason: string}>
+     */
+    public function strategyAttempts(string $issueId): array;
+
+    /**
+     * Mark the verdict in force as failed and reopen the issue so it is triaged again. False when there
+     * was no verdict in force to fail.
+     */
+    public function failStrategy(string $issueId, string $reason): bool;
 
     /**
      * Load one issue with the ids of the runs spawned for it.
