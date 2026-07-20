@@ -13,6 +13,7 @@ use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Config;
+use Claw\Exceptions\AgentException;
 use Claw\Exceptions\ClawException;
 use Claw\Exceptions\WorkflowFinished;
 use Claw\Project\Issue;
@@ -201,7 +202,8 @@ final readonly class IssueRunner
             Strategy::Decompose => $this->reportDecomposition($ctx),
             // A ready-made workflow needs no generation and no approval gate: it was written by a person
             // and reviewed once, which is the whole reason this strategy is cheaper than generating one.
-            Strategy::Library => $this->runSolver($ctx),
+            // It is not repairable either, for the same reason — see repairSolver().
+            Strategy::Library => $this->runSolver($ctx, repairable: false),
             default => $this->runGenerated($ctx),
         };
     }
@@ -532,8 +534,11 @@ final readonly class IssueRunner
     /**
      * Run the solver to completion; on a runtime crash, ask the supervisor to repair it (a new class
      * version) and resume the same runId — its snapshot skips the finished steps. Bounded by MAX_REPAIRS.
+     *
+     * $repairable is false for a workflow a PERSON wrote — see {@see repairSolver()} for why rewriting
+     * one is never the answer.
      */
-    private function runSolver(RunContext $ctx): int
+    private function runSolver(RunContext $ctx, bool $repairable = true): int
     {
         $solverSpan = $ctx->tracer->enterWorkflow($ctx->solverName);
         $currentClass = $ctx->solverClass;
@@ -554,6 +559,26 @@ final readonly class IssueRunner
             } catch (\Cancellation $cancellation) {
                 throw $cancellation;   // a cancelled run must stop — never "repair" a cancellation
             } catch (\Throwable $e) {
+                // Repair answers ONE question: is this workflow's code broken? Two kinds of failure
+                // arrive here and only one of them is that.
+                //
+                // An AgentException is the model backend refusing or failing — a malformed request, a
+                // rate limit, an outage, a spent quota. The code is fine; rewriting it spends the
+                // supervisor's tokens inventing a replacement for a class that was never at fault, and
+                // then runs that invention. Measured: a 400 from a malformed history had the supervisor
+                // rewrite a workflow whose source it could not even read.
+                //
+                // Everything else — TypeError, ParseError, a step calling a method that is not there —
+                // really can mean the generated code is broken, which is what repair is for.
+                if (!$repairable || $e instanceof AgentException) {
+                    $ctx->tracer->exit($solverSpan);
+                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                    $this->giveBackToProjectManager($ctx->issue, "run #{$ctx->runId} failed: {$e->getMessage()}", $ctx->runId);
+                    $this->frontend->report("Run #{$ctx->runId} failed: {$e->getMessage()}", true);
+
+                    return 1;
+                }
+
                 // a generated solver throws Error (TypeError, ParseError, ...) as readily as Exception,
                 // so catch the lot here and repair-and-resume — that is exactly this boundary's job
                 if (++$attempt > self::MAX_REPAIRS) {
@@ -572,7 +597,7 @@ final readonly class IssueRunner
                 if ($fixed === null) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-                    $this->giveBackToProjectManager($ctx->issue, "the generated solver crashed and could not be repaired: {$e->getMessage()}", $ctx->runId);
+                    $this->giveBackToProjectManager($ctx->issue, "the solver crashed and could not be repaired: {$e->getMessage()}", $ctx->runId);
                     $this->frontend->report("the supervisor could not repair run #{$ctx->runId}", true);
 
                     return 1;
@@ -624,6 +649,14 @@ final readonly class IssueRunner
      * Repair a crashed solver: read its source, hand it and the error to {@see SuperviseWorkflow}
      * (the supervisor role), which writes a corrected version under a new class name. Returns that
      * fully-qualified class name, or null if the repair produced nothing.
+     *
+     * Only ever for a GENERATED solver, and the source it reads says why: it comes from the project's
+     * generated-workflow store. A workflow from the library is not there — it lives on a shelf, was
+     * written and reviewed by a person, and is shared by every ticket that picks it. Rewriting one
+     * because a single run crashed would leave the original in place for the next ticket while this
+     * one quietly finished on a model's rewrite of it, and the defect nobody was told about would
+     * still be on the shelf. A library workflow that crashes is a defect in a shared asset: it goes
+     * back with the error, to a person.
      */
     private function repairSolver(RunContext $ctx, string $brokenClass, string $error, int $attempt): ?string
     {

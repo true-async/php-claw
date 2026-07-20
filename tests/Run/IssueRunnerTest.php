@@ -153,6 +153,82 @@ final class IssueRunnerTest
         }
     }
 
+    #[Test]
+    public function aBackendFailureIsNotTreatedAsBrokenCodeAndSoIsNotRewritten(): void
+    {
+        // Repair answers one question — is this workflow's code broken? A refusal from the model
+        // backend is not that, and rewriting the class over it spends the supervisor on a defect that
+        // is not there. Measured live: a 400 on a malformed history had the supervisor invent a
+        // replacement for a workflow whose source it could not even read.
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+
+            // See the note in the test above: a solver class name is per-process, so burn ids to get
+            // one this test owns.
+            for ($i = 0; $i < 12; $i++) {
+                $store->addIssue("filler {$i}");
+            }
+            $issue = $store->addIssue('a task the model backend will refuse');
+
+            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $solver = self::solverName($issue->id);
+            $workflows->write($solver, self::backendFailingSolverCode($solver), true);
+
+            $frontend = new RecordingRunFrontend();
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), $frontend);
+
+            Assert::same($runner->run($issue), 1);
+
+            // No repair was attempted: the supervisor writes its rewrite as <solver>R1, and that file
+            // must not exist. This is the assertion the whole test is for.
+            Assert::false(is_file($workflows->path($solver . 'R1', true)));
+
+            // And the run failed honestly rather than being reported as unrepairable.
+            Assert::true($frontend->reported('failed'));
+            Assert::false($frontend->reported('repairing'));
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);   // handed back, not stuck
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    /** A solver whose step fails the way a refusing model backend does — not the way broken code does. */
+    private static function backendFailingSolverCode(string $class): string
+    {
+        return <<<PHP
+            <?php
+
+            declare(strict_types=1);
+
+            namespace ClawWorkflow\\Common;
+
+            use Claw\\Exceptions\\BadRequestException;
+            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\WorkflowAbstract;
+
+            final class {$class} extends WorkflowAbstract
+            {
+                public function name(): string
+                {
+                    return 'backend-failing-solver';
+                }
+
+                #[Step]
+                public function implement(): void
+                {
+                    throw new BadRequestException(
+                        "An assistant message with 'tool_calls' must be followed by tool messages",
+                    );
+                }
+            }
+
+            PHP;
+    }
+
     private static function throwingSolverCode(string $class): string
     {
         return <<<PHP
