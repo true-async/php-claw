@@ -47,11 +47,15 @@ final class Config
     private const BUDGET_POLICIES = ['stop', 'ask'];
 
     /**
-     * Where the GLOBAL library of ready-made workflows lives — the ones offered to every project. A
-     * path rather than a folder inside the app home, because these are written and reviewed by people
-     * and belong wherever they keep such things. A missing folder is simply an empty library.
+     * The GLOBAL library of ready-made workflows: the ones offered to every project. A path rather
+     * than a folder inside the app home, because these are written and reviewed by people and belong
+     * wherever they keep such things; a missing folder is simply an empty library.
+     *
+     * Unset, it is the folder that SHIPS with claw, resolved against this file — not against the
+     * current directory, which would mean the built-in workflows existed or not depending on where
+     * the command happened to be run from.
      */
-    private const DEFAULT_LIBRARY = './workflows';
+    private const DEFAULT_LIBRARY = 'workflows';
 
     /**
      * @param list<int>             $allowedChats telegram-only authorization allowlist (empty in console mode)
@@ -171,7 +175,7 @@ final class Config
             budgetSeconds: (int) ($get('CLAW_BUDGET_SECONDS') ?? self::DEFAULT_LIMIT),
             turnTokens: (int) ($get('CLAW_TURN_TOKENS') ?? self::DEFAULT_LIMIT),
             turnSeconds: (int) ($get('CLAW_TURN_SECONDS') ?? self::DEFAULT_LIMIT),
-            library: $get('CLAW_LIBRARY') ?? self::DEFAULT_LIBRARY,
+            library: $get('CLAW_LIBRARY') ?? \dirname(__DIR__) . '/' . self::DEFAULT_LIBRARY,
             budgetPolicy: $budgetPolicy,
         );
     }

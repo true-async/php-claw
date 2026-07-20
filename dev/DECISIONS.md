@@ -127,3 +127,27 @@ ticket in mind; a run-time discovery reaches a person an hour later.
 generated solvers' `ClawWorkflow\Common\…`. The dashboard holds every registered project open in one
 process, so one namespace between them would resolve a shared name to whichever autoloader
 registered first, silently. There is a test that two shelves holding the same name do not shadow.
+
+---
+
+## 2026-07-20 — The first shelved workflow, and where the shipped ones live
+
+**Decision.** `workflows/` in this repository is the library that ships with claw, and
+`CLAW_LIBRARY` defaults to it — resolved against the package, not the current directory. Its
+contents are linted, analysed and catalogue-tested like `src/`.
+
+The first entry is `FixBugWorkflow`: reproduce as a failing test → fix the production code →
+run the whole suite. Two of its three steps carry a critic, and both rubrics judge **evidence**
+— the verbatim output of a command — rather than the step's account of it.
+
+**Why the default resolves against the package.** A relative `./workflows` would mean the
+built-in workflows existed or not depending on which directory the command was run from.
+
+**Why these three steps.** The generator's own recipe warns against ceremonial phases, and an
+earlier draft had four: "reproduce" and "pin it with a failing test" were the same work described
+twice. What is left is three steps that each leave a result, and the boundaries fall exactly where
+a fresh context earns its cost — demonstrating the bug, fixing it, and proving nothing else broke.
+
+**What is NOT claimed.** These tests check that the workflow is whole and offered for the right
+kind of ticket. Whether its prompts and rubrics actually hold up is settled by running it on a
+real bug, not by the suite.
