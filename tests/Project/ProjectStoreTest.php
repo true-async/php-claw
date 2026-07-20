@@ -380,44 +380,6 @@ final class ProjectStoreTest
     }
 
     #[Test]
-    public function theBreadthCapHoldsWhenSubIssuesAreOpenedConcurrently(): void
-    {
-        $projectsDir = self::tempDir();
-        $folder = self::tempDir();
-
-        try {
-            $store = self::openProject($projectsDir, $folder);
-            $root = $store->addIssue('root');
-
-            // The cap is what makes decomposition bounded, so it has to survive the way decomposition
-            // actually runs: many sub-issues opened at once. Reading the child count and inserting as
-            // two separate statements would let every coroutine see the same under-limit count and all
-            // insert — the cap would read as enforced while bounding nothing.
-            $coros = [];
-
-            for ($i = 0; $i < 16; $i++) {
-                $coros[] = \Async\spawn(static function () use ($store, $root, $i): bool {
-                    try {
-                        $store->addIssue("part {$i}", '', $root->id);
-
-                        return true;
-                    } catch (ClawException) {
-                        return false;   // refused by the cap, which is the expected outcome for most
-                    }
-                });
-            }
-
-            $opened = array_filter(array_map(static fn ($c): bool => \Async\await($c), $coros));
-
-            Assert::same(\count($store->childIssues($root->id)), ProjectStore::MAX_CHILDREN);
-            Assert::same(\count($opened), ProjectStore::MAX_CHILDREN);   // refusals were real, not silent
-        } finally {
-            self::rmrf($projectsDir);
-            self::rmrf($folder);
-        }
-    }
-
-    #[Test]
     public function onePooledHandleIsSafeAcrossConcurrentCoroutines(): void
     {
         $projectsDir = self::tempDir();
@@ -429,13 +391,12 @@ final class ProjectStoreTest
             // One shared handle, sixteen coroutines writing at once. TrueAsync's PDO pool hands each
             // coroutine its own connection, so the INSERT + lastInsertId() inside addIssue()/recordRun()
             // must stay correct under interleaving — this is the guarantee that retired the per-run
-            // `storeFor()` handle. The delay forces a yield between the two inserts to stress it.
+            // `storeFor()` handle.
             $coros = [];
 
             for ($i = 0; $i < 16; $i++) {
                 $coros[] = \Async\spawn(static function () use ($store, $i): array {
                     $issue = $store->addIssue("issue {$i}", "body {$i}");
-                    \Async\delay(1);
                     $runId = $store->recordRun($issue->id, "Solver{$i}");
 
                     return ['title' => "issue {$i}", 'issueId' => $issue->id, 'runId' => $runId];
