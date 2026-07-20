@@ -7,6 +7,7 @@ namespace Claw\Tool;
 use Claw\Exceptions\ClawException;
 use Claw\Exceptions\ToolException;
 use Claw\Project\IssueStatus;
+use Claw\Project\IssueType;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
 
@@ -44,9 +45,10 @@ final readonly class ProjectManagerTool implements ToolInterface
         return 'Manage this project\'s tickets. '
             . "action='create_issue' (title, optional description, optional parent) opens an issue — pass "
             . 'parent to open it as a SUB-ISSUE of a task too big to solve in one run; '
-            . "action='set_strategy' (issue, strategy, reason, optional needs_human) records HOW an issue "
-            . 'is to be solved — strategy is one of direct (one agent, a localized change), library (a '
-            . 'ready-made workflow fits), generate (write a bespoke solver), decompose (split into '
+            . "action='set_strategy' (issue, type, strategy, reason, optional needs_human) records WHAT KIND "
+            . 'of work an issue is and HOW it is to be solved — type is one of bug, feature, refactor, '
+            . 'design, research, chore; strategy is one of direct (one agent, a localized change), library '
+            . '(a ready-made workflow fits), generate (write a bespoke solver), decompose (split into '
             . 'sub-issues); '
             . "action='needs_human' (issue, reason) parks the ticket for a PERSON — use it when the ticket "
             . 'cannot be worked on as written (it says nothing actionable, contradicts itself, or asks about '
@@ -74,6 +76,11 @@ final readonly class ProjectManagerTool implements ToolInterface
                 'parent' => [
                     'type' => 'string',
                     'description' => 'id of the issue this is a part of; omit for a top-level issue',
+                ],
+                'type' => [
+                    'type' => 'string',
+                    'enum' => ['bug', 'feature', 'refactor', 'design', 'research', 'chore'],
+                    'description' => 'what kind of work the issue is; required for set_strategy',
                 ],
                 'strategy' => [
                     'type' => 'string',
@@ -158,11 +165,19 @@ final readonly class ProjectManagerTool implements ToolInterface
             );
         }
 
+        // Everything is parsed before anything is written, so a rejected value leaves the ticket exactly
+        // as it was and the model corrects itself against an unchanged state rather than a half-applied one.
+        $type = IssueType::parse($this->text($input, 'type'));
         $strategy = Strategy::parse($this->text($input, 'strategy'));
         $needsHuman = $this->flag($input, 'needs_human');
+
+        // The type is written first and separately BECAUSE it survives what follows: setStrategy() refuses
+        // a verdict that does not escalate past one that already failed, and the classification is right
+        // either way — the retry that follows a refusal is about how to solve the ticket, not what it is.
+        $this->store->setIssueType($issueId, $type);
         $this->store->setStrategy($issueId, $strategy, $reason, $needsHuman);
 
-        return "Issue #{$issueId} will be solved by: {$strategy->value}"
+        return "Issue #{$issueId} is a {$type->value} and will be solved by: {$strategy->value}"
             . ($needsHuman ? ' (a person must approve first).' : '.');
     }
 

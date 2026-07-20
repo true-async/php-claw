@@ -174,10 +174,12 @@ final class WorkflowMode
 
         // Three outcomes, and "no strategy" is not one thing: the ProjectManager may have PARKED the
         // ticket for a person, which is a decision, not the absence of one.
-        $parked = $store->loadIssue($issue->id)->status === IssueStatus::WaitingHuman;
+        $triaged = $store->loadIssue($issue->id);
+        $parked = $triaged->status === IssueStatus::WaitingHuman;
+        $type = $triaged->type === null ? 'untyped' : $triaged->type->value;
 
         fwrite(STDOUT, match (true) {
-            $strategy !== null => "  strategy: {$strategy->value}\n",
+            $strategy !== null => "  type: {$type}\n  strategy: {$strategy->value}\n",
             $parked => "  strategy: none — parked for a person (the ticket cannot be worked on as written)\n",
             default => "  strategy: not decided (analysis recorded nothing — run `claw run` to solve it anyway)\n",
         });

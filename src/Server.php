@@ -443,6 +443,7 @@ final class Server
                 'title' => $issue->title,
                 'desc' => $issue->description,   // the human-written brief — shown in the dashboard drawer
                 'status' => $status,
+                'type' => $issue->type?->value,   // null until triage has typed it, like the strategy below
                 'strategy' => $strategy === null ? null : $strategy['strategy']->value,
                 'strategyReason' => $strategy['reason'] ?? '',
                 'needsHuman' => $strategy['needsHuman'] ?? false,

@@ -65,7 +65,23 @@ final readonly class Triage
         burns money inventing a task: one reading just "ку" had a solver write tests for code nobody
         asked for and run them five times.
 
-        If it IS workable, judge the SIZE and SHAPE of the work and choose exactly one strategy:
+        If it IS workable, say first WHAT KIND of work it is — exactly one type:
+
+        - `bug`      — something is broken and should not be. The work has a fixed shape: reproduce it,
+                       pin it with a failing test, fix it, watch the test go green.
+        - `feature`  — new behaviour someone asked for.
+        - `refactor` — change the shape of the code without changing what it does. There are no
+                       acceptance criteria; the existing tests passing IS the criterion.
+        - `design`   — decide how something should be built. Produces a document and a decision, and
+                       commits no code.
+        - `research` — find something out and report it. Changes nothing.
+        - `chore`    — mechanical upkeep with a rigid procedure: a dependency bump, a codemod, a rename
+                       across the project, documentation, test coverage for code that already works.
+
+        Judge the type from what the ticket ASKS FOR, not from how big it is — a bug is a bug whether
+        it takes one line or ten files.
+
+        THEN judge the SIZE and SHAPE of the work and choose exactly one strategy:
 
         - `direct`    — one agent with the project's tools can just do it. A localized, mechanical
                         change: a typo, a flag, a small method, a config value. This is the cheapest
@@ -83,7 +99,8 @@ final readonly class Triage
         expensive or hard to undo — a decomposition almost always is — and no for small, obvious work.
 
         Then record the verdict by CALLING the `project_manager` tool with the action `set_strategy`,
-        passing the issue id, the strategy you chose, your reason, and whether a person must approve.
+        passing the issue id, the type and the strategy you chose, your reason, and whether a person
+        must approve.
 
         HOW YOU WORK — the rules, plainly:
 

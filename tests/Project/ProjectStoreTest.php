@@ -6,6 +6,7 @@ namespace Tests\Project;
 
 use Claw\Exceptions\ClawException;
 use Claw\Project\IssueStatus;
+use Claw\Project\IssueType;
 use Claw\Project\ProjectStore;
 use Claw\Project\RunStatus;
 use Testo\Assert;
@@ -525,6 +526,90 @@ final class ProjectStoreTest
             }
 
             Assert::count($store->allIssues(), 16);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function anIssueIsUntypedUntilItIsTypedAndTheTypeSurvivesEveryWayItIsRead(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $root = $store->addIssue('a task');
+            $child = $store->addIssue('a part of it', '', $root->id);
+
+            // Creation cannot fail on a model call, so it cannot classify either: a fresh ticket has no
+            // type, exactly as it has no strategy until the ProjectManager has looked at it.
+            Assert::same($root->type, null);
+            Assert::same($store->loadIssue($root->id)->type, null);
+
+            $store->setIssueType($root->id, IssueType::Bug);
+            $store->setIssueType($child->id, IssueType::Chore);
+
+            // All three readers hydrate from their own SELECT, so each has to name the column.
+            Assert::same($store->loadIssue($root->id)->type, IssueType::Bug);
+            Assert::same($store->allIssues()[0]->type, IssueType::Bug);
+            Assert::same($store->childIssues($root->id)[0]->type, IssueType::Chore);
+
+            // A later answer replaces the earlier one rather than queueing behind it.
+            $store->setIssueType($root->id, IssueType::Refactor);
+            Assert::same($store->loadIssue($root->id)->type, IssueType::Refactor);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function aProjectRegisteredBeforeTheTypeColumnExistedStillOpens(): void
+    {
+        // The upgrade path, which is the part that breaks for people who already use the tool: their db
+        // was created without this column and `CREATE TABLE IF NOT EXISTS` will never give it to them.
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $issue = $store->addIssue('opened by the old version');
+            $store->pdo()->exec('ALTER TABLE issues DROP COLUMN type');   // rewind to the older schema
+
+            $upgraded = ProjectStore::discover($projectsDir, $folder);   // re-opening runs the migration
+
+            Assert::true($upgraded instanceof ProjectStore);
+            Assert::same($upgraded->loadIssue($issue->id)->type, null);   // reads as untyped, does not throw
+            $upgraded->setIssueType($issue->id, IssueType::Design);
+            Assert::same($upgraded->loadIssue($issue->id)->type, IssueType::Design);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function aCorruptTypeInTheLedgerFailsLoudRatherThanBecomingSomeDefaultKindOfWork(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $issue = $store->addIssue('a task');
+            $store->pdo()->exec("UPDATE issues SET type = 'emergency' WHERE id = {$issue->id}");
+
+            $threw = false;
+
+            try {
+                $store->loadIssue($issue->id);
+            } catch (ClawException $e) {
+                $threw = str_contains($e->getMessage(), "corrupt issue type 'emergency'");
+            }
+
+            Assert::true($threw);
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($folder);

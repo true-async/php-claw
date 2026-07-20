@@ -124,4 +124,7 @@ interface ProjectStoreInterface
     public function resumableRun(string $issueId, string $workflow): ?string;
 
     public function setIssueStatus(string $issueId, IssueStatus $status): void;
+
+    /** Record what kind of work an issue is; a later answer replaces an earlier one. */
+    public function setIssueType(string $issueId, IssueType $type): void;
 }

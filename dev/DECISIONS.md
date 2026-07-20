@@ -68,3 +68,26 @@ believed. Handing the reviewer the raw output leaves nothing to fabricate.
 
 **Why.** The tool is not the only door — the CLI and the dashboard open issues through the
 same `addIssue()`. A bound one caller honours is not a bound.
+
+---
+
+## 2026-07-20 — What a ticket IS, and how it is solved, are two answers
+
+**Decision.** An issue carries an `IssueType` — `bug`, `feature`, `refactor`, `design`,
+`research`, `chore` — as a single column on `issues`, alongside but separate from the
+`Strategy` verdicts in `issue_strategy`. The ProjectManager records both in the one
+`set_strategy` call it is allowed per triage, and the type is required: a verdict that
+does not classify the ticket is refused.
+
+**Why.** The two answer different questions and change on different clocks. A bug is still
+a bug after the cheap attempt at it failed, so the type is a property of the ticket and one
+column is enough; a strategy is the verdict on one attempt, and a retry is *required* to
+change it — which is why the verdicts are a ledger with an escalation rule.
+
+The type earns its place by routing: a workflow from the library declares the types it
+serves, so the ProjectManager is shown only the ones that fit. Made optional, the model
+would skip it and the filter would degrade to showing everything — a gate on paper again.
+
+**Cases are added only when the PROCEDURE differs.** `refactor` is separate from `feature`
+because it has no acceptance criteria at all — the existing tests passing *is* the
+criterion. Two kinds of work that would be done the same way do not earn two types.
