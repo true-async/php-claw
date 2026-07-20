@@ -602,6 +602,72 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aCriticSeesEvidenceAsCapturedOutputAndTheStepsNoteAsAClaim(): void
+    {
+        // The reason the kind exists: with only a text artifact, "All tests passed." IS the review's
+        // whole input and a step can assert anything. Evidence puts the command's own output in front
+        // of the reviewer, with the step's reading of it kept visibly separate.
+        $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact(
+                    'tests',
+                    text: 'the suite is green',
+                    evidence: 'ERRORS! Tests: 10, Errors: 10.',
+                    from: 'bash',
+                );
+            }
+        };
+
+        $wf->run();
+
+        $prompt = $this->lastUserText($worker);
+        Assert::true(str_contains($prompt, 'CAPTURED OUTPUT'));
+        Assert::true(str_contains($prompt, 'ERRORS! Tests: 10, Errors: 10.'));
+        // the contradicting summary is shown, but as the step's claim — never as part of the output
+        Assert::true(str_contains($prompt, 'which is a claim: the suite is green'));
+    }
+
+    #[Test]
+    public function anArtifactWithNoContentChannelFailsLoud(): void
+    {
+        $wf = new class ($this->config(), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            public function go(): void
+            {
+                $this->artifact('nothing');
+            }
+        };
+
+        $threw = false;
+
+        try {
+            $wf->go();
+        } catch (\LogicException $e) {
+            $threw = str_contains($e->getMessage(), 'needs exactly one of');
+        }
+
+        Assert::true($threw);
+    }
+
+    #[Test]
     public function theCriticIsToldAnArtifactIsAClaimItMustCheckRatherThanTrust(): void
     {
         // A real run shipped broken work because a generated step hardcoded the artifact "All tests

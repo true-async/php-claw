@@ -46,4 +46,42 @@ final class ArtifactTest
         Assert::same($a->ext, 'xyz');
         Assert::same($a->mime, 'text/plain');
     }
+
+    #[Test]
+    public function evidenceKeepsTheOutputVerbatimAndNamesWhatProducedIt(): void
+    {
+        $output = "PHPUnit 9.6.34\n\nERRORS!\nTests: 10, Assertions: 0, Errors: 10.";
+        $a = Artifact::evidence('tests', $output, 'bash');
+
+        Assert::same($a->kind, 'evidence');
+        Assert::same($a->value, $output);   // untouched — the point is that it was not composed
+        Assert::same($a->source, 'bash');
+        Assert::same($a->note, '');
+    }
+
+    #[Test]
+    public function evidenceIsPresentedAsCapturedOutputRatherThanAsTheStepsWords(): void
+    {
+        // The critic has to be able to tell these apart at a glance: a text artifact is a claim, an
+        // evidence artifact is what a command actually printed. If they render alike, a step can go
+        // on asserting success it never had and the reviewer has no way to notice.
+        $rendered = Artifact::evidence('tests', 'ERRORS! Tests: 10, Errors: 10.', 'bash')->render();
+
+        Assert::true(str_contains($rendered, 'CAPTURED OUTPUT'));
+        Assert::true(str_contains($rendered, 'not written by the step'));
+        Assert::true(str_contains($rendered, '`bash`'));
+        Assert::true(str_contains($rendered, 'ERRORS! Tests: 10, Errors: 10.'));
+    }
+
+    #[Test]
+    public function aStepsNoteRidesAlongsideEvidenceAndIsMarkedAsItsClaim(): void
+    {
+        $a = Artifact::evidence('tests', 'ERRORS! Tests: 10, Errors: 10.', 'bash', 'the suite is green');
+        $rendered = $a->render();
+
+        Assert::same($a->note, 'the suite is green');
+        // Stored apart, so a false summary cannot be mistaken for part of the output it contradicts.
+        Assert::false(str_contains($a->value, 'the suite is green'));
+        Assert::true(str_contains($rendered, "the step's own summary of it, which is a claim: the suite is green"));
+    }
 }

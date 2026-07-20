@@ -419,24 +419,55 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Record a named output the current step produced — a piece of text, or a file the step wrote.
-     * Artifacts are journaled (so they show in `claw log`) and handed to the step's critic for review;
-     * a step that declares a critic SHOULD emit the artifacts the rubric is judged against. Pass either
-     * $text or $file (a path relative to the project), not both. For inline text, $lang names the content
-     * type (e.g. 'php', 'json', 'diff') so a viewer can render it properly; omit it to let the content be
-     * sniffed. A file's type comes from its path.
+     * Record a named output the current step produced. Artifacts are journaled (so they show in
+     * `claw log`) and handed to the step's critic for review; a step that declares a critic SHOULD
+     * emit the artifacts the rubric is judged against.
+     *
+     * Three channels, and the choice is about WHO WROTE THE CONTENT:
+     *
+     *  - $evidence — the VERBATIM output of a tool the step ran, with $from naming the tool. Use this
+     *    whenever the rubric turns on a fact a command can settle: `$out = $this->tool('bash', [...]);
+     *    $this->artifact('tests', evidence: $out, from: 'bash')`. It is the only channel a step cannot
+     *    compose, which is exactly why it exists — a step once recorded "All tests passed." while the
+     *    suite was erroring, and the run closed the issue. Pass $text alongside it to add the step's
+     *    own reading of that output; it is kept and shown separately, as the step's claim.
+     *  - $file — a path (relative to the project) the step wrote; the critic opens it itself.
+     *  - $text — the step's own words. Fine for a decision or generated source; not proof of anything.
+     *
+     * For inline text, $lang names the content type (e.g. 'php', 'json', 'diff') so a viewer can render
+     * it properly; omit it to let the content be sniffed. A file's type comes from its path.
      */
-    protected function artifact(string $label, ?string $text = null, ?string $file = null, string $lang = ''): void
-    {
-        // Exactly one of $text / $file — enforce the contract rather than silently preferring $file
-        // (dropping $text) or recording an empty artifact when neither is given.
+    protected function artifact(
+        string $label,
+        ?string $text = null,
+        ?string $file = null,
+        string $lang = '',
+        ?string $evidence = null,
+        string $from = '',
+    ): void {
+        // Exactly one CONTENT channel — enforce the contract rather than silently preferring one
+        // (dropping the other) or recording an empty artifact when none is given. $text is the one
+        // exception: alongside $evidence it is not content but the step's own note about it, so it
+        // rides along, stored and shown separately.
         $entry = match (true) {
+            $evidence !== null && $file === null => Artifact::evidence($label, $evidence, $from, $text ?? ''),
             $file !== null && $text === null => Artifact::file($label, $file),
             $text !== null && $file === null => Artifact::text($label, $text, $lang),
-            default => throw new \LogicException("artifact('{$label}') needs exactly one of \$text or \$file."),
+            default => throw new \LogicException(
+                "artifact('{$label}') needs exactly one of \$text, \$file or \$evidence "
+                . '(a $text alongside $evidence is allowed — it is the step\'s note about that output).',
+            ),
         };
         $this->artifacts[$this->currentStep][] = $entry;
-        $this->tracer()?->artifact($entry->label, $entry->kind, $entry->value, $entry->ext, $entry->mime);
+        $this->tracer()?->artifact(
+            $entry->label,
+            $entry->kind,
+            $entry->value,
+            $entry->ext,
+            $entry->mime,
+            $entry->source,
+            $entry->note,
+        );
     }
 
     /** The issue this run was started under, if any — climb to it for wider context. */
