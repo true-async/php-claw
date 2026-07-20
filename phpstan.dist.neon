@@ -4,6 +4,9 @@ parameters:
         - src
         - bin/claw
         - tests
+        # The library that ships with claw. Analysed like the rest: these workflows are the ones
+        # offered as "hand-written and tested", which is a weaker claim if nothing checks them.
+        - workflows
     # Official TrueAsync stubs (dev-only). Scan just the Async namespace —
     # the package's root src/ also redeclares the global \PDO, which would
     # clash with PHPStan's built-in PDO knowledge.

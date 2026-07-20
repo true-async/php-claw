@@ -139,6 +139,30 @@ final class WorkflowLibraryTest
         }
     }
 
+    #[Test]
+    public function theLibraryThatShipsWithClawIsWholeAndOffersWhatItSays(): void
+    {
+        // The guard for everything added to workflows/ from here on. `catalogue()` refuses an entry that
+        // cannot be chosen — no docblock to judge it by, no type it serves, a class not named after its
+        // file — so a workflow added carelessly fails here rather than being quietly invisible, or worse,
+        // visible with nothing to pick it by.
+        $shipped = WorkflowStore::library(\dirname(__DIR__, 2) . '/workflows');
+        $catalogue = $shipped->catalogue();
+
+        Assert::true($catalogue !== []);
+
+        foreach ($catalogue as $entry) {
+            Assert::true(trim($entry['description']) !== '');
+            Assert::true($entry['serves'] !== []);
+            Assert::true(class_exists($entry['class']));
+        }
+
+        // And the type filter really reaches the shipped shelf: the bug workflow is on offer for a bug
+        // and absent from a kind of work it does not do.
+        Assert::true(isset(WorkflowStore::offered([$shipped], IssueType::Bug)['FixBugWorkflow']));
+        Assert::false(isset(WorkflowStore::offered([$shipped], IssueType::Research)['FixBugWorkflow']));
+    }
+
     /**
      * Write a workflow file into a library folder. $serves is the attribute's argument list verbatim —
      * unpacking is not allowed in an attribute, so the cases are spelled out — or null for a class that
