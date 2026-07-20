@@ -309,6 +309,17 @@ final class ProjectStore implements ProjectStoreInterface
             'outcome' => StrategyOutcome::Pending->value,
             'created_at' => time(),
         ]);
+
+        // needs_human is not a note — it moves the ticket. WaitingHuman already means exactly this, so
+        // the flag lands where a person actually sees it (the board's own column) instead of sitting in
+        // the ledger as a field nobody reads. Left alone for an issue already settled by a person.
+        if ($needsHuman) {
+            $status = $this->loadIssue($issueId)->status;
+
+            if ($status !== IssueStatus::Closed && $status !== IssueStatus::Deleted) {
+                $this->setIssueStatus($issueId, IssueStatus::WaitingHuman);
+            }
+        }
     }
 
     /**

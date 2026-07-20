@@ -12,6 +12,7 @@ use Claw\Exceptions\ClawException;
 use Claw\Project\Issue;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\Strategy;
+use Claw\Project\StrategyOutcome;
 use Claw\Tool\ProjectManagerTool;
 use Claw\Tool\Registry;
 use Claw\Workflow\Environment;
@@ -130,7 +131,39 @@ final readonly class Triage
 
         return "Project: {$project->name} ({$project->path})\n\n"
             . "Ticket #{$issue->id}\nTitle: {$issue->title}\n\nDescription:\n{$description}\n\n"
+            . $this->history($issue)
             . "Decide the strategy and record it with project_manager(action='set_strategy', issue='{$issue->id}', …).";
+    }
+
+    /**
+     * What has already been tried on this ticket and how it ended — empty on a first triage.
+     *
+     * A retry chooses from the failures, so it has to see them: without this the ProjectManager would
+     * pick the same strategy that just broke, and be refused by the store for not escalating, having
+     * spent a model call to learn what it could have been told.
+     */
+    private function history(Issue $issue): string
+    {
+        $failed = array_filter(
+            $this->store->strategyAttempts($issue->id),
+            static fn (array $attempt): bool => $attempt['outcome'] === StrategyOutcome::Failed,
+        );
+
+        if ($failed === []) {
+            return '';
+        }
+
+        $lines = array_map(
+            static fn (array $attempt): string => "- `{$attempt['strategy']->value}` was tried and failed: {$attempt['outcomeReason']}",
+            $failed,
+        );
+
+        return "This ticket has been attempted before:\n" . implode("\n", $lines) . "\n\n"
+            . 'A strategy that already failed cannot be chosen again, and neither can a cheaper one — the '
+            . "store will refuse it. Your next verdict must do MORE than what broke.\n\n"
+            . 'If there is nothing left to escalate to, or the failures show this needs a person to '
+            . 'decide something, set needs_human=true: that hands the ticket to a human, which is a real '
+            . "answer and better than a verdict that will fail the same way.\n\n";
     }
 
     /**

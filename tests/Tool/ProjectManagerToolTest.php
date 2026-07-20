@@ -250,6 +250,54 @@ final class ProjectManagerToolTest
     }
 
     #[Test]
+    public function needsHumanMovesTheTicketToWaitingHumanRatherThanJustBeingNoted(): void
+    {
+        $this->withStore(function (ProjectStore $store): void {
+            $tool = new ProjectManagerTool($store);
+            $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
+
+            $tool->handle([
+                'action' => 'set_strategy', 'issue' => '1', 'strategy' => 'decompose',
+                'reason' => 'too big', 'needs_human' => true,
+            ]);
+
+            // The flag has to DO something, or it is a field nobody reads. WaitingHuman already means
+            // exactly this, so the ticket lands in the column a person actually looks at.
+            Assert::same($store->loadIssue('1')->status, IssueStatus::WaitingHuman);
+        });
+    }
+
+    #[Test]
+    public function theEscalationLadderEndsAtAPersonWithNoRoundCounter(): void
+    {
+        // Nothing counts retries. The store refuses any strategy that does not escalate past a failed
+        // one, so once `decompose` — the top rank — has failed there is nothing left to escalate to,
+        // and handing the ticket to a person is the only verdict that can still be recorded. The
+        // ladder ends itself; a counter would be a second, weaker way of saying the same thing.
+        $this->withStore(function (ProjectStore $store): void {
+            $tool = new ProjectManagerTool($store);
+            $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
+
+            foreach (['direct', 'generate', 'decompose'] as $strategy) {
+                $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'strategy' => $strategy, 'reason' => 'next rung']);
+                $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => "{$strategy} did not work"]);
+            }
+
+            // Every rung is now spent — nothing escalates past decompose, including decompose itself.
+            foreach (['direct', 'library', 'generate', 'decompose'] as $strategy) {
+                Assert::true(str_contains(
+                    $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'strategy' => $strategy, 'reason' => 'again']),
+                    'does not escalate past',
+                ));
+            }
+
+            // The one move left is the person, and it is still available.
+            $store->setIssueStatus('1', IssueStatus::WaitingHuman);
+            Assert::same($store->loadIssue('1')->status, IssueStatus::WaitingHuman);
+        });
+    }
+
+    #[Test]
     public function aFailureReportNeverResurrectsATicketAPersonClosed(): void
     {
         $this->withStore(function (ProjectStore $store): void {

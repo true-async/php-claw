@@ -234,7 +234,7 @@ final readonly class IssueRunner
         } catch (\Throwable $e) {
             $ctx->tracer->exit($span);
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-            $this->store->failStrategy($ctx->issue->id, "the direct attempt failed: {$e->getMessage()}");
+            $this->giveBackToProjectManager($ctx->issue, "the direct attempt failed: {$e->getMessage()}");
             $this->frontend->report("run #{$ctx->runId} failed: {$e->getMessage()}", true);
 
             return 1;
@@ -247,6 +247,31 @@ final readonly class IssueRunner
         $this->frontend->report("Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.", false);
 
         return 0;
+    }
+
+    /**
+     * Hand a ticket that could not be solved back to the ProjectManager, and let it decide what
+     * happens next. There are exactly two answers, and it has to pick one:
+     *
+     *  - a STRONGER strategy — the work still looks doable, so the ticket stays open and will be run
+     *    again under a verdict that does more than the one that broke;
+     *  - a PERSON — recorded with needs_human, which moves the ticket to WaitingHuman.
+     *
+     * No round counter is needed to stop this looping, because the store refuses any strategy that
+     * does not escalate past a failed one. Once `decompose` — the top rank — has failed, there is
+     * nothing left to escalate to, and the only answer the ProjectManager can still record is the
+     * human one. The ladder ends itself.
+     *
+     * Best-effort: {@see Triage::analyse()} swallows its own failures, so a model that is down leaves
+     * the ticket open and untriaged rather than taking the run report down with it.
+     */
+    private function giveBackToProjectManager(Issue $issue, string $reason): void
+    {
+        if (!$this->store->failStrategy($issue->id, $reason)) {
+            return;   // nothing was in force — the issue was never triaged, so there is nothing to escalate
+        }
+
+        new Triage($this->store, $this->config, $this->agent)->analyse($issue);
     }
 
     /**
@@ -383,6 +408,7 @@ final readonly class IssueRunner
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
                     $message = "run #{$ctx->runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}";
+                    $this->giveBackToProjectManager($ctx->issue, $message);
                     $this->frontend->report($message, true);
 
                     return 1;
@@ -394,6 +420,7 @@ final readonly class IssueRunner
                 if ($fixed === null) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                    $this->giveBackToProjectManager($ctx->issue, "the generated solver crashed and could not be repaired: {$e->getMessage()}");
                     $this->frontend->report("the supervisor could not repair run #{$ctx->runId}", true);
 
                     return 1;
