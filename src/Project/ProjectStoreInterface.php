@@ -20,6 +20,13 @@ interface ProjectStoreInterface
     public function project(): Project;
 
     /**
+     * Rewrite the project's description — its brief, held as the Markdown source that was authored.
+     *
+     * @throws \Claw\Exceptions\ClawException
+     */
+    public function setDescription(string $description): void;
+
+    /**
      * Every issue in the project, oldest first (soft-deleted ones hidden).
      *
      * @return list<Issue>

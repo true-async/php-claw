@@ -380,6 +380,36 @@ final class ProjectStoreTest
     }
 
     #[Test]
+    public function aProjectCarriesAMarkdownBriefThatCanBeRewritten(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $brief = "# The thing\n\nA *brief* with `markup` in it.";
+            ProjectStore::init($projectsDir, $folder, $brief);
+
+            $store = ProjectStore::discover($projectsDir, $folder);
+
+            if ($store === null) {
+                throw new \RuntimeException('the project just initialized could not be discovered');
+            }
+
+            // Stored as the SOURCE that was authored — markup intact, nothing escaped or rendered.
+            Assert::same($store->project()->description, $brief);
+
+            $store->setDescription('rewritten');
+            Assert::same($store->project()->description, 'rewritten');   // the open handle is not stale
+
+            $reopened = ProjectStore::openByKey($projectsDir, $store->project()->id);
+            Assert::same($reopened?->project()->description, 'rewritten');   // and it persisted
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
     public function onePooledHandleIsSafeAcrossConcurrentCoroutines(): void
     {
         $projectsDir = self::tempDir();
