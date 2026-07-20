@@ -13,6 +13,10 @@ use Testo\Test;
 /**
  * The library side of {@see WorkflowStore}: what it offers the ProjectManager, and what it refuses to
  * offer silently.
+ *
+ * Every workflow written here has a class name used NOWHERE ELSE in the suite. PHP loads a class once
+ * per process, so a name shared with another test resolves to whichever file was read first, and the
+ * catalogue then reports that file's docblock — which passes or fails depending on test order.
  */
 final class WorkflowLibraryTest
 {
@@ -22,15 +26,15 @@ final class WorkflowLibraryTest
         $dir = self::tempDir();
 
         try {
-            self::writeWorkflow($dir, 'Library', 'FixTheBug', 'IssueType::Bug', 'Reproduces a defect, pins it with a failing test, then fixes it.');
+            self::writeWorkflow($dir, 'Library', 'CataloguedBugFix', 'IssueType::Bug', 'Reproduces a defect, pins it with a failing test, then fixes it.');
             // A base class or a helper in the same folder is not an option on the shelf.
-            self::writeWorkflow($dir, 'Library', 'SharedHelper', null, 'Something the others use.');
+            self::writeWorkflow($dir, 'Library', 'CataloguedHelper', null, 'Something the others use.');
 
             $catalogue = WorkflowStore::library($dir)->catalogue();
 
             Assert::count($catalogue, 1);
-            Assert::same($catalogue[0]['name'], 'FixTheBug');
-            Assert::same($catalogue[0]['class'], 'ClawWorkflow\Library\FixTheBug');
+            Assert::same($catalogue[0]['name'], 'CataloguedBugFix');
+            Assert::same($catalogue[0]['class'], 'ClawWorkflow\Library\CataloguedBugFix');
             Assert::same($catalogue[0]['serves'], [IssueType::Bug]);
             Assert::true(str_contains($catalogue[0]['description'], 'failing test'));
         } finally {
@@ -68,15 +72,15 @@ final class WorkflowLibraryTest
         $dir = self::tempDir();
 
         try {
-            self::writeWorkflow($dir, 'Library', 'FixTheBug', 'IssueType::Bug', 'Fixes a defect.');
-            self::writeWorkflow($dir, 'Library', 'LookIntoIt', 'IssueType::Research, IssueType::Design', 'Reads around and reports.');
+            self::writeWorkflow($dir, 'Library', 'FilteredBugFix', 'IssueType::Bug', 'Fixes a defect.');
+            self::writeWorkflow($dir, 'Library', 'FilteredResearch', 'IssueType::Research, IssueType::Design', 'Reads around and reports.');
 
             $forBugs = WorkflowStore::offered([WorkflowStore::library($dir)], IssueType::Bug);
             $forResearch = WorkflowStore::offered([WorkflowStore::library($dir)], IssueType::Research);
             $forFeatures = WorkflowStore::offered([WorkflowStore::library($dir)], IssueType::Feature);
 
-            Assert::same(array_keys($forBugs), ['FixTheBug']);
-            Assert::same(array_keys($forResearch), ['LookIntoIt']);
+            Assert::same(array_keys($forBugs), ['FilteredBugFix']);
+            Assert::same(array_keys($forResearch), ['FilteredResearch']);
             Assert::same($forFeatures, []);   // nothing ready-made fits; the caller must do the work
         } finally {
             self::rmrf($dir);

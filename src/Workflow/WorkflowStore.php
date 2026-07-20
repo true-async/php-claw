@@ -157,6 +157,10 @@ final class WorkflowStore
      * library nobody can see the broken half of is worse than one that says what is wrong with it. The
      * same goes for a missing description — an entry the model cannot judge is an entry it picks blind.
      *
+     * Loading also means a class is read ONCE per process: were two shelves to hold the same
+     * fully-qualified name, both would report whichever file was read first. That is what the per-shelf
+     * namespace segments prevent, and it is why they are not cosmetic.
+     *
      * @return list<array{name: string, class: string, description: string, serves: list<IssueType>}>
      *
      * @throws WorkflowException
