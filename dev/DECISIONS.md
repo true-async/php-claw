@@ -151,3 +151,27 @@ a fresh context earns its cost — demonstrating the bug, fixing it, and proving
 **What is NOT claimed.** These tests check that the workflow is whole and offered for the right
 kind of ticket. Whether its prompts and rubrics actually hold up is settled by running it on a
 real bug, not by the suite.
+
+---
+
+## 2026-07-20 — Repair answers one question: is this workflow's code broken?
+
+**Decision.** The supervisor's repair-and-resume loop is entered only when the failure could
+actually be a defect in the workflow's code. Two things now stop it:
+
+- An `AgentException` — the model backend refusing or failing (a malformed request, a rate limit,
+  an outage, a spent quota) — is reported, never repaired. The taxonomy for this already existed
+  in `AgentErrors::classify()`; the repair boundary simply never asked.
+- A workflow from the LIBRARY is never repaired at all, whatever the error.
+
+**Why.** Found by running `FixBugWorkflow` on a real bug. The run died on a 400 —
+`An assistant message with 'tool_calls' must be followed by tool messages` — which is our own
+malformed history, not broken code. `runSolver()` caught it as it catches everything, decided the
+solver was broken, and sent the supervisor to rewrite it. The supervisor then read the source from
+the project's generated-workflow store, where a library workflow is not, got an empty string, and
+invented a replacement class out of the error text alone.
+
+**Why the library is excluded even from a genuine code defect.** A shelved workflow is written and
+reviewed by a person and shared by every ticket that picks it. A per-run rewrite would leave the
+original in place for the next ticket while this one quietly finished on the model's version — and
+the defect nobody was told about would still be on the shelf.
