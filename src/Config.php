@@ -47,6 +47,13 @@ final class Config
     private const BUDGET_POLICIES = ['stop', 'ask'];
 
     /**
+     * Where the GLOBAL library of ready-made workflows lives — the ones offered to every project. A
+     * path rather than a folder inside the app home, because these are written and reviewed by people
+     * and belong wherever they keep such things. A missing folder is simply an empty library.
+     */
+    private const DEFAULT_LIBRARY = './workflows';
+
+    /**
      * @param list<int>             $allowedChats telegram-only authorization allowlist (empty in console mode)
      * @param array<string, string> $agents       named agent roles -> model id (CLAW_AGENT_<ROLE>); all share
      *                                            the default access, overriding only the model for that role
@@ -68,6 +75,7 @@ final class Config
         public readonly int $turnTokens = 0,
         public readonly int $turnSeconds = 0,
         public readonly string $budgetPolicy = self::DEFAULT_BUDGET_POLICY,
+        public readonly string $library = self::DEFAULT_LIBRARY,
     ) {
     }
 
@@ -163,6 +171,7 @@ final class Config
             budgetSeconds: (int) ($get('CLAW_BUDGET_SECONDS') ?? self::DEFAULT_LIMIT),
             turnTokens: (int) ($get('CLAW_TURN_TOKENS') ?? self::DEFAULT_LIMIT),
             turnSeconds: (int) ($get('CLAW_TURN_SECONDS') ?? self::DEFAULT_LIMIT),
+            library: $get('CLAW_LIBRARY') ?? self::DEFAULT_LIBRARY,
             budgetPolicy: $budgetPolicy,
         );
     }

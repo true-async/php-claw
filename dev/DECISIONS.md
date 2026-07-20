@@ -91,3 +91,39 @@ would skip it and the filter would degrade to showing everything — a gate on p
 **Cases are added only when the PROCEDURE differs.** `refactor` is separate from `feature`
 because it has no acceptance criteria at all — the existing tests passing *is* the
 criterion. Two kinds of work that would be done the same way do not earn two types.
+
+---
+
+## 2026-07-20 — The library is two shelves, and a verdict off it names what it took
+
+**Decision.** `library` becomes a strategy the runner can actually carry out.
+
+- Ready-made workflows live in two places: a **global** folder at `CLAW_LIBRARY`, offered to every
+  project, and a **project's own** at `.claw/workflows/` inside its repository. The project's
+  wins a name clash.
+- A class is offered only if it carries `#[LibraryWorkflow(...types)]`. Its **description is its
+  docblock**, read by reflection. A workflow that is offered with no description, or serving no
+  type, is an error when the catalogue is built — not an entry nobody can judge.
+- The ProjectManager sees the shelf through `list_workflows`, **filtered by the type it just
+  decided**, and records the name it chose in the verdict. `set_strategy` refuses a `library`
+  verdict whose workflow does not exist or does not serve that type.
+
+**Why the two-shelf split.** A project's own procedures belong to that project: versioned with the
+code they serve, present in a checkout, editable by the person whose repository it is. What is
+general belongs where the person keeps general things — hence a configured path, not a folder we
+pick inside the app home.
+
+**Why the type filter rather than an instruction.** The wrong pick is not on the list, so it cannot
+be made. Telling a model to match a workflow to a ticket is one more rule to be ignored; not offering
+it is not.
+
+**Why the name is refused at record time.** It used to be recordable and unroutable: the router had
+no arm for `library` and quietly generated a bespoke solver — the exact expense the verdict existed
+to avoid. Worse, both rungs then ran the same code, so a `library` failure escalated to `generate`,
+which had already just failed under another name. A refusal reaches the model while it still has the
+ticket in mind; a run-time discovery reaches a person an hour later.
+
+**Namespaces are per shelf.** `ClawWorkflow\Library\…`, `ClawWorkflow\Project\P<key>\…`, and the
+generated solvers' `ClawWorkflow\Common\…`. The dashboard holds every registered project open in one
+process, so one namespace between them would resolve a shared name to whichever autoloader
+registered first, silently. There is a test that two shelves holding the same name do not shadow.
