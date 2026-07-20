@@ -321,22 +321,44 @@ final readonly class IssueRunner
      */
     private function reportDecomposition(RunContext $ctx): int
     {
+        $span = $ctx->tracer->enterWorkflow('decompose');
         $children = $this->store->childIssues($ctx->issue->id);
-        $ctx->tracer->exit($ctx->tracer->enterWorkflow('decompose'));
+
+        // Not split yet — do it now. Re-running a decomposed ticket must NOT split it again, hence
+        // the check first: the sub-issues are the work, and this run only reports on them.
+        $why = '';
+
+        if ($children === []) {
+            $this->frontend->report("Splitting issue #{$ctx->issue->id} into sub-issues…", false);
+
+            try {
+                $children = new Decompose($this->store, $this->config, $this->agent)->split($ctx->issue);
+            } catch (\Cancellation $cancellation) {
+                throw $cancellation;
+            } catch (\Throwable $e) {
+                // The ticket survives a failed split — but the reason travels with it. Reporting only
+                // "could not be split" left the cause discoverable solely by re-running the exchange.
+                $why = ': ' . $e->getMessage();
+            }
+        }
+        $ctx->tracer->exit($span);
 
         if ($children === []) {
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
             $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::WaitingHuman);
             $this->frontend->report(
-                "issue #{$ctx->issue->id} was judged too big to solve in one run, but has no sub-issues yet — "
-                . 'it must be split before it can be worked on',
+                "issue #{$ctx->issue->id} was judged too big to solve in one run, and could not be split{$why} — "
+                . 'a person needs to say what the pieces are',
                 true,
             );
 
             return 1;
         }
 
+        // The parent's own run is finished — its work now lives in the children — but the TICKET is
+        // not: it stays open until they all land, which settleAncestors() closes it on.
         $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
+        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Open);
         $open = array_filter($children, static fn ($child): bool => $child->status !== IssueStatus::Done);
         $this->frontend->report(sprintf(
             'Issue #%s is split into %d sub-issues (%d still open). Run those; #%s closes when they all do.',
