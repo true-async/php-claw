@@ -8,9 +8,12 @@ use Claw\Agent\AgentFactory;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
+use Claw\Project\Issue;
 use Claw\Project\ProjectStore;
+use Claw\Project\Strategy;
 use Claw\Run\ConsoleRunFrontend;
 use Claw\Run\IssueRunner;
+use Claw\Run\Triage;
 use Claw\Server;
 use Claw\Trace\Level;
 use Claw\Trace\TraceReader;
@@ -150,7 +153,8 @@ final class WorkflowMode
         }
 
         try {
-            $issue = $this->resolve($projectDir)->addIssue($title);
+            $store = $this->resolve($projectDir);
+            $issue = $store->addIssue($title);
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw -i: ' . $e->getMessage() . "\n");
 
@@ -161,7 +165,34 @@ final class WorkflowMode
         fwrite(STDOUT, '  project: ' . $issue->project . "\n");
         fwrite(STDOUT, '  status:  ' . $issue->status->name . "\n");
 
+        // The ticket is already open and recorded — everything below is the second stage, and the
+        // issue stands whether or not it succeeds. Run inline rather than detached: on a one-shot
+        // command there is nothing left to watch the verdict arrive, so it is worth the wait here.
+        fwrite(STDOUT, "  analysing…\n");
+        $strategy = $this->triage($store, $issue);
+
+        fwrite(STDOUT, $strategy === null
+            ? "  strategy: not decided (analysis did not record one — run `claw run` to solve it anyway)\n"
+            : "  strategy: {$strategy->value}\n");
+
         return 0;
+    }
+
+    /**
+     * The ProjectManager's analysis of a freshly opened ticket. Returns the strategy it recorded, or
+     * null when there is no usable agent configured or the analysis produced nothing — neither is a
+     * reason to fail the command, because the ticket itself is already safely open.
+     */
+    private function triage(ProjectStore $store, Issue $issue): ?Strategy
+    {
+        try {
+            $config = Config::load($this->root . '/.env');
+            $agent = AgentFactory::make($config, new CurlHttpClient());
+        } catch (ClawException) {
+            return null;
+        }
+
+        return $agent === null ? null : new Triage($store, $config, $agent)->analyse($issue);
     }
 
     /**

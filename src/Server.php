@@ -13,12 +13,14 @@ use function Async\spawn;
 use Claw\Agent\AgentFactory;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
+use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\Project;
 use Claw\Project\ProjectStore;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
+use Claw\Run\Triage;
 use Claw\Trace\TraceBus;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceRecordInterface;
@@ -350,7 +352,37 @@ final class Server
             return;
         }
 
+        // The ticket exists now; answer at once. The ProjectManager's analysis runs BEHIND this
+        // response, and its verdict reaches the board as a state change on the issue stream — so the
+        // create button never waits on a model, and a model that is down cannot cost the user the
+        // ticket they just typed.
+        $this->triage($key, $issue);
+
         $response->json(['id' => (int) $issue->id, 'title' => $issue->title, 'status' => $issue->status->value], 201);
+    }
+
+    /**
+     * Hand a freshly opened ticket to the ProjectManager, detached. Failure is swallowed by
+     * {@see Triage::analyse()} itself — an untriaged issue is a usable issue — so nothing here needs
+     * to recover; this only keeps the work off the request.
+     */
+    private function triage(string $key, Issue $issue): void
+    {
+        try {
+            $config = Config::load($this->root . '/.env');
+            $agent = AgentFactory::make($config, new CurlHttpClient());
+        } catch (ClawException) {
+            return;   // no usable agent config: the ticket stands, it simply carries no verdict yet
+        }
+
+        if ($agent === null) {
+            return;
+        }
+
+        $store = $this->store($key);
+        spawn(static function () use ($store, $config, $agent, $issue): void {
+            new Triage($store, $config, $agent)->analyse($issue);
+        });
     }
 
     /**
@@ -382,12 +414,22 @@ final class Server
                 $artifacts = $reader->artifactRecords($runId);
             }
 
+            // The ProjectManager's verdict, or null while the ticket is still being analysed. This is
+            // the state change the board watches arrive after a ticket is opened: creation is instant
+            // and leaves this empty, and triage fills it in a moment later.
+            $strategy = $store->currentStrategy($issue->id);
+
             $status = $issue->status->value;
             $issues[] = [
                 'id' => (int) $issue->id,
                 'title' => $issue->title,
                 'desc' => $issue->description,   // the human-written brief — shown in the dashboard drawer
                 'status' => $status,
+                'strategy' => $strategy === null ? null : $strategy['strategy']->value,
+                'strategyReason' => $strategy['reason'] ?? '',
+                'needsHuman' => $strategy['needsHuman'] ?? false,
+                'parent' => $issue->parent === null ? null : (int) $issue->parent,
+                'depth' => $issue->depth,
                 'done' => $done,
                 'live' => $status === IssueStatus::InProgress->value,
                 'runs' => array_map(
