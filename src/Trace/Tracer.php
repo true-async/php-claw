@@ -144,15 +144,29 @@ final class Tracer
     }
 
     /** A named output a step produced — recorded under the current step so it shows in the journal. */
-    public function artifact(string $label, string $kind, string $value, string $ext = 'txt', string $mime = 'text/plain'): void
-    {
-        $this->event(new TraceEvent('artifact', Level::Info, [
-            'label' => $label,
-            'kind' => $kind,
-            'value' => $value,
-            'ext' => $ext,
-            'mime' => $mime,
-        ]));
+    public function artifact(
+        string $label,
+        string $kind,
+        string $value,
+        string $ext = 'txt',
+        string $mime = 'text/plain',
+        string $source = '',
+        string $note = '',
+    ): void {
+        $data = ['label' => $label, 'kind' => $kind, 'value' => $value, 'ext' => $ext, 'mime' => $mime];
+
+        // Evidence-only fields. Journaled apart from the output so a reader — the dashboard, or a
+        // later recall — can still tell the tool's words from the step's claim about them, which is
+        // the whole reason the kind exists.
+        if ($source !== '') {
+            $data['source'] = $source;
+        }
+
+        if ($note !== '') {
+            $data['note'] = $note;
+        }
+
+        $this->event(new TraceEvent('artifact', Level::Info, $data));
     }
 
     /** The baton a step hands to the next: its returned summary of what it did / what to watch for. */
