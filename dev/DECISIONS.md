@@ -194,3 +194,23 @@ and sent the supervisor to rewrite perfectly good code.
 
 The `done` path already closed its calls for exactly this reason, with a comment saying so. This
 exit was the one that did not.
+
+---
+
+## 2026-07-20 — The ProjectManager is shown the shelf, not told to ask for it
+
+**Decision.** Triage is traced (under `triage-<issue>`, read with `claw log`), and the catalogue of
+ready-made workflows is put in the ticket brief itself rather than left behind `list_workflows`.
+
+**Why the trace.** Triage decides how every ticket is solved and left no record at all — its
+environment was built without a tracer. Whether the shelf was even opened was unanswerable.
+
+**Why the shelf is shown.** The first traced triage answered it: `list_workflows` was never called,
+not once. The instruction was circular — call the tool before choosing `library`, but a model with
+no reason to believe anything is on the shelf never considers `library`, so it never calls the tool,
+so it never learns what is there. A capability reachable only by asking for it is one nobody asks
+for. Measured on the same ticket with the same model: the verdict went from `generate` to `library`.
+
+`list_workflows` stays, for reading one in full before committing to it. The brief carries a name,
+the types it serves and its opening sentence — a few hundred tokens for the decision that picks how
+everything else is spent.
