@@ -9,6 +9,7 @@ use Claw\Agent\AgentSpeaker;
 use Claw\Agent\Budget;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\EscalatingSpeaker;
+use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Config;
@@ -18,6 +19,7 @@ use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\RunStatus;
+use Claw\Project\Strategy;
 use Claw\Tool\RecallTool;
 use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
@@ -46,6 +48,25 @@ final readonly class IssueRunner
 {
     /** How many times the supervisor may repair-and-resume a crashing solver before giving up. */
     private const int MAX_REPAIRS = 2;
+
+    /**
+     * The standing brief for the `direct` path. Short on purpose: this path is chosen for work that
+     * needs no plan, and a long prompt would talk a model into ceremony the ProjectManager already
+     * decided against. The one thing it insists on is the same thing the critic insists on elsewhere
+     * — verify by running something, not by asserting.
+     */
+    private const string DIRECT_SYSTEM = <<<'PROMPT'
+        You are solving one small, self-contained ticket in this project, directly. It was judged not
+        to need a plan or a workflow, so do the work: read what you need, make the change, and prove
+        it holds — run the linter or the tests and read their output before you believe yourself.
+
+        A clean syntax check is not proof that a task is finished. If the project has tests covering
+        what you touched, run them.
+
+        When the change exists and you have SEEN it work, call `done` with a short summary of what you
+        changed and what you ran to verify it. If the ticket turns out to be bigger than it looked, say
+        so plainly instead of half-doing it.
+        PROMPT;
 
     /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
     private const string SUPERVISOR_SYSTEM = <<<'PROMPT'
@@ -152,6 +173,23 @@ final readonly class IssueRunner
             $solverClass,
         );
 
+        // Route on the ProjectManager's verdict. An untriaged issue keeps the old behaviour — generate
+        // a solver — so a ticket opened before triage existed, or one whose analysis failed, still runs.
+        $strategy = $this->store->currentStrategy($issue->id)['strategy'] ?? null;
+
+        return match ($strategy) {
+            Strategy::Direct => $this->runDirect($ctx),
+            Strategy::Decompose => $this->reportDecomposition($ctx),
+            default => $this->runGenerated($ctx),
+        };
+    }
+
+    /**
+     * The `generate` path (and the fallback for anything not routed elsewhere): write a solver
+     * workflow for the issue, have it approved, and run it.
+     */
+    private function runGenerated(RunContext $ctx): int
+    {
         $early = $this->ensureSolver($ctx);
 
         if ($early !== null) {
@@ -159,6 +197,91 @@ final readonly class IssueRunner
         }
 
         return $this->runSolver($ctx);
+    }
+
+    /**
+     * The `direct` path: one agent, the run's tools, no generated class and no workflow machinery.
+     *
+     * This exists because generating a solver for a one-line change costs more than the change. The
+     * ProjectManager picks it for localized, mechanical work, and here that means a single exchange
+     * where the model reads, edits and verifies with the same tools a solver step would have used —
+     * minus the class, the snapshot and the critic round it had no use for.
+     */
+    private function runDirect(RunContext $ctx): int
+    {
+        $this->frontend->report("Solving issue #{$ctx->issue->id} directly (no solver workflow needed).", false);
+        $span = $ctx->tracer->enterWorkflow('direct');
+
+        $loop = new DefaultTurnLoop(
+            $this->agent,
+            $ctx->env->executor(),
+            $ctx->env->findAgentModel('worker-smart'),
+            self::DIRECT_SYSTEM,
+            $ctx->env->findRegistry()->specs(),
+            $this->config->maxHistory,
+            $ctx->tracer,
+            $ctx->env->find(EnvKey::Ask) instanceof SpeakerInterface ? $ctx->env->find(EnvKey::Ask) : null,
+        );
+
+        try {
+            $loop->run([Message::userText(
+                "Title: {$ctx->issue->title}\n\nDescription: {$ctx->issue->description}",
+            )]);
+        } catch (WorkflowFinished) {
+            // the model called `done`: the normal way this path ends
+        } catch (\Cancellation $cancellation) {
+            throw $cancellation;
+        } catch (\Throwable $e) {
+            $ctx->tracer->exit($span);
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->store->failStrategy($ctx->issue->id, "the direct attempt failed: {$e->getMessage()}");
+            $this->frontend->report("run #{$ctx->runId} failed: {$e->getMessage()}", true);
+
+            return 1;
+        }
+
+        $ctx->tracer->exit($span);
+        $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
+        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::Done);
+        $ctx->store->settleAncestors($ctx->issue->id);
+        $this->frontend->report("Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.", false);
+
+        return 0;
+    }
+
+    /**
+     * The `decompose` path. A ticket judged too big is not run — it is split, and its parts are the
+     * work. Splitting is the ProjectManager's job and has not happened here yet, so this stops and
+     * says so rather than quietly falling through to generating a solver for a task the analysis
+     * already judged too large for one.
+     */
+    private function reportDecomposition(RunContext $ctx): int
+    {
+        $children = $this->store->childIssues($ctx->issue->id);
+        $ctx->tracer->exit($ctx->tracer->enterWorkflow('decompose'));
+
+        if ($children === []) {
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->frontend->report(
+                "issue #{$ctx->issue->id} was judged too big to solve in one run, but has no sub-issues yet — "
+                . 'it must be split before it can be worked on',
+                true,
+            );
+
+            return 1;
+        }
+
+        $ctx->store->setRunStatus($ctx->runId, RunStatus::Done);
+        $open = array_filter($children, static fn ($child): bool => $child->status !== IssueStatus::Done);
+        $this->frontend->report(sprintf(
+            'Issue #%s is split into %d sub-issues (%d still open). Run those; #%s closes when they all do.',
+            $ctx->issue->id,
+            \count($children),
+            \count($open),
+            $ctx->issue->id,
+        ), false);
+
+        return 0;
     }
 
     /**
