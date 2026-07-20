@@ -9,6 +9,7 @@ use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Project\Issue;
+use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Project\Strategy;
 use Claw\Run\ConsoleRunFrontend;
@@ -171,9 +172,15 @@ final class WorkflowMode
         fwrite(STDOUT, "  analysing…\n");
         $strategy = $this->triage($store, $issue);
 
-        fwrite(STDOUT, $strategy === null
-            ? "  strategy: not decided (analysis did not record one — run `claw run` to solve it anyway)\n"
-            : "  strategy: {$strategy->value}\n");
+        // Three outcomes, and "no strategy" is not one thing: the ProjectManager may have PARKED the
+        // ticket for a person, which is a decision, not the absence of one.
+        $parked = $store->loadIssue($issue->id)->status === IssueStatus::WaitingHuman;
+
+        fwrite(STDOUT, match (true) {
+            $strategy !== null => "  strategy: {$strategy->value}\n",
+            $parked => "  strategy: none — parked for a person (the ticket cannot be worked on as written)\n",
+            default => "  strategy: not decided (analysis recorded nothing — run `claw run` to solve it anyway)\n",
+        });
 
         return 0;
     }

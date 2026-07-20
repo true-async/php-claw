@@ -48,6 +48,10 @@ final readonly class ProjectManagerTool implements ToolInterface
             . 'is to be solved — strategy is one of direct (one agent, a localized change), library (a '
             . 'ready-made workflow fits), generate (write a bespoke solver), decompose (split into '
             . 'sub-issues); '
+            . "action='needs_human' (issue, reason) parks the ticket for a PERSON — use it when the ticket "
+            . 'cannot be worked on as written (it says nothing actionable, contradicts itself, or asks about '
+            . 'something the project does not have) or when the call is not yours to make. This is a real '
+            . 'answer, not a failure: better than guessing a strategy for a ticket nobody can act on; '
             . "action='report_failure' (issue, reason) says the current strategy did not work, so the "
             . 'issue is triaged again and the next attempt must escalate; '
             . "action='close_issue' (issue, optional reason) and action='reopen_issue' (issue) settle a "
@@ -61,7 +65,7 @@ final readonly class ProjectManagerTool implements ToolInterface
             'properties' => [
                 'action' => [
                     'type' => 'string',
-                    'enum' => ['create_issue', 'set_strategy', 'report_failure', 'close_issue', 'reopen_issue'],
+                    'enum' => ['create_issue', 'set_strategy', 'needs_human', 'report_failure', 'close_issue', 'reopen_issue'],
                     'description' => 'what to do to the ticket ledger',
                 ],
                 'issue' => ['type' => 'string', 'description' => 'the issue id to act on; not used by create_issue'],
@@ -105,10 +109,11 @@ final readonly class ProjectManagerTool implements ToolInterface
                 'set_strategy' => $this->setStrategy($input),
                 'report_failure' => $this->reportFailure($input),
                 'close_issue' => $this->closeIssue($input),
+                'needs_human' => $this->needsHuman($input),
                 'reopen_issue' => $this->reopenIssue($input),
                 default => throw new ToolException(
-                    "project_manager: unknown action '{$action}' (use create_issue|set_strategy|report_failure"
-                    . '|close_issue|reopen_issue)',
+                    "project_manager: unknown action '{$action}' (use create_issue|set_strategy|needs_human"
+                    . '|report_failure|close_issue|reopen_issue)',
                 ),
             };
         } catch (ToolException $e) {
@@ -159,6 +164,32 @@ final readonly class ProjectManagerTool implements ToolInterface
 
         return "Issue #{$issueId} will be solved by: {$strategy->value}"
             . ($needsHuman ? ' (a person must approve first).' : '.');
+    }
+
+    /**
+     * Park a ticket for a person, with the reason. The honest answer to a ticket that cannot be
+     * worked on as written: the alternative was recording a strategy nobody believes and letting a
+     * worker burn money inventing the task — measured once at $0.13 on a ticket reading "ку".
+     *
+     * No strategy is recorded, because there is no way to solve it yet; the reason is what the person
+     * reads. The ticket keeps whatever a run later gives it, once the person has said what it means.
+     *
+     * @param array<string, mixed> $input
+     */
+    private function needsHuman(array $input): string
+    {
+        $issueId = $this->requireIssue($input, 'needs_human');
+        $reason = $this->text($input, 'reason');
+
+        if ($reason === '') {
+            throw new ToolException(
+                "project_manager: action='needs_human' needs a 'reason' — it is what the person will read",
+            );
+        }
+
+        $this->store->setIssueStatus($issueId, IssueStatus::WaitingHuman);
+
+        return "Issue #{$issueId} is waiting for a person: {$reason}";
     }
 
     /** @param array<string, mixed> $input */
