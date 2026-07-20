@@ -410,6 +410,83 @@ final class ProjectStoreTest
     }
 
     #[Test]
+    public function tokensSpentAreSummedOverTheWholeIssueTree(): void
+    {
+        // The pool a decomposition draws from. Per-run accounting bounds nothing when one ticket
+        // becomes N tickets that each become N more — only the tree total does.
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+
+            $root = $store->addIssue('root');
+            $child = $store->addIssue('child', '', $root->id);
+            $grandchild = $store->addIssue('grandchild', '', $child->id);
+            $unrelated = $store->addIssue('unrelated');
+
+            // The tracer owns this table, so a store-only test has to stand it up itself.
+            $store->pdo()->exec(
+                'CREATE TABLE IF NOT EXISTS trace (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, span_id INTEGER NOT NULL,
+                    parent_id INTEGER, depth INTEGER NOT NULL, phase TEXT NOT NULL, type TEXT NOT NULL,
+                    level INTEGER NOT NULL DEFAULT 20, data TEXT NOT NULL, created_at INTEGER NOT NULL
+                )',
+            );
+
+            $spend = function (string $issueId, int $in, int $out) use ($store): void {
+                $runId = $store->recordRun($issueId, 'Solver');
+                $stmt = $store->pdo()->prepare(
+                    "INSERT INTO trace (run_id, span_id, parent_id, depth, phase, type, level, data, created_at)
+                     VALUES (:run, 1, NULL, 0, 'event', 'reply', 20, :data, 1)",
+                );
+                $stmt->execute([
+                    'run' => $runId,
+                    'data' => json_encode(['usage' => ['in' => $in, 'out' => $out]], JSON_THROW_ON_ERROR),
+                ]);
+            };
+
+            $spend($root->id, 100, 10);
+            $spend($child->id, 200, 20);
+            $spend($grandchild->id, 300, 30);
+            $spend($unrelated->id, 900, 90);   // a different tree must not be counted
+
+            Assert::same($store->treeTokensSpent($root->id), 660);          // 110 + 220 + 330
+            Assert::same($store->treeTokensSpent($child->id), 550);         // the subtree from here down
+            Assert::same($store->treeTokensSpent($grandchild->id), 330);
+            Assert::same($store->treeTokensSpent($unrelated->id), 990);
+
+            // Every issue in the tree resolves to the same root, which is what makes the pool shared.
+            Assert::same($store->rootIssue($grandchild->id), $root->id);
+            Assert::same($store->rootIssue($root->id), $root->id);
+            Assert::same($store->rootIssue($unrelated->id), $unrelated->id);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
+    public function aProjectThatHasNeverRunAnythingReportsNoSpend(): void
+    {
+        // treeTokensSpent runs at run START, and the tracer creates its table on a run's first
+        // record — so in a brand new project the table is not there yet. Throwing here would kill
+        // the first run of every new project.
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $issue = $store->addIssue('the first ticket');
+
+            Assert::same($store->treeTokensSpent($issue->id), 0);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    #[Test]
     public function onePooledHandleIsSafeAcrossConcurrentCoroutines(): void
     {
         $projectsDir = self::tempDir();

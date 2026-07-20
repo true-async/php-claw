@@ -418,6 +418,63 @@ final class ProjectStore implements ProjectStoreInterface
         ];
     }
 
+    /**
+     * The tokens every run under an issue's whole TREE has already spent — the issue, its sub-issues,
+     * and theirs, however deep.
+     *
+     * Decomposition is the one thing here that multiplies spend: a parent becomes N tickets, each of
+     * which is triaged and run and may decompose again. A per-run cap does not bound that at all — it
+     * bounds each run while the tree as a whole grows without limit. So the tree shares ONE pool, and
+     * this is what has been drawn from it.
+     *
+     * Recursive in SQL rather than in PHP because it is one question about one subtree; walking it a
+     * row at a time would be a query per issue per run start.
+     */
+    public function treeTokensSpent(string $issueId): int
+    {
+        // SQLite validates a statement when it is PREPARED, so the guard has to cover that too: the
+        // trace table is created by the tracer on a run's first record, not by this schema, and so it
+        // does not exist in a project that has never had a run. This is called at run START — letting
+        // it throw would kill the very first run of every new project.
+        try {
+            $stmt = $this->pdo->prepare(
+                "WITH RECURSIVE tree(id) AS (
+                     SELECT id FROM issues WHERE id = :issue
+                     UNION ALL
+                     SELECT i.id FROM issues i JOIN tree t ON i.parent_id = t.id
+                 )
+                 SELECT COALESCE(SUM(json_extract(tr.data, '$.usage.in') + json_extract(tr.data, '$.usage.out')), 0)
+                 FROM trace tr
+                 JOIN runs r ON CAST(r.id AS TEXT) = tr.run_id
+                 WHERE tr.type = 'reply' AND r.issue_id IN (SELECT id FROM tree)",
+            );
+            $stmt->execute(['issue' => $issueId]);
+        } catch (\PDOException) {
+            return 0;   // nothing has been spent where nothing has ever run
+        }
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    /** The root of an issue's tree — itself when it has no parent. */
+    public function rootIssue(string $issueId): string
+    {
+        $seen = [];
+        $id = $issueId;
+
+        while (!isset($seen[$id])) {
+            $seen[$id] = true;
+            $parent = $this->parentOf($id);
+
+            if ($parent === null) {
+                return $id;
+            }
+            $id = $parent;
+        }
+
+        return $id;   // a cycle in parent_id; treat where we stopped as the root rather than hang
+    }
+
     /** The id of the issue this one was decomposed out of, or null for a root issue. */
     private function parentOf(string $issueId): ?string
     {
