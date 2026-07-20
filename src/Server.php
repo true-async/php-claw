@@ -53,6 +53,7 @@ use TrueAsync\WebSocketUpgrade;
  *   GET  /api/projects/{key}/runs/{runId}/stream             (SSE — live trace, keyed by seq)
  *   GET  /api/projects/{key}/runs/{runId}/trace?since=<seq>   (poll fallback for the run stream)
  *   GET  /api/projects/{key}/runs/{runId}/artifacts
+ *   GET  /api/projects/{key}/runs/{runId}/artifacts/{n}       (one artifact's body, fetched on open)
  *   POST /api/projects/{key}/issues/{id}/start               (launch the solver, 202)
  *   POST /api/projects/{key}/issues/{id}/answer              (reply to the run's open gate)
  *   POST /api/projects/{key}/description                     (rewrite the project's Markdown brief)
@@ -231,6 +232,12 @@ final class Server
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/trace$#', $path, $matches)) {
                 $since = (int) $request->getQueryParam('since', 0);
                 $response->json($this->reader($matches[1])->tail($matches[2], $since));
+
+                return;
+            }
+
+            if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/artifacts/(\d+)$#', $path, $matches)) {
+                $this->artifactBody($response, $matches[1], $matches[2], (int) $matches[3]);
 
                 return;
             }
@@ -484,6 +491,25 @@ final class Server
      * a user expands it. The resolved path is confined to the project folder — a traversal outside it, a
      * missing file, or a non-file is a 4xx, never a read elsewhere on disk.
      */
+    /**
+     * One artifact's body, by its index in the run. The listing carries metadata only, so this is
+     * what a viewer calls when someone actually opens an artifact — a run's generated source and
+     * captured command output can be large, and none of it is worth holding for the ones nobody
+     * looks at.
+     */
+    private function artifactBody(HttpResponse $response, string $key, string $runId, int $index): void
+    {
+        $body = $this->reader($key)->artifactBody($runId, $index);
+
+        if ($body === null) {
+            $response->json(['error' => 'no such artifact'], 404);
+
+            return;
+        }
+
+        $response->json(['n' => $index, 'body' => $body]);
+    }
+
     private function artifactFile(HttpResponse $response, string $key, string $relative): void
     {
         if ($relative === '') {

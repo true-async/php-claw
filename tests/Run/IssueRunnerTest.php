@@ -50,11 +50,18 @@ final class IssueRunnerTest
             Assert::same(\count($runs), 1);
             Assert::same($runs[0]['status'], RunStatus::Done->value);
 
-            // The solver's artifact landed in the durable trace under this run.
-            $artifacts = new TraceReader($store->pdo())->artifactRecords($runs[0]['id']);
+            // The solver's artifact landed in the durable trace under this run. The listing carries
+            // metadata only — the board holds it for every issue, so bodies are fetched per artifact.
+            $reader = new TraceReader($store->pdo());
+            $artifacts = $reader->artifactRecords($runs[0]['id']);
             Assert::same(\count($artifacts), 1);
             Assert::same($artifacts[0]['name'], 'result');
-            Assert::true(str_contains($artifacts[0]['body'], 'applied the fix'));
+            Assert::false(\array_key_exists('body', $artifacts[0]));
+            Assert::true($artifacts[0]['size'] > 0);
+
+            $body = $reader->artifactBody($runs[0]['id'], $artifacts[0]['n']);
+            Assert::true($body !== null && str_contains($body, 'applied the fix'));
+            Assert::null($reader->artifactBody($runs[0]['id'], 99));   // no such artifact
 
             Assert::true($frontend->reported('Reusing solver'));
             Assert::true($frontend->reported('finished'));
