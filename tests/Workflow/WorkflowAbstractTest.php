@@ -602,6 +602,43 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function theCriticIsToldAnArtifactIsAClaimItMustCheckRatherThanTrust(): void
+    {
+        // A real run shipped broken work because a generated step hardcoded the artifact "All tests
+        // passed" while the suite was erroring, and the critic replied OK in two tokens without opening
+        // anything. It was doing as it was told: the prompt used to say the artifacts were "usually
+        // enough". Giving the critic tools is worthless if it is told to trust the summary, so the
+        // instruction to verify is part of the contract and is asserted here.
+        $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['ok' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'ok')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('result', text: 'All tests passed.');
+            }
+        };
+
+        $wf->run();
+
+        $prompt = $this->lastUserText($worker);
+        Assert::true(str_contains($prompt, 'claim, not evidence'));
+        Assert::true(str_contains($prompt, 'MUST establish it yourself with a tool'));
+        // and the old instruction that caused the rubber-stamping must not come back
+        Assert::false(str_contains($prompt, 'usually enough'));
+    }
+
+    #[Test]
     public function aWorkflowCanOverrideTheCriticsStandingRole(): void
     {
         $worker = new ScriptedAgent($this->answer('OK'));   // the step has no ai(); the critic is request 0
