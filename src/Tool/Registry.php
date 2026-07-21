@@ -104,6 +104,37 @@ final class Registry
     }
 
     /**
+     * A new registry holding every tool in this one EXCEPT the named ones — the palette narrowed by
+     * subtraction. The counterpart to {@see only()}, and the right shape when a scope must be denied
+     * one specific capability rather than granted an enumerated few: `only()` has to be revisited every
+     * time a tool is added to the run, and the revisit is silent when it is forgotten, so the scope
+     * quietly stops seeing new capabilities.
+     *
+     * An unknown name is an error for the same reason it is in {@see only()}: a scope subtracting a
+     * tool that does not exist believes it is protected against something, and it is not.
+     *
+     * @param list<string> $names
+     *
+     * @throws ToolException when a name is not registered
+     */
+    public function except(array $names): self
+    {
+        foreach ($names as $name) {
+            $this->get($name);   // resolve for the side effect: an unknown name throws
+        }
+
+        $subset = new self();
+
+        foreach ($this->tools as $tool) {
+            if (!\in_array($tool->name(), $names, true)) {
+                $subset->add($tool);
+            }
+        }
+
+        return $subset;
+    }
+
+    /**
      * A new registry holding every tool in this one PLUS $tool, sharing the same instances — the
      * palette WIDENED by one for a scope, without touching this registry. The counterpart to
      * {@see only()}: used to mix a scope-only tool (e.g. the workflow-authoring tool, added just

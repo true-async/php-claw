@@ -127,9 +127,20 @@ final readonly class IssueRunner
           or a short, concrete GUIDANCE for ONE more attempt (only if a specific fix is likely to work).
         - To answer a worker's question, give the briefest concrete answer that lets it proceed.
 
-        Bias to ending churn: if a step has failed several times for the same reason, or the blocker is
-        environmental (a missing test runner, an absent dependency) and cannot change, choose `accept`
-        (if the actual work looks correct) or `stop` — do NOT keep saying "try again".
+        LOOK BEFORE YOU ACCEPT. You have the project's tools — read the files the step changed, run the
+        tests or the linter yourself. `accept` is a claim that the work is good, and the only things in
+        front of you are the critic's complaint and a summary the step wrote about ITSELF. Accept on the
+        strength of what you observed, or because the critic's objection is about form rather than
+        substance — never because the step says so.
+
+        A blocker you cannot verify is `ESCALATE`, not `accept`. That includes every claim that the
+        environment is at fault: "the test runner is missing", "the dependency is not installed". Go and
+        check, and if you cannot, say so upward. A finding of the class "this claim has no evidence
+        behind it" is never grounds to accept.
+
+        Bias to ending churn: if a step has failed several times for the SAME reason and you have seen
+        why, choose `accept` (when you have verified the work is right) or `stop` — do NOT keep saying
+        "try again".
 
         Reply exactly `ESCALATE` only when the decision genuinely needs a human (a scope or product call
         you must not make alone); it will then be passed up to the person.
@@ -320,7 +331,7 @@ final readonly class IssueRunner
             $ctx->env->executor(),
             $ctx->env->findAgentModel('worker-smart'),
             self::DIRECT_SYSTEM,
-            $ctx->env->findRegistry()->specs(),
+            $ctx->env->findRegistry(),
             $this->config->maxHistory,
             $ctx->tracer,
             $ctx->env->find(EnvKey::Ask) instanceof SpeakerInterface ? $ctx->env->find(EnvKey::Ask) : null,
@@ -400,7 +411,7 @@ final readonly class IssueRunner
             $ctx->env->child()->set(EnvKey::Registry, $registry)->executor(),
             $ctx->env->findAgentModel('reviewer'),
             self::JUDGE_SYSTEM,
-            $registry->specs(),
+            $registry,
             $this->config->maxHistory,
             $ctx->tracer,
         );
@@ -736,12 +747,30 @@ final readonly class IssueRunner
     /**
      * The supervisor tier of the ask channel: an agent on the `supervisor` model that settles in-run
      * escalations (accept / stop / guidance) on its own judgement, so a stuck step does not wait on —
-     * or churn against — the human. It runs tool-less (it judges from the escalation text). Replying
-     * `ESCALATE` returns null, so {@see EscalatingSpeaker} passes the decision up to the human tier.
+     * or churn against — the human. Replying `ESCALATE` returns null, so {@see EscalatingSpeaker}
+     * passes the decision up to the human tier.
+     *
+     * It CAN LOOK. It used to be built with four arguments, which — back when the turn loop defaulted
+     * its palette to none — left it judging "does the actual work look correct" with no way to open a
+     * file or run a test, on nothing but the escalation text: the critic's complaint, and artifacts the
+     * step under review wrote about itself. Its standing order biased it towards `accept`. That is the
+     * `done` rubber stamp this project spent a year removing, rebuilt one tier up.
+     *
+     * Everything except writing. A supervisor reads and runs to check a claim; it never does the work
+     * itself, and a tier that could edit the project would be settling escalations by fixing them. By
+     * SUBTRACTION rather than an allow-list, so a capability added to runs later reaches it too — an
+     * allow-list has to be revisited every time, and nothing says when it was not.
      */
     private function supervisorSpeaker(Environment $env): SpeakerInterface
     {
-        $loop = new DefaultTurnLoop($this->agent, $env->executor(), $env->findAgentModel('supervisor'), self::SUPERVISOR_SYSTEM);
+        $palette = $env->findRegistry()->except(['write_file']);
+        $loop = new DefaultTurnLoop(
+            $this->agent,
+            $env->child()->set(EnvKey::Registry, $palette)->executor(),
+            $env->findAgentModel('supervisor'),
+            self::SUPERVISOR_SYSTEM,
+            $palette,
+        );
         $supervisor = new AgentSpeaker(SpeakerRole::Supervisor, $loop);
 
         return new class ($supervisor) implements SpeakerInterface {

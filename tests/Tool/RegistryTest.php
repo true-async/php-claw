@@ -90,6 +90,47 @@ final class RegistryTest
         Assert::same($subset->get('read'), $read);   // the same instance, not a copy
     }
 
+    /**
+     * The counterpart to only(): narrowing by SUBTRACTION. It matters that both exist — an allow-list
+     * has to be revisited every time a tool is added to the run, and nothing says when it was not, so a
+     * scope that should see a new capability silently stops seeing anything new.
+     */
+    #[Test]
+    public function exceptNarrowsBySubtractionAndKeepsWhatComesLater(): void
+    {
+        $registry = new Registry();
+        $read = new StubTool('read');
+        $registry->add($read);
+        $registry->add(new StubTool('write'));
+        $registry->add(new StubTool('bash'));
+
+        $subset = $registry->except(['write']);
+
+        Assert::count($subset->all(), 2);
+        Assert::false($subset->has('write'));
+        Assert::true($subset->has('read'));
+        Assert::true($subset->has('bash'));
+        Assert::same($subset->get('read'), $read);   // the same instance, not a copy
+    }
+
+    /** Subtracting something that is not there means believing you are protected when you are not. */
+    #[Test]
+    public function exceptThrowsOnAnUnknownName(): void
+    {
+        $registry = new Registry();
+        $registry->add(new StubTool('read'));
+
+        $threw = false;
+
+        try {
+            $registry->except(['ghost']);
+        } catch (ToolException) {
+            $threw = true;
+        }
+
+        Assert::true($threw);
+    }
+
     #[Test]
     public function onlyThrowsOnAnUnknownName(): void
     {

@@ -16,26 +16,38 @@ use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
 use Claw\Agent\ToolResultBlock;
-use Claw\Agent\ToolSpec;
 use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
 use Claw\Exceptions\ContextLengthException;
+use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Testo\Assert;
 use Testo\Test;
 use Tests\Support\RecordingExecutor;
 use Tests\Support\ScriptedAgent;
+use Tests\Support\StubTool;
 
 final class DefaultTurnLoopTest
 {
+    /**
+     * A registry holding one stub tool under $name. The loop takes a REGISTRY, not raw specs: there is
+     * no default, so a case that wants a tool-less loop passes `new Registry()` and says so.
+     */
+    private static function palette(string $name): Registry
+    {
+        $registry = new Registry();
+        $registry->add(new StubTool($name));
+
+        return $registry;
+    }
+
     #[Test]
     public function returnsFinalAnswerAndAdvertisesToolsWhenNothingIsCalled(): void
     {
         $agent = new ScriptedAgent(
             new AgentResponse([new TextBlock('hello there')], [], StopReason::EndTurn, new Usage(3, 7), 'hello there'),
         );
-        $spec = new ToolSpec('echo', 'echo it back', ['type' => 'object']);
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'model-x', 'you are claw', [$spec]);
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'model-x', 'you are claw', self::palette('echo'));
 
         $result = $loop->run([Message::userText('hi')]);
 
@@ -78,7 +90,7 @@ final class DefaultTurnLoopTest
                 return new ToolResultBlock($call->id, 'ok ' . (++$n), false);
             },
         );
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');   // no ask channel -> stop at the cap
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());   // no ask channel -> stop at the cap
 
         $loop->run([Message::userText('go')]);
 
@@ -104,7 +116,7 @@ final class DefaultTurnLoopTest
         $executor = new RecordingExecutor(
             static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'same error every time', true),
         );
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');   // no ask channel
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());   // no ask channel
 
         $loop->run([Message::userText('go')]);
 
@@ -125,7 +137,7 @@ final class DefaultTurnLoopTest
         );
 
         // A budget the first round-trip spends outright.
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', turnBudget: new Budget(100));
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry(), turnBudget: new Budget(100));
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -163,7 +175,7 @@ final class DefaultTurnLoopTest
                 return new ToolResultBlock($call->id, 'error #' . (++$n), true);   // distinct every time
             },
         );
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
         $loop->run([Message::userText('go')]);
 
@@ -208,7 +220,7 @@ final class DefaultTurnLoopTest
         $executor = new RecordingExecutor(
             static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'same error', true),
         );
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', ask: $ask);
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry(), ask: $ask);
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -228,7 +240,7 @@ final class DefaultTurnLoopTest
         $executor = new RecordingExecutor(
             static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'echoed: ' . ($call->input['msg'] ?? ''), false),
         );
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
         $result = $loop->run([Message::userText('please echo hi')]);
 
@@ -270,7 +282,7 @@ final class DefaultTurnLoopTest
         $executor = new RecordingExecutor(
             static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'kaboom', true),
         );
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -294,8 +306,7 @@ final class DefaultTurnLoopTest
         $executor = new RecordingExecutor(
             static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, 'r:' . $call->id, false),
         );
-        $spec = new ToolSpec('echo', 'echo it back', ['type' => 'object']);
-        $loop = new DefaultTurnLoop($agent, $executor, 'model-x', 'you are claw', [$spec]);
+        $loop = new DefaultTurnLoop($agent, $executor, 'model-x', 'you are claw', self::palette('echo'));
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -332,7 +343,7 @@ final class DefaultTurnLoopTest
             new AgentResponse([new TextBlock('partial')], [], StopReason::ToolUse, new Usage(2, 1), 'partial'),
         );
         $executor = new RecordingExecutor();
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's');
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -350,7 +361,7 @@ final class DefaultTurnLoopTest
             new AgentResponse([$toolUse], [$toolUse], StopReason::ToolUse, new Usage()),
             new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done'),
         );
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's');
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry());
 
         $start = [Message::userText('go')];
         $result = $loop->run($start);
@@ -369,7 +380,7 @@ final class DefaultTurnLoopTest
         );
         // history reaches length 2, strictly under the cap of 4 — a positive cap must
         // not abort an under-cap run (the guard is inclusive: count >= cap).
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', maxHistory: 4);
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry(), maxHistory: 4);
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -399,7 +410,7 @@ final class DefaultTurnLoopTest
                 return 'src/Foo.php';
             }
         };
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', ask: $ask);
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry(), ask: $ask);
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -430,7 +441,7 @@ final class DefaultTurnLoopTest
                 return null;   // the whole chain passed up — no one answered
             }
         };
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', ask: $ask);
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry(), ask: $ask);
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -444,7 +455,7 @@ final class DefaultTurnLoopTest
         $agent = new ScriptedAgent(
             new AgentResponse([new TextBlock('[question] hm?')], [], StopReason::EndTurn, new Usage(), '[question] hm?'),
         );
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's');   // headless: no ask channel
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry());   // headless: no ask channel
 
         $result = $loop->run([Message::userText('go')]);
 
@@ -466,7 +477,7 @@ final class DefaultTurnLoopTest
         );
         $agent = new ScriptedAgent($looping(), $looping(), $looping());
         $executor = new RecordingExecutor();
-        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', turnBudget: new Budget(tokenLimit: 15));
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry(), turnBudget: new Budget(tokenLimit: 15));
 
         $loop->run([Message::userText('go')]);
 
@@ -484,7 +495,7 @@ final class DefaultTurnLoopTest
             new Usage(),
         );
         $agent = new ScriptedAgent($looping(), $looping(), $looping(), $looping());
-        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', maxHistory: 4);
+        $loop = new DefaultTurnLoop($agent, new RecordingExecutor(), 'm', 's', new Registry(), maxHistory: 4);
 
         $threw = false;
 

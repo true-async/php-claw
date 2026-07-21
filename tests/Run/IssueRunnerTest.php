@@ -7,6 +7,7 @@ namespace Tests\Run;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
+use Claw\Agent\ToolSpec;
 use Claw\Agent\Usage;
 use Claw\Config;
 use Claw\Project\IssueStatus;
@@ -519,6 +520,87 @@ final class IssueRunnerTest
                 public function implement(): void
                 {
                     \$this->artifact('result', text: 'applied the fix');
+                }
+            }
+
+            PHP;
+    }
+
+    /**
+     * The supervisor can look at the project it is judging.
+     *
+     * Built with four arguments while the turn loop still defaulted its palette to `[]`, it was asked
+     * to decide whether "the actual work looks correct" with no tools at all — its only input the
+     * critic's complaint and a summary the step under review had written about itself, and its standing
+     * order biased towards `accept`. That is the `done` rubber stamp rebuilt one tier up. It now gets
+     * everything except `write_file`: a supervisor reads and runs to check a claim, and never does the
+     * work itself.
+     */
+    #[Test]
+    public function theSupervisorTierCanCheckAClaimAndCannotWrite(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+
+            for ($i = 0; $i < 28; $i++) {
+                $store->addIssue("filler {$i}");
+            }
+            $issue = $store->addIssue('a task whose solver asks a question');
+
+            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $solver = self::solverName($issue->id);
+            $workflows->write($solver, self::askingSolverCode($solver), true);
+
+            $agent = new ScriptedAgent(self::says('read the config key from src/'));
+            new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend())->run($issue);
+
+            $supervisor = null;
+
+            foreach ($agent->requests as $request) {
+                if (str_contains($request->system, 'You are the SUPERVISOR')) {
+                    $supervisor = $request;
+                }
+            }
+
+            Assert::true($supervisor !== null);
+
+            $names = array_map(static fn (ToolSpec $spec): string => $spec->name, $supervisor->tools);
+            Assert::true(\in_array('bash', $names, true));         // it can run the thing and see the output
+            Assert::true(\in_array('read_file', $names, true));    // and open what the step changed
+            Assert::false(\in_array('write_file', $names, true));  // but it judges, it does not fix
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    /** A solver whose only step asks a question — the shortest path to the supervisor tier. */
+    private static function askingSolverCode(string $class): string
+    {
+        return <<<PHP
+            <?php
+
+            declare(strict_types=1);
+
+            namespace ClawWorkflow\\Common;
+
+            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\WorkflowAbstract;
+
+            final class {$class} extends WorkflowAbstract
+            {
+                public function name(): string
+                {
+                    return 'asking-solver';
+                }
+
+                #[Step]
+                protected function implement(): void
+                {
+                    \$this->ask('which config key controls the timeout?');
                 }
             }
 
