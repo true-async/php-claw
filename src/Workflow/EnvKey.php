@@ -26,4 +26,5 @@ enum EnvKey: string
     case TurnTokenLimit = 'turnTokenLimit';  // int — per-turn (one ai() exchange) token cap (0 = unlimited)
     case TurnTimeLimit = 'turnTimeLimit';    // float — per-turn seconds cap (0 = unlimited)
     case BudgetPolicy = 'budgetPolicy';      // BudgetPolicy — what to do when the run total is spent; unset = Stop
+    case ToolTimeoutMs = 'toolTimeoutMs';    // int — cap on ONE tool run in ms (kills a hung bash); 0/unset = uncapped
 }

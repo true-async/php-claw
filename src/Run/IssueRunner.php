@@ -190,7 +190,11 @@ final readonly class IssueRunner
             ->set(EnvKey::Budget, new Budget($this->treeAllowance($issue), (float) $this->config->budgetSeconds))
             ->set(EnvKey::TurnTokenLimit, $this->config->turnTokens)
             ->set(EnvKey::TurnTimeLimit, (float) $this->config->turnSeconds)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy));
+            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy))
+            // The same cap the chat path has always put on a tool run, finally on the path that needs it
+            // more: here nobody is watching, so a `bash` waiting forever on a prompt nobody will type
+            // holds the run open with no clock ticking against it.
+            ->set(EnvKey::ToolTimeoutMs, $this->config->turnTimeoutMs);
 
         // The verdict is read BEFORE the run is recorded, because for a `library` ticket it decides what
         // the run IS: the ledger row, the resume lookup and the trace all key off the workflow's name, and

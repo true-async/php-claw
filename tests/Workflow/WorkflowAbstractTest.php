@@ -21,6 +21,7 @@ use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
+use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
 use Claw\Trace\ArrayTraceSink;
 use Claw\Trace\Tracer;
@@ -812,6 +813,31 @@ final class WorkflowAbstractTest
 
         // And nothing was recorded — a command that could not run is not evidence of anything.
         Assert::false(str_contains($refusal, "recorded 'sneaky'"));
+    }
+
+    /**
+     * A tool run on the autonomous path is bounded.
+     *
+     * It was not, and the only clock on that path is the run's total budget — which a hung tool does not
+     * tick, because the seconds are checked when something returns and nothing does. A `bash` waiting on
+     * a prompt nobody will type held the run open for as long as the process lived. The chat path has had
+     * this cap for as long as it has existed; the path where nobody is watching had none.
+     */
+    #[Test]
+    public function aToolRunIsBoundedOnTheAutonomousPathToo(): void
+    {
+        $registry = new Registry();
+        $registry->add($this->echoTool('read'));
+
+        $bare = new Environment()->set(EnvKey::Registry, $registry);
+        Assert::same($bare->executor()->call(new ToolCall('1', 'read', ['x' => 'hi']))->content, 'ran:hi');
+
+        // With the cap set, the same call still works — the guard bounds a tool, it does not change one.
+        $capped = new Environment()->set(EnvKey::Registry, $registry)->set(EnvKey::ToolTimeoutMs, 5000);
+        $result = $capped->executor()->call(new ToolCall('2', 'read', ['x' => 'hi']));
+
+        Assert::same($result->content, 'ran:hi');
+        Assert::false($result->isError);
     }
 
     /** A tool that ignores its input and returns a fixed string — stands in for a real command run. */
