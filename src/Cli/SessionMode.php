@@ -74,7 +74,7 @@ final class SessionMode
         $workspace = new Workspace($workspaceDir);
 
         $persona = $this->root . '/CLAUDE.md';
-        $system = is_file($persona) ? (string) file_get_contents($persona) : Config::DEFAULT_SYSTEM;
+        $system = is_file($persona) ? (string) file_get_contents($persona) : Config::CHAT_PERSONA;
 
         $chat = match ($config->channel) {
             'console' => new ConsoleChat(),

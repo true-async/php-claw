@@ -173,11 +173,17 @@ final readonly class IssueRunner
 
         // The store is durable (a killed run resumes from its snapshot); budgets cap the run total and
         // each exchange (0 = unlimited); named agent roles share the access and override only the model.
+        // NO system prompt is set, and that is the decision. A run used to carry `Config::DEFAULT_SYSTEM`
+        // — "You are Claw, a helpful coding assistant. Be concise." — under every model call of every
+        // step of every solver. Two sentences, both working against what the pipeline is for: the eager
+        // persona is the one behind successes this project was told about and did not get, and "be
+        // concise" is an instruction to summarise, which is the shape of the step that recorded "All
+        // tests passed." while the suite was erroring. The step's own prompt says what the step must do,
+        // and the tool briefing is appended by the loop; nothing above them needs to add a character.
         $env = new Environment()
             ->set(EnvKey::Worker, $this->agent)
             ->set(EnvKey::Registry, $registry)
             ->set(EnvKey::ModelId, $this->config->model)
-            ->set(EnvKey::SystemPrompt, Config::DEFAULT_SYSTEM)
             ->set(EnvKey::MaxHistory, $this->config->maxHistory)
             ->set(EnvKey::Store, new SqliteStateStore($projectDb))
             ->set(EnvKey::Agents, $this->config->agents)

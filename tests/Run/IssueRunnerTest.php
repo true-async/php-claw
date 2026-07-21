@@ -577,6 +577,77 @@ final class IssueRunnerTest
         }
     }
 
+    /**
+     * A run carries no assistant persona.
+     *
+     * Every model call of every step used to open with "You are Claw, a helpful coding assistant. Be
+     * concise." Two sentences, and both pull against what an autonomous pipeline is for: the eager
+     * persona is the one behind successes this project was told about and did not get, and "be concise"
+     * is an instruction to summarise — the exact shape of the step that recorded "All tests passed."
+     * while the suite was erroring. The system prompt a step gets is now its tool briefing and the
+     * previous step's handoff, which is all it should be.
+     */
+    #[Test]
+    public function aRunPutsNoAssistantPersonaAboveTheWork(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+
+            for ($i = 0; $i < 34; $i++) {
+                $store->addIssue("filler {$i}");
+            }
+            $issue = $store->addIssue('a task whose solver talks to a model');
+
+            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $solver = self::solverName($issue->id);
+            $workflows->write($solver, self::talkingSolverCode($solver), true);
+
+            $agent = new ScriptedAgent(self::says('done'), self::says('handoff'));
+            new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend())->run($issue);
+
+            $system = $agent->requests[0]->system;
+            Assert::false(str_contains($system, 'helpful coding assistant'));
+            Assert::false(str_contains($system, 'Be concise'));
+            Assert::true(str_contains($system, 'Tools available to you this step'));   // the briefing stays
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    /** A solver whose only step makes one plain model call. */
+    private static function talkingSolverCode(string $class): string
+    {
+        return <<<PHP
+            <?php
+
+            declare(strict_types=1);
+
+            namespace ClawWorkflow\\Common;
+
+            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\WorkflowAbstract;
+
+            final class {$class} extends WorkflowAbstract
+            {
+                public function name(): string
+                {
+                    return 'talking-solver';
+                }
+
+                #[Step]
+                protected function implement(): void
+                {
+                    \$this->ai('do the thing');
+                }
+            }
+
+            PHP;
+    }
+
     /** A solver whose only step asks a question — the shortest path to the supervisor tier. */
     private static function askingSolverCode(string $class): string
     {

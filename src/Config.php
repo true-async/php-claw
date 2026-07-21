@@ -16,7 +16,18 @@ use Claw\Exceptions\ConfigException;
 final class Config
 {
     /** The fallback system prompt when no project CLAUDE.md persona is present. */
-    public const DEFAULT_SYSTEM = 'You are Claw, a helpful coding assistant. Be concise. '
+    /**
+     * The persona for the INTERACTIVE CHAT, and only that: {@see \Claw\Cli\SessionMode} uses it when the
+     * project ships no CLAUDE.md of its own. A person is typing, so a concise assistant is what is wanted.
+     *
+     * It is deliberately NOT a system-wide default, and the run path deliberately sets no system prompt at
+     * all. Under an autonomous pipeline these two sentences work against the thing the pipeline is for:
+     * "helpful assistant" is the eager-to-please persona behind every success this project was told about
+     * and did not get, and "be concise" is an instruction to summarise — which is the exact shape of the
+     * step that recorded "All tests passed." while the suite was erroring. A step's own prompt says what
+     * that step must do; nothing above it needs to add a character.
+     */
+    public const CHAT_PERSONA = 'You are Claw, a helpful coding assistant. Be concise. '
         . 'Use the tools to inspect and change files and run commands in the workspace.';
 
     private const DEFAULT_CHANNEL = 'console';
