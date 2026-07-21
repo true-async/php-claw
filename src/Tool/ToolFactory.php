@@ -28,6 +28,7 @@ final class ToolFactory
         $registry->add(new ReadFileTool($workspace));
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
+        $registry->add(new BlockedTool());   // a worker that hits a wall says so, instead of trailing off
 
         return $registry;
     }
