@@ -60,7 +60,7 @@ final class TriageTest
 
             new Triage($store, $config, $agent)->analyse($issue);
 
-            Assert::true(str_contains(self::firstUserText($agent), 'none exist yet'));
+            Assert::true(str_contains(self::firstUserText($agent), 'The shelf holds nothing for this kind of ticket'));
         });
     }
 

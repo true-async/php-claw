@@ -161,6 +161,20 @@ final class WorkflowLibraryTest
         // and absent from a kind of work it does not do.
         Assert::true(isset(WorkflowStore::offered([$shipped], IssueType::Bug)['FixBugWorkflow']));
         Assert::false(isset(WorkflowStore::offered([$shipped], IssueType::Research)['FixBugWorkflow']));
+
+        // The shelf holds two kinds now, and the kind decides which verdict may name the entry: a
+        // workflow is run as written, an approach is prose a solver is generated to follow. An entry
+        // reported under the wrong kind would be recordable and unroutable — the exact defect that made
+        // `library` quietly generate a bespoke solver before it was given an arm of its own.
+        $bug = WorkflowStore::offered([$shipped], IssueType::Bug)['FixBugWorkflow'];
+        Assert::same($bug['kind'], 'workflow');
+        Assert::same($bug['recipe'], '');   // a workflow carries no recipe: its steps are the procedure
+
+        $feature = WorkflowStore::offered([$shipped], IssueType::Feature);
+        Assert::true(isset($feature['BuildFeatureStrategy']));
+        Assert::same($feature['BuildFeatureStrategy']['kind'], 'strategy');
+        Assert::true(str_contains($feature['BuildFeatureStrategy']['recipe'], 'BUILDING A FEATURE'));
+        Assert::false(isset($feature['FixBugWorkflow']));   // still filtered by type
     }
 
     /**

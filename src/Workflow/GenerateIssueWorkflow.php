@@ -231,6 +231,22 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         // manufacture rejection rounds neither party could resolve.
         $task = $this->taskSummary();
 
+        // The DOMAIN half, when the ProjectManager chose an `approach` off the shelf. The constant recipe
+        // above says what a step is and how few to use — mechanics, the same for every ticket. This says
+        // what work of THIS KIND has to accomplish and where its branches are. Keeping them apart is the
+        // point: general machinery does not belong in a per-type text, and a per-type procedure written
+        // into the machinery is how the old fixed seven-phase recipe came to stamp ceremony onto
+        // one-file changes.
+        $chosen = trim((string) $this->param('recipe'));
+        $approach = $chosen === '' ? '' : <<<APPROACH
+
+
+            THE APPROACH TO FOLLOW — a written strategy a person put on the shelf for work of this kind,
+            chosen for this ticket. It says WHAT has to be achieved and where the decisions are; you
+            still decide how many steps that costs, by the rules above.
+            {$chosen}
+            APPROACH;
+
         return <<<PROMPT
             Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract.
             You DECIDE how many steps it needs — use the FEWEST the task actually requires (often just one).
@@ -246,6 +262,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             choosing steps, NOT a list of steps to stamp out (a step is one or more #[Step] methods; use
             plain if/while in run() where the flow loops or branches):
             {$recipe}
+            {$approach}
 
             HOW A STEP ACTUALLY DOES WORK — read this twice, it is the part solvers get wrong:
             - A step does NOT do the work itself in PHP. You are writing the PLAN; the WORK is done by

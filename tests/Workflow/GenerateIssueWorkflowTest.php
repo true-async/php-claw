@@ -164,10 +164,51 @@ final class GenerateIssueWorkflowTest
     }
 
     /**
+     * A chosen approach reaches the model that writes the solver, and sits BESIDE the general recipe
+     * rather than replacing it.
+     *
+     * The two answer different questions: the constant recipe says what a step is and how few to use —
+     * mechanics, identical for every ticket — while the approach says what work of this kind has to
+     * accomplish. Folding a per-type procedure into the machinery is exactly how the old fixed
+     * seven-phase recipe came to stamp ceremony onto one-file changes.
+     */
+    #[Test]
+    public function aChosenApproachIsHandedToTheDrafterAlongsideTheGeneralRecipe(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $agent = self::generate($dir, 'Issue11Solver', 'simple', recipe: 'PROVE IT RED FIRST, then build.');
+
+            $draft = self::textOf($agent, 4);
+            Assert::true(str_contains($draft, 'THE APPROACH TO FOLLOW'));
+            Assert::true(str_contains($draft, 'PROVE IT RED FIRST, then build.'));
+            Assert::true(str_contains($draft, 'HOW TO DECIDE THE STEPS'));   // the general recipe stays
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /** With no approach chosen the block is absent entirely — not an empty heading the model must read. */
+    #[Test]
+    public function noApproachMeansNoApproachSection(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $agent = self::generate($dir, 'Issue12Solver', 'simple');
+
+            Assert::false(str_contains(self::textOf($agent, 4), 'THE APPROACH TO FOLLOW'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
      * Run the generator end to end against a scripted model and hand back the agent, so a test can read
      * the exact prompts it was sent. $verdict is assess()'s reply — the line whose parsing is under test.
      */
-    private static function generate(string $dir, string $class, string $verdict, ?Issue $issue = null): ScriptedAgent
+    private static function generate(string $dir, string $class, string $verdict, ?Issue $issue = null, string $recipe = ''): ScriptedAgent
     {
         $store = new WorkflowStore($dir . '/workflows', 'p1');
         $registry = new Registry();
@@ -196,6 +237,7 @@ final class GenerateIssueWorkflowTest
             'solverName' => $class,
             'solverNamespace' => 'ClawWorkflow\\Common',
             'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
+            'recipe' => $recipe,
         ], $issue ?? new Issue('9', 'p1', 'Do a thing'), new Project('p1', 'Demo'))->run();
 
         return $agent;

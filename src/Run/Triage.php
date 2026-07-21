@@ -91,13 +91,17 @@ final readonly class Triage
         - `direct`    — one agent with the project's tools can just do it. A localized, mechanical
                         change: a typo, a flag, a small method, a config value. This is the cheapest
                         path and should be your default for anything small.
-        - `library`   — one of the ready-made, tested workflows listed in the ticket brief fits this
-                        task as it stands. Prefer it over `generate` whenever one genuinely fits: it
-                        was written and reviewed by a person, so it is both cheaper and more reliable
-                        than writing a new solver. Read it in full with `list_workflows` first, and
-                        name it when you record the verdict.
-        - `generate`  — nothing off the shelf fits, so a solver workflow must be written for it.
-                        Right for real implementation work with several concerns to carry.
+        - `library`   — one of the ready-made WORKFLOWS listed in the ticket brief fits this task as it
+                        stands. The cheapest of the shelf verdicts: it is code a person wrote and tested,
+                        it runs as written, and nothing is generated. Name it when you record the verdict.
+        - `approach`  — none of the ready-made workflows fits, but one of the listed APPROACHES does. An
+                        approach is a written strategy for work of this kind; a solver is generated for
+                        THIS ticket that follows it. Costs a generation pass, and buys a solver shaped to
+                        the ticket rather than to the average of every ticket like it. Name the approach
+                        when you record the verdict.
+        - `generate`  — nothing on the shelf fits at all, so a solver is written from nothing. The last
+                        resort before a person: say in your reason why no approach fitted, because if
+                        one nearly did, the answer is to say so rather than to improvise.
         - `decompose` — genuinely too big for one run, and splitting it produces parts that can be
                         worked on separately. The most expensive verdict: it creates more tickets,
                         each of which is triaged in turn and spends its own budget. Choose it only
@@ -298,23 +302,26 @@ final readonly class Triage
             foreach ($libraries as $library) {
                 foreach ($library->catalogue() as $entry) {
                     $serves = implode(', ', array_map(static fn (IssueType $t): string => $t->value, $entry['serves']));
-                    $lines[] = "- {$entry['name']} (for: {$serves}) — " . self::firstLine($entry['description']);
+                    $kind = $entry['kind'] === 'workflow' ? 'workflow' : 'approach';
+                    $lines[] = "- {$entry['name']} [{$kind}] (for: {$serves}) — " . self::firstLine($entry['description']);
                 }
             }
         } catch (ClawException $e) {
             // A broken shelf must not take the triage with it: the ticket still needs a verdict, and
             // every other strategy is still available. Say what is wrong instead of showing nothing.
-            return "Ready-made workflows: the library could not be read ({$e->getMessage()}), so the "
-                . "`library` strategy is not available for this ticket.\n\n";
+            return "The shelf could not be read ({$e->getMessage()}), so neither `library` nor `approach` "
+                . "is available for this ticket.\n\n";
         }
 
         if ($lines === []) {
-            return 'Ready-made workflows: none exist yet, so `library` is not available — this ticket '
-                . "must be solved another way.\n\n";
+            return 'The shelf holds nothing for this kind of ticket, so neither `library` nor `approach` '
+                . "is available — it must be solved another way.\n\n";
         }
 
-        return 'READY-MADE WORKFLOWS already written and tested, which `library` would run as they '
-            . "stand.\nUse `list_workflows` to read one in full before choosing it:\n\n"
+        return "WHAT IS ON THE SHELF for this ticket. Two kinds, and they are different verdicts:\n"
+            . "- a WORKFLOW is code that runs as written — record it with `library`;\n"
+            . '- an APPROACH is a written strategy a solver is generated to follow — record it with '
+            . "`approach`.\nUse `list_workflows` to read one in full before choosing it:\n\n"
             . implode("\n", $lines) . "\n\n";
     }
 

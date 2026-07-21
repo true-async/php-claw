@@ -18,6 +18,7 @@ use Claw\Exceptions\ClawException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
+use Claw\Project\IssueType;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\RunStatus;
 use Claw\Project\Strategy;
@@ -256,6 +257,37 @@ final readonly class IssueRunner
             Strategy::Library => $this->runSolver($ctx, repairable: false),
             default => $this->runGenerated($ctx),
         };
+    }
+
+    /**
+     * The written strategy an `approach` verdict named, or '' for any other verdict.
+     *
+     * A verdict naming a strategy that is no longer on the shelf yields '' rather than failing the run:
+     * unlike a missing library workflow — which IS the run and leaves nothing to do — a missing recipe
+     * only costs the generator its domain guidance, and it still has the ticket, the plan and the
+     * general recipe. Stopping there would trade a worse solver for no solver.
+     */
+    private function chosenRecipe(Issue $issue): string
+    {
+        $verdict = $this->store->currentStrategy($issue->id);
+
+        if (($verdict['strategy'] ?? null) !== Strategy::Approach) {
+            return '';
+        }
+
+        $name = $verdict['workflow'];
+        $project = $this->store->project();
+
+        try {
+            $offered = WorkflowStore::offered(
+                WorkflowStore::libraries($this->config->library, $project->path, $project->id),
+                $this->store->loadIssue($issue->id)->type ?? IssueType::Feature,
+            );
+        } catch (ClawException) {
+            return '';
+        }
+
+        return (string) ($offered[$name]['recipe'] ?? '');
     }
 
     /**
@@ -620,6 +652,10 @@ final readonly class IssueRunner
                 'solverName' => $ctx->solverName,
                 'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
                 'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
+                // Empty unless the verdict was `approach`, in which case this is the written strategy the
+                // ProjectManager chose off the shelf — the domain half of what the generator is told,
+                // sitting beside the general one it always carries.
+                'recipe' => $this->chosenRecipe($ctx->issue),
             ], $ctx->issue, $ctx->project)->run();
         } catch (\Cancellation $cancellation) {
             throw $cancellation;   // a cancelled run must stop, not be reported as a generation failure
