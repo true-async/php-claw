@@ -112,6 +112,11 @@ final class DefaultTurnLoop implements TurnLoopInterface
      * @param ?Budget            $turnBudget caps this one exchange in tokens/time; when it (or the
      *                                        run total it bubbles to) is spent, the loop stops and
      *                                        returns what it has. null = no cap.
+     * @param ?\Closure(list<Message>): void $checkpoint called with the history after every turn, so a caller can
+     *                                        write the exchange down as it happens. The loop keeps no
+     *                                        opinion about where it goes; it only knows that a turn has
+     *                                        landed and the history is consistent at that instant —
+     *                                        every tool_use answered, nothing half-applied
      */
     public function __construct(
         private readonly AgentInterface $agent,
@@ -124,6 +129,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         private readonly ?SpeakerInterface $ask = null,
         private readonly ?Budget $turnBudget = null,
         private readonly ?TokenPricing $pricing = null,
+        private readonly ?\Closure $checkpoint = null,
     ) {
     }
 
@@ -319,6 +325,13 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
+
+            // A turn has landed and the history is whole: every tool_use answered. This is the only
+            // instant it is safe to write down, which is why the loop offers it rather than leaving the
+            // caller to guess when to snapshot.
+            if ($this->checkpoint !== null) {
+                ($this->checkpoint)($history);
+            }
 
             // Wedged on a tool (same result STUCK_TOOL_REPEAT times). Do NOT just churn or silently stop:
             // ESCALATE to the channel (supervisor/human) once — guidance resumes the exchange with a fresh

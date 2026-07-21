@@ -19,6 +19,9 @@ final class InMemoryStateStore implements WorkflowStateStoreInterface
     /** @var array<string, array{from: string, handoff: string}> the handoff awaiting the next step, per run */
     private array $handoffs = [];
 
+    /** @var array<string, list<\Claw\Agent\Message>> "run\0step" → the exchange that step was in the middle of */
+    private array $exchanges = [];
+
     /** Monotonic counter behind nextId() — the in-memory stand-in for a DB autoincrement. */
     private int $seq = 0;
 
@@ -42,6 +45,21 @@ final class InMemoryStateStore implements WorkflowStateStoreInterface
     public function loadHandoff(string $runId): array
     {
         return $this->handoffs[$runId] ?? ['from' => '', 'handoff' => ''];
+    }
+
+    public function saveExchange(string $runId, string $step, array $history): void
+    {
+        $this->exchanges[$runId . "\0" . $step] = $history;
+    }
+
+    public function loadExchange(string $runId, string $step): array
+    {
+        return $this->exchanges[$runId . "\0" . $step] ?? [];
+    }
+
+    public function clearExchange(string $runId, string $step): void
+    {
+        unset($this->exchanges[$runId . "\0" . $step]);
     }
 
     public function nextId(): string

@@ -113,6 +113,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private array $stepHistory = [];
 
+    /**
+     * Steps whose written-down exchange this instance has already considered. Transient by design: it is
+     * about THIS process, and its whole job is to tell "I am re-entering a step a dead process left in
+     * the middle" from "I am calling ai() again inside a step I am running".
+     *
+     * @var array<string, true>
+     */
+    private array $reentered = [];
+
     /** A {@see back()} request made during the running step: the earlier step to re-enter, and why. */
     private ?string $backTo = null;
 
@@ -359,6 +368,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
+
+        // The step is finished and its result is in the snapshot and the journal. The half-finished
+        // conversation kept for a resume is now only a way to re-enter a step that has already left.
+        $this->env->findStore()->clearExchange($this->runId, $name);
     }
 
     /** Read a value from the run's environment — this scope, then the parent project settings. */
@@ -600,6 +613,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $prior = $this->resumeHistory;   // a re-run/back continues the prior attempt's conversation, not a cold restart
         $this->resumeHistory = [];       // only the attempt's first ai() continues; later calls start fresh
 
+        // A step re-entered after the process died picks its own exchange back up. ONCE, and only when
+        // nothing else already supplied a history: a step that calls ai() twice would otherwise have its
+        // second call continue the first one's conversation, and a critic re-run already carries the
+        // attempt it is correcting. The written-down exchange is for the case where this instance has
+        // never run this step at all — which, in a live run, means there is nothing written down.
+        if ($prior === [] && !isset($this->reentered[$this->currentStep])) {
+            $this->reentered[$this->currentStep] = true;
+            $prior = $this->env->findStore()->loadExchange($this->runId, $this->currentStep);
+        }
+
         return $this->runTurns($prompt, $tools, $agent, $prior);
     }
 
@@ -694,6 +717,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $this->tracer(),
             $ask,
             $this->turnBudget(),
+            null,
+            // Write the exchange down as it happens, so an interruption inside a step costs the turn it
+            // died on and not the whole step. The run id and the step are captured here because the loop
+            // has no idea what a step is; it only knows a turn has landed.
+            /** @param list<Message> $history */
+            function (array $history): void {
+                $this->env->findStore()->saveExchange($this->runId, $this->currentStep, $history);
+            },
         );
     }
 
