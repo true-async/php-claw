@@ -138,6 +138,14 @@ interface ProjectStoreInterface
      */
     public function recentRuns(int $limit = 20): array;
 
+    /**
+     * Runs the ledger still calls Running. At startup, when no process is serving any of them, that is
+     * the list of runs left behind by the last one to stop.
+     *
+     * @return list<array{id: string, issue: string, workflow: string}>
+     */
+    public function runningRuns(): array;
+
     /** The id of an interrupted (still-Running) run for this issue's workflow, newest first, or null. */
     public function resumableRun(string $issueId, string $workflow): ?string;
 

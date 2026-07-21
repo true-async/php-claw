@@ -27,6 +27,48 @@ final class TraceReader
     }
 
     /**
+     * The run's OPEN GATE: the newest `question` with no `answer` pointing back at it, or null when the
+     * run is not waiting on anyone.
+     *
+     * The journal is the durable half of the gate — the channel a run parks on is only the live wakeup,
+     * and it dies with its process. So this is how anyone finds out that a run was waiting when the
+     * lights went out: the ledger says Running and the ticket says WaitingHuman, and until now nothing
+     * could tell that apart from a wait somebody is actually serving.
+     *
+     * @return ?array{id: int, prompt: string}
+     */
+    public function openGate(string $runId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT span_id, type, data FROM trace WHERE run_id = :run AND type IN (:q, :a) ORDER BY seq',
+        );
+        $stmt->execute(['run' => $runId, 'q' => 'question', 'a' => 'answer']);
+
+        $open = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $data = json_decode((string) ($row['data'] ?? ''), true);
+            $data = \is_array($data) ? $data : [];
+
+            if ((string) ($row['type'] ?? '') === 'question') {
+                $open[(int) ($row['span_id'] ?? 0)] = (string) ($data['prompt'] ?? '');
+
+                continue;
+            }
+
+            unset($open[(int) ($data['ref'] ?? 0)]);   // an answer closes exactly the question it names
+        }
+
+        if ($open === []) {
+            return null;
+        }
+
+        $id = array_key_last($open);
+
+        return ['id' => (int) $id, 'prompt' => $open[$id]];
+    }
+
+    /**
      * The run's trace as an indented tree: ▶ opens a span, ◀ closes it, · is a point event. Rows
      * below $threshold are dropped, so the same density knob as the live console applies to history;
      * the default shows everything that was recorded.

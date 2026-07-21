@@ -705,6 +705,38 @@ final class ProjectStore implements ProjectStoreInterface
     }
 
     /**
+     * Runs the ledger still calls Running, with the issue each belongs to.
+     *
+     * In a live process these are runs actually in flight. At STARTUP there is no live process, so every
+     * one of them is a leftover: a run whose coroutine died with the last process and which nothing is
+     * serving. The distinction is the caller's — this only reports what the ledger claims.
+     *
+     * It exists because that claim used to be unfalsifiable. A run parked at its human gate kept the
+     * issue at WaitingHuman and the row at Running, and the channel it was parked on lived only in
+     * memory; after a restart `POST .../answer` answered 409 "no run is waiting" forever, and nothing
+     * anywhere said the wait had no server. The ticket was stuck in a way no screen could show.
+     *
+     * @return list<array{id: string, issue: string, workflow: string}>
+     */
+    public function runningRuns(): array
+    {
+        $stmt = $this->pdo->prepare('SELECT id, issue_id, workflow FROM runs WHERE status = :status ORDER BY id');
+        $stmt->execute(['status' => RunStatus::Running->value]);
+
+        $runs = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $runs[] = [
+                'id' => (string) ($row['id'] ?? ''),
+                'issue' => (string) ($row['issue_id'] ?? ''),
+                'workflow' => (string) ($row['workflow'] ?? ''),
+            ];
+        }
+
+        return $runs;
+    }
+
+    /**
      * Recent runs from the ledger, newest first — for the `claw log` header and for picking one. The
      * `runs` table is this store's own, so its reads live here rather than in the trace reader.
      *
