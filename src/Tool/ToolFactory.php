@@ -28,7 +28,6 @@ final class ToolFactory
         $registry->add(new ReadFileTool($workspace));
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
-        $registry->add(new FinishTool());   // the model can declare the task solved and end the run
 
         return $registry;
     }

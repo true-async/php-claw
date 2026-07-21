@@ -241,3 +241,35 @@ defect. The critic caught that one; the instruction that invited it was ours.
 
 **Still open, and wider than this workflow.** A `done` raised in a non-final step ends any run the
 same way, generated solvers included. Narrowing one workflow's palette does not close that.
+
+---
+
+## 2026-07-21 — `done` is gone: the worker does not decide whether it is finished
+
+**Decision.** The `done` tool is deleted, along with the `WorkflowFinished` signal it threw. A step
+completes by returning; a workflow ends when its steps run out. On the `direct` path, whether the
+ticket is solved is settled afterwards by a separate pass — a plain turn loop with read-only tools,
+told to check against the project and answer in one word the code branches on.
+
+**Why.** `done` let the one party with an interest in the answer give it. Every false completion
+this project has paid for came through that lever, and each fix wrapped another gate around it
+instead of removing it: the critic had to hold the signal (#9); the claim had to carry evidence
+(#14, #17); a plain turn-loop return could no longer pass for success (#24); and finally a bug
+workflow closed its ticket after the step that merely REPRODUCED the defect, because the critic
+guarding `done` judges the step's rubric and by that rubric the work was faultless.
+
+The reason it was introduced (`3c30665`) has expired twice over. It existed so "a small task is not
+dragged through every phase" — but the generator's recipe now says to plan the fewest steps and
+defaults to one — and as an escape from a step that never returns, which turn caps, budgets and the
+no-progress breaker now handle. Its own commit message said "v1 trusts the model's declaration; a
+verify-before-accept gate can layer on later". The gate never replaced the trust; it accumulated
+around it.
+
+**Why this shape.** The system already had the right pattern and used it once: {@see Triage}. A
+plain turn loop that decides ONE thing, outside the work, with tools to check for itself, whose
+answer the CODE branches on. "Is this solved" is the same kind of question as "how should this be
+solved", and it gets the same kind of answer.
+
+**Consequence for authors.** A generated solver can no longer end its run early, so the recipe's
+instruction to plan the fewest steps is now the only thing standing between a task and ceremony —
+which is where that pressure belongs.
