@@ -214,3 +214,30 @@ for. Measured on the same ticket with the same model: the verdict went from `gen
 `list_workflows` stays, for reading one in full before committing to it. The brief carries a name,
 the types it serves and its opening sentence — a few hundred tokens for the decision that picks how
 everything else is spent.
+
+---
+
+## 2026-07-20 — A step gets the tools its job needs, and `done` is a job of its own
+
+**Decision.** In `FixBugWorkflow`, the `reproduce` and `fix` steps are handed every tool the run
+offers EXCEPT `done`. Only `verify` can finish the run.
+
+**Why.** `done` declares the whole TASK solved and ends the run, skipping the steps that have not
+happened yet. Reproducing a bug is not grounds for that claim, and the critic guarding `done`
+cannot catch the mistake: it judges the step's own rubric, so a perfectly reproduced bug passes
+review and finishes the run with the defect still in place.
+
+Measured, on the second live run: the ticket closed as `Done` after `reproduce` alone, with the
+failing test it had just found still failing. `fix` and `verify` never ran.
+
+An instruction not to call it would have been one more rule to ignore — the same shape as every
+other gate this project has had to move out of prose and into code. This is the tool not being there.
+
+**Also in this change.** The `reproduce` step is told to run the existing tests FIRST — a defect the
+suite already catches is reproduced by running it, with nothing to write — and is forbidden from
+changing what an existing test expects. Its first live run had "reproduced" the bug by editing the
+assertion to expect the buggy output, comment and all, which turns the suite green and ships the
+defect. The critic caught that one; the instruction that invited it was ours.
+
+**Still open, and wider than this workflow.** A `done` raised in a non-final step ends any run the
+same way, generated solvers included. Narrowing one workflow's palette does not close that.
