@@ -273,3 +273,31 @@ solved", and it gets the same kind of answer.
 **Consequence for authors.** A generated solver can no longer end its run early, so the recipe's
 instruction to plan the fewest steps is now the only thing standing between a task and ceremony —
 which is where that pressure belongs.
+
+---
+
+## 2026-07-21 — A worker may report that it is stuck, and only that
+
+**Decision.** A `blocked` tool, taking a reason. It ends the STEP, never the run. The reason is put
+to the step's critic, which answers a different question than usual — is the wall real? — and the
+code acts on that: a confirmed blocker stops the run and hands the ticket back to the ProjectManager
+with the reason; a refuted one is the ordinary rework path and the run carries on.
+
+**Why this is not the `done` tool coming back.** The two claims differ in who can possibly know the
+answer. "The task is solved" is a fact about the project that someone else can check better than the
+worker — so the worker was the wrong source, and that lever is gone. "I cannot get past this" is a
+fact about the worker's own state, invisible from outside. Nobody else can report it.
+
+And it settles nothing on its own. `done` decided the run's outcome; this ends one step and hands a
+sentence to a judge.
+
+**Why it is needed at all.** Without it a stuck worker simply stops talking, and a turn that ends in
+prose looks exactly like one that ended in success — which is how a gibberish ticket once closed on
+the model replying "can you clarify?". A blocker that says so is something the run can act on.
+
+**Why a confirmed blocker is expensive on purpose.** Agreeing costs a person's attention, so the
+critic is told what its OK buys. Giving up is cheap to say and must not be cheap to believe: a wall
+nobody checked sends the step back, which is far cheaper than a person.
+
+**Not the same as `[question]`.** That marker means "answer me and I will carry on" and reaches the
+ask channel mid-exchange. `blocked` means there is nothing to carry on with.

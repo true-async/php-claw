@@ -15,6 +15,7 @@ use Claw\Agent\SpeakerRole;
 use Claw\Config;
 use Claw\Exceptions\AgentException;
 use Claw\Exceptions\ClawException;
+use Claw\Exceptions\StepBlocked;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStoreInterface;
@@ -68,9 +69,13 @@ final readonly class IssueRunner
         project by someone else — so there is nothing to be gained by claiming more than you did, and
         a claim that does not hold simply sends the ticket back.
 
-        If you CANNOT finish — the ticket is unclear, it asks for something that is not there, or it
-        turns out to be far bigger than it looked — say so using the `[question]` protocol described
-        above: it reaches a person, and your reply comes back so you can carry on.
+        If you need an answer to carry on, use the `[question]` protocol described above: it reaches a
+        person, and the reply comes back so you can continue.
+
+        If you CANNOT finish at all — the ticket asks for something this project does not have, it
+        contradicts what you found, or you have tried what there is to try — call `blocked` with a
+        concrete reason. Saying so is a real answer and costs nothing; trailing off in prose is not,
+        and leaves the next person guessing what stopped you.
         PROMPT;
 
     /**
@@ -317,6 +322,15 @@ final readonly class IssueRunner
             )]);
         } catch (\Cancellation $cancellation) {
             throw $cancellation;
+        } catch (StepBlocked $blocked) {
+            // The worker hit a wall and said so. There is nothing for the completion judge to weigh —
+            // the reason itself is the answer, and it is what the ProjectManager needs to decide.
+            $ctx->tracer->exit($span);
+            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->giveBackToProjectManager($ctx->issue, $blocked->reason, $ctx->runId);
+            $this->frontend->report("Run #{$ctx->runId} stopped: {$blocked->reason}", true);
+
+            return 1;
         } catch (\Throwable $e) {
             $ctx->tracer->exit($span);
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
@@ -616,6 +630,16 @@ final readonly class IssueRunner
                 break;
             } catch (\Cancellation $cancellation) {
                 throw $cancellation;   // a cancelled run must stop — never "repair" a cancellation
+            } catch (StepBlocked $blocked) {
+                // A step reported a wall AND the critic confirmed it. Nothing here is broken, so there is
+                // nothing to repair: the ticket goes back to the ProjectManager carrying the reason, and
+                // it decides between a stronger strategy and a person.
+                $ctx->tracer->exit($solverSpan);
+                $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                $this->giveBackToProjectManager($ctx->issue, $blocked->reason, $ctx->runId);
+                $this->frontend->report("Run #{$ctx->runId} stopped: {$blocked->reason}", true);
+
+                return 1;
             } catch (\Throwable $e) {
                 // Repair answers ONE question: is this workflow's code broken? Two kinds of failure
                 // arrive here and only one of them is that.
