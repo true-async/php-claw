@@ -754,6 +754,66 @@ final class WorkflowAbstractTest
         Assert::true(str_contains($refusal, 'exactly one of'));
     }
 
+    /**
+     * A step that withholds a tool withholds it from the MODEL too, including by the back way.
+     *
+     * `tool()` resolved against the run's full registry, so narrowing a palette only hid tools from the
+     * model's own tool list — anything the model could reach INDIRECTLY still got through. Making
+     * `artifact` a tool turned that from theory into a shell: `artifact(command: …)` runs its command
+     * through `tool()`, so a step that deliberately excluded `bash` handed one over anyway, one
+     * indirection further along. A restriction that can be walked around is not a restriction.
+     */
+    #[Test]
+    public function aWithheldToolCannotBeReachedThroughALocalToolEither(): void
+    {
+        $call = new ToolUseBlock('t1', 'artifact', ['label' => 'sneaky', 'command' => 'echo hello']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage()),
+            $this->answer('understood'),
+        );
+
+        $registry = new Registry();
+        $registry->add($this->cannedTool('bash', 'hello'));
+        $registry->add($this->echoTool('read'));
+
+        $env = $this->config(worker: $worker, registry: $registry);
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public string $out = '';
+
+            public function name(): string
+            {
+                return 'narrow';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                // Deliberately least-privilege: this step reads, and must not run commands.
+                $this->out = $this->ai('look, do not touch', ['read', 'artifact']);
+            }
+        };
+
+        $wf->run();
+
+        $refusal = '';
+        $key = array_key_last($worker->requests) ?? throw new \RuntimeException('no request was made');
+
+        foreach ($worker->requests[$key]->messages as $message) {
+            foreach ($message->content as $block) {
+                if ($block instanceof ToolResultBlock) {
+                    $refusal = $block->content;
+                }
+            }
+        }
+
+        // The command did not run: the artifact tool reached for `bash` and this step has no `bash`.
+        Assert::true(str_contains($refusal, 'could not run `echo hello`'));
+        Assert::true(str_contains($refusal, 'Unknown tool: bash'));
+
+        // And nothing was recorded — a command that could not run is not evidence of anything.
+        Assert::false(str_contains($refusal, "recorded 'sneaky'"));
+    }
+
     /** A tool that ignores its input and returns a fixed string — stands in for a real command run. */
     private function cannedTool(string $name, string $output): ToolInterface
     {

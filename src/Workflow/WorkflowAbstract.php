@@ -143,6 +143,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private readonly Environment $env;
 
     /**
+     * The scope in force while an {@see ai()} exchange is running: that call's narrowed palette. Null
+     * between exchanges, when the run's own scope applies.
+     *
+     * It exists so {@see tool()} obeys the restriction the step asked for. A tool call made by the MODEL
+     * arrives through a {@see MethodTool} while the exchange is in flight, and it reaches the world by
+     * the same tool() a step's own code uses — which resolved against the run's full registry, so a step
+     * that narrowed its palette to withhold `bash` still handed the model a shell through any local tool
+     * that runs commands. Nullable rather than always-set because a step's code before and after its
+     * exchanges is the author's, not the model's, and is not what the narrowing was aimed at.
+     */
+    private ?Environment $activeScope = null;
+
+    /**
      * Parameters a step pinned FOR A SPECIFIC later step via {@see setParam()} — a CONCRETE value (path,
      * count, id, flag) the target step reads with {@see param()} and uses in CODE. Keyed by the TARGET
      * step's name, so it is ADDRESSED, not global: a step sees only the params aimed at it and cannot peek
@@ -508,7 +521,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
         if ($command !== '') {
             // The command runs HERE, and what it printed is what is kept. `from` is the command itself,
             // not the word 'bash': a reviewer judging an output has to know which one produced it.
-            $out = self::clip($this->tool('bash', ['command' => $command]));
+            $out = $this->tool('bash', ['command' => $command]);
+
+            // A command that could not be RUN produces no evidence — most often because this step's
+            // palette withholds `bash` on purpose. Recording the failure text as if it were output would
+            // manufacture exactly the kind of proof this artifact kind exists to make impossible, so it
+            // comes back as a refusal the model can read instead.
+            if (str_starts_with($out, "tool 'bash' failed:")) {
+                throw new ToolException(
+                    "artifact: could not run `{$command}` — {$out}. Nothing was recorded; if this step is "
+                    . 'not allowed to run commands, record what you did with `text` or `file` instead.',
+                );
+            }
+
+            $out = self::clip($out);
             $this->artifact($label, text: $note !== '' ? $note : null, evidence: $out, from: $command);
 
             return "recorded '{$label}' as evidence of `{$command}`. Its output was:\n{$out}";
@@ -607,6 +633,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $loop = $this->makeTurnLoop($scope, $system, $ask instanceof SpeakerInterface ? $ask : null);
 
+        // For as long as this exchange runs, the workflow's OWN reach is the exchange's palette. That is
+        // what makes narrowing mean something: a #[Tool] method the model calls mid-exchange — `artifact`
+        // with a `command`, say — goes out through tool(), and tool() used to resolve against the run's
+        // full registry. So a step that deliberately withheld `bash` still handed the model a shell, one
+        // indirection further along. Restored in the finally: a step's own PHP, before and after the
+        // exchange, is the author's code and keeps the run's reach.
+        $previousScope = $this->activeScope;
+        $this->activeScope = $scope;
+
         try {
             $result = $loop->run([...$prior, Message::userText($prompt)]);
             $this->lastHistory = $result->history;   // kept so a handoff can continue this exact context
@@ -614,6 +649,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
             return $result->text ?? '';
         } finally {
+            $this->activeScope = $previousScope;
             $tracer?->exit($span);
         }
     }
@@ -1101,7 +1137,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $tracer = $this->tracer();
         $tracer?->toolCall($name, $params);
 
-        $result = $this->env->executor()->call(new ToolCall($this->env->findStore()->nextId(), $name, $params));
+        // The ACTIVE scope, not the run's: inside an ai() exchange this is that call's narrowed palette,
+        // so a tool the step withheld cannot be resolved and comes back as an honest refusal.
+        $scope = $this->activeScope ?? $this->env;
+        $result = $scope->executor()->call(new ToolCall($this->env->findStore()->nextId(), $name, $params));
 
         $tracer?->toolResult($name, $result->content, $result->isError);
 
