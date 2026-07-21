@@ -44,28 +44,44 @@ final class DefaultTurnLoop implements TurnLoopInterface
      * No-progress circuit-breaker: if the SAME tool returns the SAME result this many times over the
      * exchange, the model is not making progress (it keeps re-sending a call that lands identically — a
      * repeated error, OR a useless success like "no such tool"/"nothing found"). Identical (tool, result)
-     * is the signal here; a different result each time is left to {@see FAILED_ATTEMPT_LIMIT}, which
-     * counts the same ATTEMPT failing rather than the same output recurring. Small on purpose — three
+     * is the signal here; a call that fails DIFFERENTLY each time is left to {@see UNCHANGED_FAILURE_LIMIT}, which
+     * compares failures by signature rather than by raw bytes. Small on purpose — three
      * identical rounds is already "it isn't learning". On trip the loop ESCALATES to the ask channel
      * (supervisor/human) once, then stops.
      */
     private const int STUCK_TOOL_REPEAT = 3;
 
     /**
-     * How many times in a row the SAME tool may come back FAILING before the exchange stops and asks
-     * what is going on. Distinct from {@see STUCK_TOOL_REPEAT}, which compares the output byte for byte
-     * — and byte equality is exactly what a working loop breaks: a step that edits code and re-runs the
-     * tests gets a DIFFERENT failure each time, so the repeat guard never counts past one.
+     * How many times in a row the same call may come back with the SAME FAILURE before the exchange
+     * stops and asks what is going on.
      *
-     * Measured: a `fix` step wrote its file and ran the suite five times, red every time, each with new
-     * output. Nothing counted, because nothing was counting ATTEMPTS — only recurrences. The step then
-     * returned as if it had done its job.
+     * The distinction from {@see STUCK_TOOL_REPEAT} is what "the same" means. That guard compares output
+     * byte for byte, which sounds equivalent and is not: a test runner prints its own duration, so two
+     * runs of an unchanged suite differ in the `Time:` line and compare unequal forever. That is why five
+     * red runs of one command, in a step that fixed nothing, passed under it without a mark.
      *
-     * Four, not three: writing, failing and correcting twice is ordinary work, and a guard that fires
-     * there would interrupt the loop it is meant to protect. By the fourth consecutive failure the model
-     * is not converging, and someone who can look should say so.
+     * Three, because with a signature rather than raw bytes this really does mean stuck: the third
+     * identical failure of the same call is the second one that taught nothing. A DIFFERENT failure
+     * resets the count — a step working its way through a parser fails all the way up the climb, and
+     * each new error is ground gained, not a strike against it.
      */
-    private const int FAILED_ATTEMPT_LIMIT = 4;
+    private const int UNCHANGED_FAILURE_LIMIT = 3;
+
+    /**
+     * A failure's identity for comparison: its text with the parts that move on their own taken out.
+     *
+     * Durations and memory figures change between two runs of the very same unchanged code, and that is
+     * enough to make raw equality useless exactly where it is needed — over a test suite, which is the
+     * commonest thing a stuck step re-runs. Counts and messages are left alone: "9 / 10" becoming
+     * "10 / 10" IS the progress this must be able to see.
+     */
+    private static function signature(string $output): string
+    {
+        $clean = preg_replace('/\bTime:\s*[^\n,]+(,\s*Memory:\s*[^\n]+)?/i', '', $output) ?? $output;
+        $clean = preg_replace('/\b\d+(?:[.,]\d+)?\s*(?:ms|s|sec|secs|seconds|MB|KB|GB|GiB|MiB)\b/i', '', $clean) ?? $clean;
+
+        return trim((string) preg_replace('/\s+/', ' ', $clean));
+    }
 
     /** Appended to the system prompt when an ask channel is present, teaching that marker. */
     private const string ASK_INSTRUCTION = "\n\nIf you need input or a decision from a person to "
@@ -123,8 +139,11 @@ final class DefaultTurnLoop implements TurnLoopInterface
         /** @var array<string, int> identical (tool, result) → how many times it has repeated this exchange */
         $toolRepeats = [];
 
-        /** @var array<string, int> tool name → how many times IN A ROW it has come back failing */
+        /** @var array<string, int> attempt → how many times IN A ROW it produced the SAME failure */
         $toolFailures = [];
+
+        /** @var array<string, string> attempt → the signature of the failure it produced last */
+        $lastFailure = [];
         $stuckEscalated = false;   // escalate a wedged tool to the channel at most once, then stop
 
         // With an ask channel present, teach the worker the [question] marker so it can pause for
@@ -265,28 +284,36 @@ final class DefaultTurnLoop implements TurnLoopInterface
                     $stuckWhy = "keeps calling '{$call->name}' and getting the same result back";
                 }
 
-                // Attempt guard: the same tool FAILING over and over, whatever it prints. This is the
-                // counter the repeat guard above cannot be — a step that edits code and re-runs the tests
-                // fails DIFFERENTLY each time, so byte equality never triggers, and five red attempts in a
-                // row read as five distinct events. Counting attempts is the whole point: the run consumed
-                // real time and money learning the same thing five times, and then reported nothing.
-                // Keyed by the tool AND ITS INPUT, not the tool alone. Every shell command in this system
-                // rides one tool, so counting by name would read four DIFFERENT failing commands as one
-                // thing failing four times — and failing commands are ordinary: `grep` exits 1 on no
-                // match, and this project's own bug workflow ORDERS a step to run a test and watch it
-                // fail. What is worth stopping is the same attempt, repeated, still not working.
+                // Stuck guard: the same call coming back with the SAME FAILURE, over and over.
+                //
+                // What it must not punish is the loop that works. A step that edits code and re-runs the
+                // tests runs the SAME command every time — that is how you find out whether it got better
+                // — and it fails every time until it doesn't. Counting those as attempts stops honest
+                // work: a live run wrote an expression parser in four passes, each one different, each
+                // failing differently, and the first draft of this guard would have cut it off mid-climb.
+                //
+                // So the signal is not "it failed again", it is "nothing changed". A failure whose output
+                // differs from the last one is progress being made or ground being explored, and resets
+                // the count; a failure that says exactly what the last one said is a model not learning.
                 $attempt = $call->name . "\0" . json_encode($call->input, JSON_UNESCAPED_SLASHES);
 
                 if (self::failed($result)) {
-                    $toolFailures[$attempt] = ($toolFailures[$attempt] ?? 0) + 1;
+                    $signature = self::signature($result->content);
 
-                    if ($toolFailures[$attempt] >= self::FAILED_ATTEMPT_LIMIT) {
+                    if (($lastFailure[$attempt] ?? null) === $signature) {
+                        $toolFailures[$attempt] = ($toolFailures[$attempt] ?? 1) + 1;
+                    } else {
+                        $lastFailure[$attempt] = $signature;
+                        $toolFailures[$attempt] = 1;
+                    }
+
+                    if ($toolFailures[$attempt] >= self::UNCHANGED_FAILURE_LIMIT) {
                         $stuckTool = $call->name;
                         $stuckWhy = "has run the same '{$call->name}' call {$toolFailures[$attempt]} times "
-                            . 'and it has failed every time';
+                            . 'and got the same failure back every time';
                     }
                 } else {
-                    $toolFailures[$attempt] = 0;   // that exact attempt worked: its run of failures is over
+                    unset($toolFailures[$attempt], $lastFailure[$attempt]);   // it worked; the streak is over
                 }
             }
 
@@ -311,6 +338,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
                         $history[] = Message::userText($steer);
                         $toolRepeats = [];     // a fresh slate after the steer
                         $toolFailures = [];
+                        $lastFailure = [];
 
                         continue;
                     }
