@@ -133,6 +133,37 @@ final class GenerateIssueWorkflowTest
     }
 
     /**
+     * The reviewer of a generated solver must be able to reject it on substance, and must be given what
+     * the author was given.
+     *
+     * The rubric said "judge whether this class will ACTUALLY solve the task" and then closed the reject
+     * list to three formal defects, ending "Otherwise reply exactly: OK" — so a solver that edited the
+     * wrong file, or did blind string surgery on source (the sin the draft prompt spends a section
+     * forbidding), matched none of them and had to be passed. One of the three named "the recipe", a
+     * document the critic was never handed.
+     */
+    #[Test]
+    public function theSolverReviewCanRejectOnSubstanceAndSeesWhatTheAuthorSaw(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $agent = self::generate($dir, 'Issue10Solver', 'simple');
+
+            // request #6 is the critic (plan, handoff, difficulty, handoff, draft, CRITIC)
+            $review = self::textOf($agent, 5);
+
+            Assert::false(str_contains($review, 'REJECT only if'));   // the closed list is gone
+            Assert::true(str_contains($review, 'Plan: change the thing.'));            // the plan
+            Assert::true(str_contains($review, 'HOW TO DECIDE THE STEPS'));            // the recipe
+            Assert::true(str_contains($review, 'Do a thing'));                         // the ticket
+            Assert::true(str_contains($review, 'does not address the task'));          // a substantive cause
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
      * Run the generator end to end against a scripted model and hand back the agent, so a test can read
      * the exact prompts it was sent. $verdict is assess()'s reply — the line whose parsing is under test.
      */
