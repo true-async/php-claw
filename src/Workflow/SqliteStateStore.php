@@ -52,6 +52,16 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
             )',
         );
 
+        // How far a run has consumed its gate answers. One row per run; see the interface for why a
+        // resumed run cannot work this out from the journal alone.
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS workflow_gate (
+                run_id      TEXT PRIMARY KEY,
+                question_id INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
+            )',
+        );
+
         $pdo->exec('CREATE TABLE IF NOT EXISTS state_seq (id INTEGER PRIMARY KEY AUTOINCREMENT)');
     }
 
@@ -130,6 +140,23 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
     {
         $stmt = $this->pdo->prepare('DELETE FROM workflow_exchange WHERE run_id = :run AND step = :step');
         $stmt->execute(['run' => $runId, 'step' => $step]);
+    }
+
+    public function saveGateCursor(string $runId, int $questionId): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT OR REPLACE INTO workflow_gate (run_id, question_id, updated_at) VALUES (:run, :q, :at)',
+        );
+        $stmt->execute(['run' => $runId, 'q' => $questionId, 'at' => time()]);
+    }
+
+    public function loadGateCursor(string $runId): int
+    {
+        $stmt = $this->pdo->prepare('SELECT question_id FROM workflow_gate WHERE run_id = :run');
+        $stmt->execute(['run' => $runId]);
+        $id = $stmt->fetchColumn();
+
+        return \is_scalar($id) ? (int) $id : 0;
     }
 
     public function saveHandoff(string $runId, string $fromStep, string $handoff): void

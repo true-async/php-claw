@@ -180,6 +180,12 @@ final class Tracer
      * surfaces the latest `question` with no matching {@see answer()} as the issue's open gate, and the
      * id lets the answer point back at exactly this question (one run can gate more than once).
      */
+    /** The run this tracer records — so a component holding one can find that run in the journal. */
+    public function runId(): string
+    {
+        return $this->runId;
+    }
+
     public function question(string $prompt): int
     {
         $id = ++$this->seq;

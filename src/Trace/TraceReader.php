@@ -27,13 +27,45 @@ final class TraceReader
     }
 
     /**
+     * The oldest ANSWERED question in this run whose id is past $after — the next reply a resumed run
+     * has not taken yet, or null when there is none.
+     *
+     * This is what lets an answer outlive the process it was meant for. Someone replies while nothing is
+     * serving the gate; the reply goes into the journal against the question it answers; the run is
+     * started again and, instead of asking the same thing a second time, finds the answer waiting here.
+     * $after is the run's own cursor, so an answer is taken exactly once.
+     *
+     * Oldest first on purpose: a run that gated twice must work through them in the order it asked.
+     *
+     * @return ?array{id: int, text: string}
+     */
+    public function answeredAfter(string $runId, int $after): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT data FROM trace WHERE run_id = :run AND type = 'answer' ORDER BY seq",
+        );
+        $stmt->execute(['run' => $runId]);
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $data = json_decode((string) ($row['data'] ?? ''), true);
+            $data = \is_array($data) ? $data : [];
+            $ref = (int) ($data['ref'] ?? 0);
+
+            if ($ref > $after) {
+                return ['id' => $ref, 'text' => (string) ($data['text'] ?? '')];
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * The run's OPEN GATE: the newest `question` with no `answer` pointing back at it, or null when the
      * run is not waiting on anyone.
      *
      * The journal is the durable half of the gate — the channel a run parks on is only the live wakeup,
      * and it dies with its process. So this is how anyone finds out that a run was waiting when the
-     * lights went out: the ledger says Running and the ticket says WaitingHuman, and until now nothing
-     * could tell that apart from a wait somebody is actually serving.
+     * lights went out, and it is what lets an answer be delivered to a gate whose run is no longer here.
      *
      * @return ?array{id: int, prompt: string}
      */
