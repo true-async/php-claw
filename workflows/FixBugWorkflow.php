@@ -44,7 +44,8 @@ final class FixBugWorkflow extends WorkflowAbstract
     protected function reproduce(): void
     {
         $this->ai(
-            $this->ticket()
+            $this->rework()
+            . $this->ticket()
             . "\n\nMake this defect visible as a FAILING TEST, in the project's own test suite and its own "
             . "style — find how the existing tests are written and run before writing anything.\n\n"
             . "Work in this order:\n"
@@ -77,17 +78,27 @@ final class FixBugWorkflow extends WorkflowAbstract
      *
      * Deliberately given the smaller brief: the hard thinking was done above, and a step told to fix
      * a specific failing test is far less likely to wander into a redesign than one told to fix a bug.
+     *
+     * Its critic judges the SHAPE of the change, not whether it worked — `verify` settles that, and a
+     * second opinion on the same question would only cost a reviewer pass. Nothing used to look at the
+     * blast radius at all: a fix that turned the suite green while rewriting code the ticket never
+     * mentioned passed every gate this workflow has, because every gate was reading the test results.
      */
-    #[Step]
+    #[Step(critic: 'contained')]
     protected function fix(): void
     {
         $this->ai(
-            $this->ticket()
+            $this->rework()
+            . $this->ticket()
             . "\n\nThe failing test above is the definition of this bug. Change the PRODUCTION code so "
             . "it passes.\n\n"
             . 'Make the smallest change that fixes the cause — not the symptom, and not the test. Do not '
             . 'edit the test to agree with the current behaviour: that erases the bug instead of fixing '
-            . 'it. Do not refactor code the ticket did not ask about. Run the test as you go.',
+            . 'it. Do not refactor code the ticket did not ask about. Run the test as you go.'
+            . "\n\nWhen you stop, record what you changed with the `artifact` tool, passing `command` set "
+            . 'to `git diff --stat` — that is what the reviewer of this step reads. If you could not make '
+            . 'the test pass, say so plainly rather than leaving a half-applied change: a reported '
+            . 'failure is worked with, a silent one is discovered later by someone else.',
         );
     }
 
@@ -102,7 +113,8 @@ final class FixBugWorkflow extends WorkflowAbstract
     protected function verify(): void
     {
         $this->ai(
-            "Run the project's WHOLE test suite — not only the test written for this bug — and read the "
+            $this->rework()
+            . "Run the project's WHOLE test suite — not only the test written for this bug — and read the "
             . "output.\n\n"
             . 'A failure the change explains is part of this work: fix it and run again. A failure that '
             . 'was ALREADY THERE before any of this is not yours to chase — the reproduce step recorded '
@@ -132,6 +144,18 @@ final class FixBugWorkflow extends WorkflowAbstract
                 . 'this step may make, and it need not make even that one — a defect the existing suite '
                 . 'already catches is reproduced by running it.',
 
+            'contained' => 'Judge the SHAPE of the change, not whether the tests pass — the next step '
+                . 'settles that, and re-deciding it here buys nothing. Run `git diff` yourself and read '
+                . 'what this step actually did. Note the diff is CUMULATIVE — nothing '
+                . 'commits between steps, so it also contains the failing test the previous step added. '
+                . "Call recall(what='artifacts', name='reproduce') to see what that step recorded, and "
+                . 'judge only what is left. Reject if: a test was changed BEYOND the one reproduce added '
+                . '(this step may not touch tests at all); a file the ticket does not concern was changed for reasons the fix does not require; the change is a broad '
+                . 'rewrite or refactor where a targeted fix would do; or the defect was papered over at '
+                . 'the call site rather than fixed at its cause. A change that is small, confined to the '
+                . 'code the ticket names, and aimed at the cause PASSES — even if the tests are still red, '
+                . 'which is not this step\'s verdict to give.',
+
             'proven' => 'The evidence must be the real output of running the WHOLE suite. Run it yourself. '
                 . 'Reject if: the output covers only the new test; the test written for the bug was weakened '
                 . 'or deleted rather than satisfied; or the claim of a green suite has no output behind it. '
@@ -141,6 +165,24 @@ final class FixBugWorkflow extends WorkflowAbstract
                 . 'Accept a failure the baseline also shows; reject one it does not, and reject a step that '
                 . 'sets a failure aside without pointing at the baseline line that excuses it.',
         ];
+    }
+
+    /**
+     * The reviewer's findings, when this is a re-run after a rejection — empty on a first attempt.
+     *
+     * Without it a rejected step replays its ORIGINAL prompt onto the continued conversation and is never
+     * told what was wrong, so it plausibly answers "already done", records the same artifact, and is
+     * rejected again until the round cap kills the run. The rework loop a critic pays for is worth
+     * nothing unless the worker hears the verdict.
+     */
+    private function rework(): string
+    {
+        $critique = $this->critique();
+
+        return $critique === null
+            ? ''
+            : "A REVIEWER REJECTED YOUR PREVIOUS ATTEMPT AT THIS STEP:\n{$critique}\n\n"
+                . "Fix exactly what it names. Do not start over, and do not repeat what it rejected.\n\n";
     }
 
     /** The ticket as the steps see it — this workflow takes no parameters, the issue IS the input. */

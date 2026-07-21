@@ -92,4 +92,19 @@ final readonly class BashTool implements ToolInterface
 
         return $output === '' ? '(no output)' : $output;
     }
+
+    /**
+     * Read the exit code back out of a result this tool produced; null when there is no prefix, which
+     * means the command succeeded (a zero exit is not marked).
+     *
+     * It lives here, beside the line that writes the prefix, because the caller that needs it is in
+     * another namespace: {@see \Claw\Agent\DefaultTurnLoop} counts failed attempts and cannot see a
+     * non-zero exit any other way — the executor marks a command that ran and reported failure as a
+     * SUCCESSFUL tool call, which it was. Parsing a format from a different file is how a guard goes
+     * quietly blind the day the format changes; parsing it from this one cannot.
+     */
+    public static function exitCode(string $result): ?int
+    {
+        return preg_match('/^\[exit (\d+)\]/', $result, $m) === 1 ? (int) $m[1] : null;
+    }
 }
