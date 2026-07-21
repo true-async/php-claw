@@ -72,8 +72,9 @@ final readonly class Triage
 
         If it IS workable, say first WHAT KIND of work it is — exactly one type:
 
-        - `bug`      — something is broken and should not be. The work has a fixed shape: reproduce it,
-                       pin it with a failing test, fix it, watch the test go green.
+        - `bug`      — something is broken and should not be. The TYPE says what the ticket is, never how
+                       much machinery it deserves: a trivial off-by-one is as much a bug as a subtle one
+                       across ten files, and the strategy below decides which of them gets a workflow.
         - `feature`  — new behaviour someone asked for.
         - `refactor` — change the shape of the code without changing what it does. There are no
                        acceptance criteria; the existing tests passing IS the criterion.
@@ -84,17 +85,25 @@ final readonly class Triage
                        across the project, documentation, test coverage for code that already works.
 
         Judge the type from what the ticket ASKS FOR, not from how big it is — a bug is a bug whether
-        it takes one line or ten files.
+        it takes one line or ten files. The type never decides the strategy: a fixed procedure belongs to
+        a shelf entry, not to the kind of work, and reading one into the type is how every small bug ends
+        up paying for a workflow it did not need.
 
-        THEN judge the SIZE and SHAPE of the work and choose exactly one strategy:
+        THEN judge the SIZE and SHAPE of the work and choose exactly one strategy. They are listed
+        CHEAPEST FIRST, and that order is the tie-break: when two fit, take the earlier one.
 
-        - `direct`    — one agent with the project's tools can just do it. A localized, mechanical
-                        change: a typo, a flag, a small method, a config value. This is the cheapest
-                        path and should be your default for anything small.
-        - `library`   — one of the ready-made WORKFLOWS listed in the ticket brief fits this task as it
-                        stands. The cheapest of the shelf verdicts: it is code a person wrote and tested,
-                        it runs as written, and nothing is generated. Name it when you record the verdict.
-        - `approach`  — none of the ready-made workflows fits, but one of the listed APPROACHES does. An
+        - `direct`    — one agent with the project's tools can just do it, in one sitting, with no plan.
+                        The test is not "does it feel small" but this: CAN YOU NAME THE FILES IT TOUCHES,
+                        and can you say what changes in one sentence? If you can, it is `direct` — and
+                        that stays true when something on the shelf would also fit, because the shelf
+                        entry costs a whole workflow to do what one exchange would have done. If you
+                        cannot name the files without going and finding out first, it is not `direct`.
+        - `library`   — the work needs more than one sitting, AND one of the ready-made WORKFLOWS listed
+                        in the ticket brief fits it as it stands. The cheapest of the shelf verdicts: it
+                        is code a person wrote and tested, it runs as written, and nothing is generated.
+                        Name it when you record the verdict.
+        - `approach`  — the work needs more than one sitting, and no ready-made workflow fits, but one of
+                        the listed APPROACHES does. An
                         approach is a written strategy for work of this kind; a solver is generated for
                         THIS ticket that follows it. Costs a generation pass, and buys a solver shaped to
                         the ticket rather than to the average of every ticket like it. Name the approach
