@@ -347,3 +347,35 @@ has to accomplish. General mechanics and domain procedure are different texts.
 matched by no strategy is not a ticket to improvise a solver for — it is a ticket whose
 shape nobody has established yet, and that is the human option above. Generating blind is
 how a run spends a budget discovering it was the wrong shape.
+
+---
+
+## 2026-07-21 — A tool palette is always stated, never defaulted
+
+**Decision.** Anything that hands a model a set of tools takes that set as a REQUIRED argument. There
+is no default, because neither candidate default is safe:
+
+- defaulting to NONE cripples a caller that simply forgot, and says nothing while doing it;
+- defaulting to ALL would arm a scope that was meant to be narrow, and equally say nothing.
+
+So the caller states it, and narrowing is done by name at the call site — `Registry::only([...])` to
+grant an enumerated few, `Registry::except([...])` to deny specific ones, an empty `new Registry()`
+when a scope genuinely must not act. All three read as deliberate in the code, which is the property
+a default cannot have.
+
+Where a set is optional in an existing signature, `null` means EVERY tool and `[]` means none — the
+contract `WorkflowAbstract::ai()` already used. The two spellings must not disagree again.
+
+**What it cost to learn.** `DefaultTurnLoop` took `array $specs = []`, and `supervisorSpeaker()` was
+written with four arguments. The supervisor tier — which decides `accept`/`stop`/guidance when a step
+fails review — was therefore asked by its own brief to accept "if the actual work looks correct" with
+no way to open a file or run a test. Everything it knew came from the critic's complaint and a
+summary the step under review had written about itself, and its standing order biased it towards
+accepting. Nothing failed; it answered confidently, and the answer was worth nothing. The one gate
+above the critic had been a rubber stamp since the day it was added.
+
+**Why subtraction exists alongside an allow-list.** `only()` has to be revisited every time a tool is
+added to a run, and nothing reports that it was not — so a scope that ought to see a new capability
+quietly stops seeing anything new. `except()` states what is actually being denied, and keeps
+denying exactly that as the palette grows. A name that is not registered is an error in both: a scope
+subtracting a tool that does not exist believes it is protected, and is not.
