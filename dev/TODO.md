@@ -41,7 +41,15 @@ Anything said to a model is stored for as long as the project exists. `BashTool`
 child environment, so keys do not leak that way — but a key placed into a prompt by a step
 is written down permanently, and no scrubbing happens on that path.
 
-Not yet audited: whether anything currently does this. Assume nothing until it is checked.
+**Audited (#59), and the answer was worse than the guess.** Our own key does not leak: `BashTool`
+scrubs the child environment and no prompt carries `apiKey`. But `read_file` on a project's own
+`.env` returned it, and the tracer wrote it into the project database verbatim — no step had to
+misbehave for that, and pointing claw at its own folder exposed the real API key it runs on. The
+file tools now refuse credential-shaped names (templates like `.env.example` stay readable).
+
+That closes the ACCIDENTAL path, not the category: `bash` runs with the workspace as its working
+directory and can `cat .env` like anything else, and no scan of a shell command could reliably say
+otherwise.
 
 **Wanted:** design the rule before we need it. Two halves to settle — where a secret may be
 held, and how a step reaches an authenticated API without the credential passing through
