@@ -173,17 +173,19 @@ final class DefaultTurnLoopTest
         };
         $n = 0;
         $executor = new RecordingExecutor(
-            // A successful tool call reporting a failed command, different every time — by reference, or
-            // the text would repeat and the OTHER guard would answer for this one.
+            // The same failure each time, with the duration the runner prints moving — which is exactly
+            // what defeated byte-for-byte comparison and let five red runs pass unremarked.
             static function (ToolCall $call) use (&$n): ToolResultBlock {
-                return new ToolResultBlock($call->id, "[exit 1]\nfailure #" . (++$n), false);
+                $n++;
+
+                return new ToolResultBlock($call->id, "[exit 1]\n1 failed\nTime: 00:00.0{$n}, Memory: 6.00 MB", false);
             },
         );
         $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
         $loop->run([Message::userText('go')]);
 
-        Assert::same($agent->calls, 4);
+        Assert::same($agent->calls, 3);
     }
 
     #[Test]
@@ -239,11 +241,8 @@ final class DefaultTurnLoopTest
                 return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
             }
         };
-        $n = 0;
         $executor = new RecordingExecutor(
-            static function (ToolCall $call) use (&$n): ToolResultBlock {
-                return new ToolResultBlock($call->id, "[exit 1]\nred #" . (++$n), false);
-            },
+            static fn (ToolCall $call): ToolResultBlock => new ToolResultBlock($call->id, "[exit 1]\nstill red", false),
         );
         $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
@@ -260,7 +259,7 @@ final class DefaultTurnLoopTest
 
         Assert::same($last->role, Role::User);
         Assert::true(str_contains($text, 'STOPPED'));
-        Assert::true(str_contains($text, 'failed every time'));
+        Assert::true(str_contains($text, 'the same failure back every time'));
     }
 
     #[Test]
@@ -302,37 +301,48 @@ final class DefaultTurnLoopTest
     }
 
     #[Test]
-    public function aToolThatKeepsFailingIsStoppedEvenWhenEveryFailureIsDifferent(): void
+    public function aToolFailingDifferentlyEachTimeIsLeftToKeepClimbing(): void
     {
-        // This used to assert the opposite — that distinct errors mean the model is iterating toward a
-        // fix and must be left alone until the far turn cap. A live run disproved it: a `fix` step wrote
-        // its file and ran the suite five times, red every time with new output each time, and produced
-        // nothing. Distinct failures are not evidence of progress; they are just failures that differ.
-        // The repeat breaker counts recurrences and cannot see this, so attempts are counted separately.
+        // The correction a live run forced, and the second time this case has been rewritten.
+        //
+        // It first asserted that distinct errors mean the model is iterating and must never be stopped.
+        // A `fix` step that wrote its file five times, red every time, disproved that. So it was changed
+        // to stop on any run of failures — and THAT was disproved in turn, by a step writing an
+        // expression parser: four runs of one command, failing all the way up the climb as errors turned
+        // into passes. Cutting it off would have thrown away work that was going somewhere.
+        //
+        // What both incidents actually share is not "it failed again", it is "nothing changed". A
+        // different failure is ground gained; the same failure twice over is a model not learning.
         $agent = new class () implements AgentInterface {
             public int $calls = 0;
 
             public function send(AgentRequest $request): AgentResponse
             {
                 $this->calls++;
-                $use = new ToolUseBlock('t' . $this->calls, 'probe', []);
+
+                if ($this->calls > 8) {
+                    return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(1, 1), 'done');
+                }
+
+                $use = new ToolUseBlock('t' . $this->calls, 'bash', ['command' => 'vendor/bin/phpunit']);
 
                 return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
             }
         };
         $n = 0;
         $executor = new RecordingExecutor(
+            // the same command, failing its way UP — fewer errors on every run
             static function (ToolCall $call) use (&$n): ToolResultBlock {
-                return new ToolResultBlock($call->id, 'error #' . (++$n), true);   // distinct every time
+                $left = 10 - (++$n);
+
+                return new ToolResultBlock($call->id, "[exit 1]\nThere were {$left} errors", false);
             },
         );
         $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
 
         $loop->run([Message::userText('go')]);
 
-        // Four consecutive failures of the same tool, then it stops — with no one on the ask channel
-        // there is nobody to ask what is going on, so it does not churn on to the turn cap.
-        Assert::same($agent->calls, 4);
+        Assert::same($agent->calls, 9);   // ran to its own conclusion, never interrupted
     }
 
     #[Test]
