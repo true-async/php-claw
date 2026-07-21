@@ -3,87 +3,11 @@
 Ordered by value, not by effort. An entry leaves this file when it lands in
 [`DECISIONS.md`](DECISIONS.md) or turns out to be wrong.
 
-Items 3–5 came from reading the [Electric Agents](https://electric.ax/docs/agents/)
+Items 1–3 came from reading the [Electric Agents](https://electric.ax/docs/agents/)
 documentation and asking what of it applies to a single-process runtime. We are not
 adopting their architecture — only the invariants that fix something already broken here.
 
-## 1. The gates that do not hold
-
-Found by reading every prompt in the project against the code that consumes it, and each one
-confirmed against the source before being written down. They are grouped because they share a
-shape: a rule stated in a prompt that nothing enforces, or a verdict parsed loosely enough that
-the wrong answer passes.
-
-**The generator never sees the ticket.** `GenerateIssueWorkflow::draftPrompt()` opens with
-"Write a PHP class that solves the task below" and the task is not in it. `taskSummary()` reaches
-`understand()`, `assess()` and the critic's rubric, but not the prompt that writes the solver,
-which sees only `understand()`'s paraphrase. Every detail the plan dropped is unrecoverable, and
-the critic judging the draft holds the real ticket text — the reviewer is better informed than
-the author, which manufactures rework rounds.
-
-**`artifact` is instructed but not wired.** `FixBugWorkflow` tells the model to call an
-`artifact` tool that has never existed; both of its critic'd steps demand evidence the step
-cannot record. Fixed by making `artifact` a workflow-local tool registered for every workflow —
-see the decision of the same date.
-
-**`SOLVED` is matched by prefix.** `IssueRunner::unsolvedReason()` returns null when the
-uppercased answer *starts with* `SOLVED`, so "Solved for the happy path, but the null case still
-fails" closes the ticket. The reverse also holds: the prompt renders the token in backticks, and
-a judge that copies that formatting has its positive verdict handed back as the failure reason.
-
-**`accept` and `stop` are matched by prefix, and silence accepts.** In
-`WorkflowAbstract::superviseStep()` an empty reply and anything starting with `accept` both
-accept work the critic just rejected; anything starting with `stop` kills the run. The same
-prompt asks for free prose guidance, so "Stop rerunning the whole suite, run only the failing
-test" aborts the run. Compare `enforceBudget()`, where silence means stop — two ask prompts give
-the empty answer opposite meanings, and this one fails open.
-
-**`assess()` inverts its own verdict.** The first token of the reply is tested with
-`str_contains($word, 'complex')` before `'simple'`, so "Complexity: simple" routes the task to
-the expensive tier. The comment directly above congratulates the code for avoiding this class of
-bug.
-
-**`solverReview` is a rubber stamp.** Its rubric says to judge whether the solver will actually
-solve the task, then closes the reject list to three formal defects and ends "Otherwise reply
-exactly: OK". A solver that edits the wrong file or does blind string surgery on source — the sin
-`draftPrompt()` spends a section forbidding — matches none of the three. One of the three,
-"the recipe is plainly not carried out", names a document the critic is never given.
-
-**The validator promises more than it checks.** `draftPrompt()` heads its requirements with "the
-code is validated before it is saved, and rejected if any are missed". `WorkflowValidator` checks
-syntax, `name()`, `protected` steps, forbidden functions and constructs, and the expected
-namespace and class. It does not check `declare(strict_types=1)`, the `use` lines, `final`,
-`extends WorkflowAbstract`, that any step exists, or that every `#[Step(critic: 'x')]` has an
-entry in `criticRules()` — the last of which is fully mechanical and is instead enforced by a
-`LogicException` at solve time, after human approval, mid-run, discarding the work before it.
-
-**`recall` is offered where it is not registered.** `Triage::history()` instructs the model to
-open the failed run with `recall` whenever a previous attempt failed, but `RecallTool` is
-registered only when `analyse()` is given a run id — which `Server.php:402` and
-`Cli/WorkflowMode.php:204` do not pass.
-
-**The decomposition caps are hidden from the model.** `MAX_DEPTH = 2` and `MAX_CHILDREN = 8` are
-never named in the `Decompose` prompt, which instead tells the model that work left over after a
-refused call "belongs in the pieces you already opened" — something it cannot make true, as no
-action edits a sub-issue. The tail of a ticket is dropped by instruction.
-
-**`needs_human` names two things.** It is an action on `project_manager` that parks a ticket, and
-a boolean on `set_strategy` meaning "a person approves first". `Triage::history()` says "set
-needs_human=true" on the one path where the action is required and every strategy is refused.
-
-## 2. Generation strategies: prose on the shelf
-
-The shelf holds ready-made workflow classes. It should also hold **generation strategies** —
-prose describing how work of a kind is structured, fed to the generator, which writes a solver
-for the ticket in front of it. The reasoning, and the full option list the ProjectManager chooses
-from, are in the decision of 2026-07-21.
-
-Not started, and deliberately after item 1: a strategy is a text poured into the generator, and
-the generator currently writes solvers without reading the ticket and is reviewed by a rubric
-that cannot reject them on substance. A good recipe through that funnel produces the same defects
-at a higher price.
-
-## 3. Waiting must live in the database, not on a stack
+## 1. Waiting must live in the database, not on a stack
 
 **Now:** `HttpGateSpeaker` parks the run coroutine on an `Async\Channel` and blocks until
 `POST …/answer` pushes a reply. The wait exists only as a suspended stack frame. Restart
@@ -102,7 +26,7 @@ new mechanism, it is one more state the existing snapshot has to be able to hold
 handler. State lives in a durable log and the handler is re-entered with a `wake` describing
 why. We want the invariant, not the runtime.
 
-## 4. Idempotency of a step — half exists, the contract does not
+## 2. Idempotency of a step — half exists, the contract does not
 
 **What we already have:** resumability. The snapshot records which steps finished, and a
 resumed run skips them.
@@ -118,7 +42,7 @@ re-execute — and have `WorkflowValidator` reject the shapes that obviously bre
 **Prior art:** Electric documents at-least-once delivery and requires handlers to be safe
 for re-execution with identical inputs. The requirement is stated, so it can be relied on.
 
-## 5. Keep secrets out of prompts
+## 3. Keep secrets out of prompts
 
 **The exposure:** `Tracer::prompt()` records the prompt text, and tool spans record full
 tool input and output, into the project database (`src/Trace/Tracer.php`, `Level::Debug`).
@@ -137,27 +61,27 @@ secret in its prompt or message, because those are persisted durably. The manage
 credential, calls the authenticated API itself, and passes only the resulting data down to
 the worker. The privilege stays with the coordinator; the worker gets facts.
 
-## 6. MCP — client, and later server
+## 4. MCP — client, and later server
 
 Neither exists today: zero references across `src/`, `config/`, `workflows/`, `bin/`.
 As a client this buys the existing tool ecosystem without writing a `ToolInterface`
 implementation per integration; `Registry::only()`/`with()` already models least-privilege
 palettes, so imported tools have somewhere to land.
 
-## 7. Knowledge base
+## 5. Knowledge base
 
 `KnowledgeBaseInterface` documents Obsidian-flavoured markdown plus sqlite-vec retrieval
 and has no implementation and no caller. Today the only memory that survives a run is
 procedural — the generated solver classes in `WorkflowStore`. Declarative memory is the
 gap: what was learned about a project, as opposed to what code was written for it.
 
-## 8. The WebSocket channel
+## 6. The WebSocket channel
 
 `/api/ws` is meant to be *the* live transport — one connection, rooms for topics, SSE kept
 only as a fallback. It is the newest surface in `Server.php` and the least finished. Four
 things, in the order they hurt. The first two are defects, not tuning.
 
-### 8a. The connection has no heartbeat, so a dead one looks alive
+### 6a. The connection has no heartbeat, so a dead one looks alive
 
 `handleWs()` is `foreach ($ws as $message)` — it blocks on inbound frames and never sends
 anything unprompted (`src/Server.php:745`). A dashboard that has subscribed and is watching
@@ -169,7 +93,7 @@ The SSE paths already solved this — a comment frame every ~10s (`src/Server.ph
 The WS path needs the same: a server-side ping on an idle timer, and a client that reconnects
 when pongs stop. Until then, "live over one connection" is true only while traffic flows.
 
-### 8b. Only run traces resume; boards do not
+### 6b. Only run traces resume; boards do not
 
 `wsSubscribe()` replays the journal past `since` — but only for a topic matching
 `project/{key}/run/{id}/trace` (`src/Server.php:783-794`). A board room
@@ -184,7 +108,7 @@ first, and there is a race between that snapshot and the subscription taking eff
 Boards need what traces already have: a cursor a subscriber can resume from, so subscribe
 alone is enough to arrive at a correct board.
 
-### 8c. Board updates are polled, not pushed
+### 6c. Board updates are polled, not pushed
 
 `broadcastBoards()` walks every project, reloads all of its issues from SQLite, diffs them,
 then sleeps two seconds — for the server's lifetime, whether or not anyone is connected
@@ -196,12 +120,12 @@ The write should announce itself, with two controls borrowed from Electric's wak
 **coalescing** (a burst arriving during a publish merges into one send — a run touching a
 ticket ten times in a second is one board frame, not ten) and **`debounceMs`** (send once
 the changes stop, so bursts settle into one frame while a lone change still lands in
-milliseconds). The periodic tick then survives only as 8a's heartbeat.
+milliseconds). The periodic tick then survives only as 6a's heartbeat.
 
 Note this mostly deletes the diff-against-`$sent` bookkeeping rather than optimising it —
-and it interacts with 8b, since a pushed board still needs a resume cursor. One change.
+and it interacts with 6b, since a pushed board still needs a resume cursor. One change.
 
-### 8d. Two transports doing the same job
+### 6d. Two transports doing the same job
 
 The run trace and the board each exist twice — once as SSE with `Last-Event-ID`, once as a
 WS room — with the same seq de-duplication implemented on both paths. Every fix above has to
@@ -215,9 +139,9 @@ whether SSE stays a real fallback or goes; not worth carrying two of everything 
 (`src/Server.php:752`, `768`) — no error frame goes back, so a client that typos a topic
 waits forever on silence with nothing to debug.
 
-## 9. Stated but not true — a backend, a guard, a route table
+## 7. Stated but not true — a backend, a guard, a route table
 
-Same shape as item 1, one layer out: not a prompt promising what the code will not do, but
+Same shape as the prompt defects closed in #42–#49, one layer out: not a prompt promising what the code will not do, but
 the configuration, the README and `ARCHITECTURE.md` promising it. Each was confirmed against
 the source before being written here.
 
@@ -243,11 +167,11 @@ protection is present exactly where it is least needed.
 situation. A reader who trusts the README believes the autonomous runner is guarded.
 
 Fixing the sentence is five minutes and makes the gap honest. Fixing the gap is the actual
-work, and it is the same conversation as item 5 — an unguarded `bash` in the project folder
+work, and it is the same conversation as item 3 — an unguarded `bash` in the project folder
 and a durable journal of everything said to the model are two halves of one security story.
 
 **The route table is behind the code.** `ARCHITECTURE.md:212-223` lists nine routes. Missing:
-the whole `/api/ws` WebSocket endpoint (item 8's subject), `POST issues/{id}/close|stop|delete`,
+the whole `/api/ws` WebSocket endpoint (item 6's subject), `POST issues/{id}/close|stop|delete`,
 and `artifact-file`. The document is the knowledge map — a map that omits the primary live
 transport sends the next reader to the fallback.
 
@@ -264,4 +188,4 @@ transport sends the next reader to the fallback.
   children instead of `Decompose` filing tickets somebody starts later. Blocked: there is no
   concurrency inside a run, `Async\spawn` appears nowhere in `src/Workflow/`. Revisit if that
   changes. (The debounce and coalescing half of the same idea is *not* blocked on this and
-  moved up to item 8.)
+  moved up to item 6.)
