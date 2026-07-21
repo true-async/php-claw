@@ -195,6 +195,43 @@ final class ProjectStoreTest
         }
     }
 
+    /**
+     * The ledger has to be able to name the runs it still calls Running. In a live process those are
+     * runs in flight; at STARTUP there is no live process, so every one of them is a leftover — most
+     * consequentially a run that was parked at its human gate, because the channel it slept on died
+     * with that process while the row and the ticket did not.
+     */
+    #[Test]
+    public function theLedgerCanNameTheRunsItStillCallsRunning(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $store = self::openProject($projectsDir, $folder);
+            $store->addIssue('a task');
+            $store->addIssue('another');
+
+            $finished = $store->recordRun('1', 'Issue1Solver');
+            $store->setRunStatus($finished, RunStatus::Done);
+            $stillRunning = $store->recordRun('2', 'Issue2Solver');
+
+            $running = $store->runningRuns();
+
+            Assert::count($running, 1);
+            Assert::same($running[0]['id'], $stillRunning);
+            Assert::same($running[0]['issue'], '2');
+            Assert::same($running[0]['workflow'], 'Issue2Solver');
+
+            // Settling it takes it off the list — which is what adoption at startup does.
+            $store->setRunStatus($stillRunning, RunStatus::Failed);
+            Assert::same($store->runningRuns(), []);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
     #[Test]
     public function recentRunsListsTheLedgerNewestFirst(): void
     {

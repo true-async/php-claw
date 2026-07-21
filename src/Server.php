@@ -18,6 +18,7 @@ use Claw\Project\IssueStatus;
 use Claw\Project\Project;
 use Claw\Project\ProjectStore;
 use Claw\Project\ProjectStoreInterface;
+use Claw\Project\RunStatus;
 use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
 use Claw\Run\Triage;
@@ -120,7 +121,52 @@ final class Server
         echo "claw dashboard API → http://{$host}:{$port}\n";
         echo "  projects: {$this->projectsDir}\n";
 
+        $this->adoptOrphanedRuns();
+
         $server->start();
+    }
+
+    /**
+     * At startup, settle every run the ledger still calls Running.
+     *
+     * There is no live process yet, so every one of them is a leftover from a server that stopped while
+     * it was working — most consequentially one parked at its human gate. That gate is two things: a
+     * question in the journal, which is durable, and an `Async\Channel` the run coroutine sleeps on,
+     * which is not. The channel dies with the process; the ledger row and the ticket do not. What was
+     * left behind was a ticket reading WaitingHuman whose `POST .../answer` returned 409 "no run is
+     * waiting" for the rest of time — a wait nobody was serving and no screen could show.
+     *
+     * So the run is marked failed and its ticket handed back to Open, with the reason saying which of
+     * the two it was. Not resumed: picking a run back up from its snapshot and delivering an answer that
+     * arrived while it was dead needs a durable record of which answers have been consumed, which is the
+     * rest of this item in `dev/TODO.md`. A ticket that is visibly re-runnable is not that; it is
+     * strictly better than one that is stuck and silent.
+     */
+    private function adoptOrphanedRuns(): void
+    {
+        foreach (ProjectStore::all($this->projectsDir) as $project) {
+            try {
+                $store = $this->store($project->id);
+                $reader = new TraceReader($store->pdo());
+            } catch (\Exception) {
+                continue;   // an unreadable project must not stop the server from coming up
+            }
+
+            foreach ($store->runningRuns() as $run) {
+                $gate = $reader->openGate($run['id']);
+                $why = $gate === null
+                    ? "run #{$run['id']} was interrupted when the server stopped"
+                    : "run #{$run['id']} was waiting for an answer when the server stopped: {$gate['prompt']}";
+
+                $store->setRunStatus($run['id'], RunStatus::Failed);
+
+                if ($store->loadIssue($run['issue'])->status !== IssueStatus::Done) {
+                    $store->setIssueStatus($run['issue'], IssueStatus::Open);
+                }
+
+                echo "  adopted: {$why}\n";
+            }
+        }
     }
 
     /** Route one request. Both args come straight from the server extension's handler. */

@@ -13,6 +13,45 @@ use Testo\Test;
 
 final class TraceReaderTest
 {
+    /**
+     * A gate is two things and only one of them survives a restart: the question in the journal, which
+     * is durable, and the channel the run coroutine sleeps on, which dies with its process. So the
+     * journal has to be able to answer "was this run waiting on someone?" — until it could, a ticket
+     * left at WaitingHuman by a stopped server was indistinguishable from one a live run is serving,
+     * and `POST .../answer` replied "no run is waiting" to it for the rest of time.
+     */
+    #[Test]
+    public function anUnansweredQuestionIsFindableAsTheRunsOpenGate(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $tracer = new Tracer('r1', new TraceStore($pdo));
+        $reader = new TraceReader($pdo);
+
+        $before = $reader->openGate('r1');
+        Assert::null($before);   // nothing asked yet
+
+        $first = $tracer->question('which config key controls the timeout?');
+        $gate = $reader->openGate('r1');
+        Assert::true($gate !== null);
+        Assert::same($gate['id'], $first);
+        Assert::same($gate['prompt'], 'which config key controls the timeout?');
+
+        $tracer->answer($first, 'CLAW_TURN_SECONDS');
+        $closed = $reader->openGate('r1');
+        Assert::null($closed);   // answered: the gate is closed
+
+        // A run may gate more than once, and an answer closes exactly the question it names — so an
+        // out-of-order reply cannot make a later, still-open question look settled.
+        $second = $tracer->question('should the retry be capped?');
+        $third = $tracer->question('and at what number?');
+        $tracer->answer($second, 'yes');
+
+        $still = $reader->openGate('r1');
+        Assert::true($still !== null);
+        Assert::same($still['id'], $third);
+        Assert::same($still['prompt'], 'and at what number?');
+    }
+
     #[Test]
     public function rendersATraceTreeFromTheDb(): void
     {
