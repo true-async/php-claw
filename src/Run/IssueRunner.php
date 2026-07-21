@@ -15,7 +15,6 @@ use Claw\Agent\SpeakerRole;
 use Claw\Config;
 use Claw\Exceptions\AgentException;
 use Claw\Exceptions\ClawException;
-use Claw\Exceptions\WorkflowFinished;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStoreInterface;
@@ -64,14 +63,39 @@ final readonly class IssueRunner
         A clean syntax check is not proof that a task is finished. If the project has tests covering
         what you touched, run them.
 
-        When the change exists and you have SEEN it work, call `done` with a short summary of what you
-        changed and what you ran to verify it.
+        When the change exists and you have SEEN it work, stop and say in one line what you changed
+        and what you ran to verify it. Whether the ticket counts as solved is then checked against the
+        project by someone else — so there is nothing to be gained by claiming more than you did, and
+        a claim that does not hold simply sends the ticket back.
 
         If you CANNOT finish — the ticket is unclear, it asks for something that is not there, or it
-        turns out to be far bigger than it looked — do NOT just answer in prose. Use the `[question]`
-        protocol described above: it reaches a person, and your reply comes back so you can carry on.
-        Prose with no tool call and no marker ends the attempt with nothing done, and the ticket goes
-        back for re-triage.
+        turns out to be far bigger than it looked — say so using the `[question]` protocol described
+        above: it reaches a person, and your reply comes back so you can carry on.
+        PROMPT;
+
+    /**
+     * The completion judge's brief. It decides one thing and reports it in one word, because the code
+     * branches on that word — prose about how nearly finished the work is has closed tickets before.
+     */
+    private const string JUDGE_SYSTEM = <<<'PROMPT'
+        You are checking whether a ticket has ACTUALLY been solved. Someone has just worked on this
+        project, claiming to address the ticket below. Your job is to establish whether they did.
+
+        Do not take anyone's word for it, and do not reason from what a sensible worker would have
+        done. Look: read the files the ticket is about, and RUN the thing that would prove it — the
+        project's tests, the command in the ticket, whatever settles the question. A clean syntax
+        check proves nothing. An unread file proves nothing.
+
+        Judge only the ticket in front of you. A test suite that was already failing for unrelated
+        reasons is not this ticket's problem; say so and judge what this ticket asked for.
+
+        Reply with EXACTLY one of:
+        - `SOLVED` — you ran or read something that shows the ticket's request is now satisfied. Say
+          in one further sentence what you checked and what you saw.
+        - a short sentence saying what is still missing or wrong. Nothing else: no preamble, no
+          summary of the work, no encouragement.
+
+        If you cannot establish it either way, that is NOT solved — say what you could not check.
         PROMPT;
 
     /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
@@ -287,18 +311,10 @@ final readonly class IssueRunner
             $ctx->env->find(EnvKey::Ask) instanceof SpeakerInterface ? $ctx->env->find(EnvKey::Ask) : null,
         );
 
-        // `done` is the ONLY thing that finishes this path. The turn loop returns normally whenever
-        // the model stops without calling a tool — which is what it does when it has a question, or
-        // gives up, or simply wanders off — and treating that as success closed a ticket whose
-        // description was gibberish, on the strength of the model replying "can you clarify?".
-        $declaredDone = false;
-
         try {
             $loop->run([Message::userText(
                 "Title: {$ctx->issue->title}\n\nDescription: {$ctx->issue->description}",
             )]);
-        } catch (WorkflowFinished) {
-            $declaredDone = true;
         } catch (\Cancellation $cancellation) {
             throw $cancellation;
         } catch (\Throwable $e) {
@@ -309,17 +325,19 @@ final readonly class IssueRunner
 
             return 1;
         }
+        // The worker has stopped. Whether the ticket is SOLVED is not its call — it is the one thing in
+        // the exchange with an interest in the answer. A separate pass settles it, against the project.
+        $unsolved = $this->unsolvedReason($ctx);
         $ctx->tracer->exit($span);
 
-        if (!$declaredDone) {
-            // Not a crash, so there is no error to report — the model simply never claimed the work
-            // was finished. Hand it back: the ProjectManager escalates, or decides a person is needed,
-            // which is the right answer when the ticket itself is the problem.
+        if ($unsolved !== null) {
+            // Not a crash, so there is no error to report — the work simply is not done. Hand it back:
+            // the ProjectManager escalates, or decides a person is needed, which is the right answer
+            // when the ticket itself is the problem.
             $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
             $this->giveBackToProjectManager(
                 $ctx->issue,
-                'the direct attempt ended without declaring the task done — the worker stopped without '
-                . 'calling `done`, usually because it needed something the ticket does not say',
+                "the direct attempt did not solve the ticket: {$unsolved}",
                 $ctx->runId,
             );
             $this->frontend->report(
@@ -336,6 +354,48 @@ final readonly class IssueRunner
         $this->frontend->report("Run #{$ctx->runId} finished for issue #{$ctx->issue->id}.", false);
 
         return 0;
+    }
+
+    /**
+     * Is the ticket actually solved? Null when it is; otherwise what is missing, in a sentence.
+     *
+     * This is the `direct` path's gate, and it is a SEPARATE pass on purpose. The worker used to end
+     * its own run by calling a `done` tool — a lever that let the one party with an interest in the
+     * answer give it. Every false-Done this project has paid for came through it: a run that declared
+     * victory on a clean `php -l`, one that closed a gibberish ticket on "can you clarify?", one that
+     * closed a bug after merely reproducing it. Each fix wrapped another gate around the lever instead
+     * of taking it away.
+     *
+     * The shape here is the one that already works elsewhere in this system — {@see Triage}: a plain
+     * turn loop that decides ONE thing, outside the work, with tools to check for itself, and whose
+     * answer the CODE branches on. It gets the read-only palette, so it can look and not touch.
+     */
+    private function unsolvedReason(RunContext $ctx): ?string
+    {
+        $registry = $ctx->env->findRegistry()->only(['read_file', 'list_files', 'bash']);
+        $judge = new DefaultTurnLoop(
+            $this->agent,
+            $ctx->env->child()->set(EnvKey::Registry, $registry)->executor(),
+            $ctx->env->findAgentModel('reviewer'),
+            self::JUDGE_SYSTEM,
+            $registry->specs(),
+            $this->config->maxHistory,
+            $ctx->tracer,
+        );
+
+        try {
+            $answer = trim($judge->run([Message::userText(
+                "The ticket:\nTitle: {$ctx->issue->title}\n\nDescription: {$ctx->issue->description}",
+            )])->text ?? '');
+        } catch (\Cancellation $cancellation) {
+            throw $cancellation;
+        } catch (\Throwable $e) {
+            // A judge that could not run has not cleared anything. Unproven is unsolved: the whole point
+            // is that nothing closes a ticket without a verdict, least of all the absence of one.
+            return 'the completion check could not run: ' . $e->getMessage();
+        }
+
+        return str_starts_with(strtoupper($answer), 'SOLVED') ? null : ($answer === '' ? 'the completion check returned nothing' : $answer);
     }
 
     /**
@@ -554,8 +614,6 @@ final readonly class IssueRunner
                 $solver->run();
 
                 break;
-            } catch (WorkflowFinished) {
-                break;   // the solver called `done`: a clean finish, not a crash to repair
             } catch (\Cancellation $cancellation) {
                 throw $cancellation;   // a cancelled run must stop — never "repair" a cancellation
             } catch (\Throwable $e) {

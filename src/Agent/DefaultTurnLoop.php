@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Claw\Agent;
 
 use Claw\Exceptions\ContextLengthException;
-use Claw\Exceptions\WorkflowFinished;
 use Claw\Exec\ExecutorInterface;
 use Claw\Tool\ToolCall;
 use Claw\Trace\Tracer;
@@ -159,9 +158,8 @@ final class DefaultTurnLoop implements TurnLoopInterface
                     // Stopping here leaves the turn half-done: the model asked for tools that will now
                     // never run. This history is CONTINUED later — a critic re-run, a handoff — and a
                     // tool_use with no matching tool_result is rejected outright by both backends, so
-                    // every requested call is answered before we go. The same closing the `done` path
-                    // does below, for the same reason; only this exit was missing it, and a real run
-                    // died on the 400 two steps later.
+                    // every requested call is answered before we go, or a real run dies on the 400 two
+                    // steps later — which is exactly how this was found.
                     if ($response->toolCalls !== []) {
                         $unanswered = array_map(
                             static fn (ToolUseBlock $call): ToolResultBlock => new ToolResultBlock(
@@ -215,26 +213,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
             foreach ($response->toolCalls as $call) {
                 $this->tracer?->toolCall($call->name, $call->input);
 
-                try {
-                    $result = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
-                } catch (WorkflowFinished $signal) {
-                    // `done` fired. The exchange stops here, but the conversation that led to it is the
-                    // only record of what the worker actually did, and this loop is the only place that
-                    // holds it — the step's critic reviews it. Attach it before the signal travels on.
-                    //
-                    // Every requested call still gets a result block first: this history is CONTINUED
-                    // later (a critic re-run, the handoff), and a tool_use with no matching tool_result
-                    // is rejected by both backends.
-                    foreach (\array_slice($response->toolCalls, \count($results)) as $unanswered) {
-                        $results[] = new ToolResultBlock($unanswered->id, 'the task was declared finished', false);
-                    }
-                    $history[] = new Message(Role::User, $results);
-                    $this->tracer?->toolResult($call->name, 'the task was declared finished', false);
-                    $this->tracer?->exit($turn);
-
-                    throw new WorkflowFinished($signal->summary, $history);
-                }
-
+                $result = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
                 $this->tracer?->toolResult($call->name, $result->content, $result->isError);
                 $results[] = $result;
 

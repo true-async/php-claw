@@ -21,19 +21,6 @@ use Claw\Workflow\WorkflowAbstract;
 #[LibraryWorkflow(IssueType::Bug)]
 final class FixBugWorkflow extends WorkflowAbstract
 {
-    /**
-     * What the first two steps may reach for — everything the run offers EXCEPT `done`.
-     *
-     * `done` declares the whole TASK solved and ends the run, skipping the steps that have not run.
-     * Neither reproducing a bug nor fixing it is grounds for that claim, and the critic guarding it
-     * cannot catch the mistake: it judges the step's own rubric, so a perfectly reproduced bug passes
-     * review and finishes the run with the defect still in place. Measured — a live run closed its
-     * ticket as Done after `reproduce` alone, with the failing test it had just found still failing.
-     *
-     * An instruction not to call it would be one more rule to ignore. This is the tool not being there.
-     */
-    private const array WORK_TOOLS = ['bash', 'read_file', 'write_file', 'list_files', 'recall'];
-
     public function name(): string
     {
         return 'fix-bug';
@@ -50,7 +37,7 @@ final class FixBugWorkflow extends WorkflowAbstract
      * The prohibitions in the prompt are not decoration. On its first live run this step "reproduced"
      * the bug by editing the existing test to expect the WRONG answer — the defect's own output, with
      * the comment "Test for miscalculation" — which turns the suite green and ships the bug. The
-     * critic caught it and the run stopped, but the instruction that invited it was mine: it said
+     * critic caught it and the run stopped, but the instruction that invited it was ours: it said
      * "write a test" and nothing about leaving the ones already there alone.
      */
     #[Step(critic: 'reproduced')]
@@ -78,7 +65,6 @@ final class FixBugWorkflow extends WorkflowAbstract
             . '`evidence` set to the command\'s real output, `from` set to the command itself, and a '
             . 'short `text` saying what the failure shows. If the defect genuinely cannot be reached by '
             . 'a test, say so with the `[question]` marker instead of inventing one.',
-            self::WORK_TOOLS,
         );
     }
 
@@ -98,7 +84,6 @@ final class FixBugWorkflow extends WorkflowAbstract
             . 'Make the smallest change that fixes the cause — not the symptom, and not the test. Do not '
             . 'edit the test to agree with the current behaviour: that erases the bug instead of fixing '
             . 'it. Do not refactor code the ticket did not ask about. Run the test as you go.',
-            self::WORK_TOOLS,
         );
     }
 

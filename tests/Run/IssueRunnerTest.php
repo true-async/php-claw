@@ -4,10 +4,15 @@ declare(strict_types=1);
 
 namespace Tests\Run;
 
+use Claw\Agent\AgentResponse;
+use Claw\Agent\StopReason;
+use Claw\Agent\TextBlock;
+use Claw\Agent\Usage;
 use Claw\Config;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Project\RunStatus;
+use Claw\Project\Strategy;
 use Claw\Run\IssueRunner;
 use Claw\Trace\TraceReader;
 use Claw\Workflow\WorkflowStore;
@@ -194,6 +199,76 @@ final class IssueRunnerTest
             self::rmrf($projectsDir);
             self::rmrf($projectFolder);
         }
+    }
+
+    #[Test]
+    public function theDirectPathNeedsAVerdictItCannotGiveItself(): void
+    {
+        // The worker used to end its own run by calling `done`, and every false completion this project
+        // paid for came through that lever. It is gone: the worker works, and a separate pass decides —
+        // against the project — whether the ticket is solved. Here that pass says it is not, so nothing
+        // is closed and the ticket goes back to the ProjectManager.
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+            $issue = $store->addIssue('a ticket the worker will claim to have solved');
+            $store->setStrategy($issue->id, Strategy::Direct, 'small', false);
+
+            // Two exchanges: the worker announces victory, then the judge finds nothing to back it up.
+            $agent = new ScriptedAgent(
+                self::says('Done — I made the change and it all looks right.'),
+                self::says('The file the ticket names is unchanged and no test was run.'),
+            );
+            $frontend = new RecordingRunFrontend();
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, $frontend);
+
+            Assert::same($runner->run($issue), 1);
+
+            // A worker's own say-so closes nothing.
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);
+            Assert::same($store->recentRuns()[0]['status'], RunStatus::Failed->value);
+
+            // And the reason travelling back is the judge's, not a generic failure.
+            $attempts = $store->strategyAttempts($issue->id);
+            Assert::true(str_contains($attempts[0]['outcomeReason'], 'no test was run'));
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    #[Test]
+    public function theDirectPathClosesTheTicketWhenTheVerdictIsSolved(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+            $issue = $store->addIssue('a ticket that really does get solved');
+            $store->setStrategy($issue->id, Strategy::Direct, 'small', false);
+
+            $agent = new ScriptedAgent(
+                self::says('Changed src/Thing.php and ran the tests.'),
+                self::says('SOLVED — I read src/Thing.php and ran the suite; it is green.'),
+            );
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend());
+
+            Assert::same($runner->run($issue), 0);
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Done);
+            Assert::same($store->recentRuns()[0]['status'], RunStatus::Done->value);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    /** A model turn that is plain text and calls nothing. */
+    private static function says(string $text): AgentResponse
+    {
+        return new AgentResponse([new TextBlock($text)], [], StopReason::EndTurn, new Usage(1, 1), $text);
     }
 
     /** A solver whose step fails the way a refusing model backend does — not the way broken code does. */
