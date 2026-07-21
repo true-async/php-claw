@@ -160,20 +160,39 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
      */
     protected function criticRules(): array
     {
+        $recipe = self::RECIPE;
+
         return [
             'solverReview' => "You are reviewing the GENERATED SOURCE of a solver class (the step's artifact). "
                 . 'This code is NOT executed now — it RUNS LATER against the project. So do NOT reject it for '
                 . "'no artifacts were produced' or 'the tests were not run': there are no run artifacts at "
-                . 'generation time, and that is correct — the artifact under review IS the source itself. '
-                . 'Judge ONLY whether this class, when run, will ACTUALLY solve the task below (not whether it '
-                . 'is valid PHP — the validator covers that). A step body that calls $this->ai("…", [...]) or '
-                . '$this->tool(…) IS real work — the model does the work inside that call, so such a step is '
-                . "NOT a placeholder; 'placeholder' means ONLY a bare literal return (e.g. return 'TODO';) with "
-                . 'no $this->ai()/$this->tool() call at all. REJECT only if: a step is a true placeholder (no '
-                . "ai()/tool() call); a `#[Step(critic: '<name>')]` has no matching entry in criticRules(); "
-                . 'or the recipe is plainly not carried out. '
-                . 'Otherwise reply exactly: OK.'
-                . "\n\nThe task:\n{$this->taskSummary()}",
+                . 'generation time, and that is correct — the artifact under review IS the source itself. The '
+                . 'project as it stands is not evidence about work that was never supposed to have happened '
+                . "yet, so a red test suite is not this class's fault.\n\n"
+                . 'The ONE question: when this class runs, will it ACTUALLY solve the task below? Not whether '
+                . 'it is valid PHP, and not whether it is written the way you would have written it — the '
+                . "validator covers the first and the second is not your call.\n\n"
+                . "What is NOT a defect, because reviewers keep calling it one:\n"
+                . '- A step body that calls $this->ai("…") or $this->tool(…) IS real work. The model does the '
+                . "work inside that call. A `placeholder` means a bare literal return with no such call.\n"
+                . "- Few steps. One step that implements and verifies is the intended shape for a small task.\n"
+                . "- Boilerplate: namespace, strict_types, the class declaration. Rejected at save if wrong.\n\n"
+                . "REJECT when any of these hold — and say which:\n"
+                . "- a step is a true placeholder: no ai()/tool() call at all;\n"
+                . '- the class builds the change as a PHP string and writes it (str_replace/preg_replace '
+                . 'surgery on source, a heredoc of the new file). It cannot see or fix its own mistakes '
+                . "that way, and it is how solvers corrupt files — the work must go through the model;\n"
+                . "- a step's prompt is too vague to act on: it restates the task, or names no file, no "
+                . "command and no criterion, so whatever the model does cannot be wrong;\n"
+                . '- the class does not address the task: it works on the wrong file or component, or solves '
+                . "something adjacent to what was asked;\n"
+                . '- a step whose result a critic must judge does not record it — no artifact, and for a '
+                . "claim a command settles, no evidence;\n"
+                . "- the plan below describes work this class simply does not do.\n\n"
+                . "Here is what the author was working from, so you judge against the same thing.\n\n"
+                . "The task:\n{$this->taskSummary()}\n\n"
+                . "The plan:\n{$this->plan}\n\n"
+                . "The rules it was told to follow when choosing steps:\n{$recipe}",
         ];
     }
 
@@ -246,7 +265,11 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
               step on a bad result is a CRITIC (below). So: either the model verifies-and-fixes within
               its own `ai()` exchange, or you gate the step with a critic — never a bare "verify" step.
 
-            Hard requirements (the code is validated before it is saved, and rejected if any are missed):
+            Hard requirements. Most are checked mechanically when the class is saved and cost you a
+            rejection round if missed — the opening tag and `declare(strict_types=1)`, the namespace and
+            class name, `extends WorkflowAbstract`, at least one `#[Step]`, that steps are `protected`,
+            that every critic name has rules, and the forbidden builtins. The rest are not checked by
+            anything, which makes them the ones to read twice:
             - the file must begin with the opening tag `<?php` followed by `declare(strict_types=1);`
             - namespace {$namespace};
             - `use Claw\\Workflow\\Step;` and `use Claw\\Workflow\\WorkflowAbstract;`

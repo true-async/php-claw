@@ -16,6 +16,9 @@ final class WorkflowValidatorTest
     {
         $code = <<<'PHP'
             <?php
+
+            declare(strict_types=1);
+
             namespace ClawWorkflow\Common;
 
             use Claw\Workflow\WorkflowAbstract;
@@ -53,14 +56,15 @@ final class WorkflowValidatorTest
     public function allowsForbiddenNamesAsMethods(): void
     {
         // $ctx->system(...) is a method, not the builtin — must be allowed.
-        Assert::false($this->rejected("<?php\n \$ctx->system(['x']);"));
+        Assert::false($this->rejected(self::shell("\$ctx->system(['x']);")));
     }
 
     #[Test]
     public function rejectsAWorkflowMissingNameMethod(): void
     {
         // name() is abstract; omitting it fatals (uncatchable) at class load — catch it at save.
-        $base = "<?php\n namespace ClawWorkflow\\Common;\n use Claw\\Workflow\\WorkflowAbstract;\n final class W extends WorkflowAbstract { ";
+        $base = "<?php\n declare(strict_types=1);\n namespace ClawWorkflow\\Common;\n use Claw\\Workflow\\Step;\n"
+            . " use Claw\\Workflow\\WorkflowAbstract;\n final class W extends WorkflowAbstract { #[Step] protected function go(): void {} ";
         Assert::true($this->rejected($base . '}', 'ClawWorkflow\\Common\\W'));   // no name()
         Assert::false($this->rejected($base . 'public function name(): string { return \'w\'; } }', 'ClawWorkflow\\Common\\W'));
     }
@@ -68,14 +72,77 @@ final class WorkflowValidatorTest
     #[Test]
     public function requiresStepMethodsToBeProtected(): void
     {
-        $step = static fn (string $vis): string => "<?php\n use Claw\\Workflow\\Step;\n class W { #[Step]\n {$vis} function go(): void {} }";
+        $step = static fn (string $vis): string => self::shell('', "#[Step] {$vis} function go(): void {}");
 
         Assert::true($this->rejected($step('public')));    // public leaks the step
         Assert::true($this->rejected($step('private')));   // private can't be called from the base
-        Assert::true($this->rejected("<?php\n use Claw\\Workflow\\Step;\n class W { #[Step]\n function go(): void {} }"));   // no modifier = public
+        Assert::true($this->rejected(self::shell('', '#[Step] function go(): void {}')));   // no modifier = public
         Assert::false($this->rejected($step('protected')));   // the one allowed form
-        // attribute arguments don't confuse the check
-        Assert::false($this->rejected("<?php\n use Claw\\Workflow\\Step;\n class W { #[Step(critic: 'r')]\n protected function go(): void {} }"));
+        // attribute arguments don't confuse the check — and the critic it names has rules
+        Assert::false($this->rejected(self::shell(
+            '',
+            "#[Step(critic: 'r')] protected function go(): void {}\n"
+            . "protected function criticRules(): array { return ['r' => 'the rules']; }",
+        )));
+    }
+
+    /**
+     * The structural rules the generator's prompt has always claimed were "validated before it is saved"
+     * and which nothing actually checked. Each is decidable by reading the source, so each is decided
+     * here — where a rejection costs one revision round — rather than at load or mid-run.
+     */
+    #[Test]
+    public function rejectsAWorkflowThatCouldNotRunEvenThoughItParses(): void
+    {
+        // No strict_types.
+        Assert::true($this->rejected(str_replace(' declare(strict_types=1);', '', self::shell(''))));
+
+        // No base class: none of ai()/tool()/step() exists, so it fatals on the first step call.
+        Assert::true($this->rejected(str_replace('extends WorkflowAbstract', '', self::shell(''))));
+
+        // Nothing to run at all — no #[Step] and no run() of its own. The default run() would find
+        // nothing, the run would "succeed" having done nothing, and the ticket would be closed on it.
+        Assert::true($this->rejected(self::shell('', 'protected function helper(): void {}')));
+
+        // But driving the work from an overridden run() is a first-class shape and must be accepted.
+        Assert::false($this->rejected(self::shell('', 'public function run(): void { $this->tool(\'bash\', []); }')));
+    }
+
+    /**
+     * A `#[Step(critic: 'x')]` with no 'x' in criticRules() used to be caught only by a LogicException
+     * at RUN time — mid-run, on the real project, after a human had approved the solver, discarding
+     * every step already done. It is decidable from the source, so it is decided at save.
+     */
+    #[Test]
+    public function rejectsACriticNameThatHasNoRules(): void
+    {
+        Assert::true($this->rejected(self::shell('', "#[Step(critic: 'gate')] protected function go(): void {}")));
+
+        Assert::true($this->rejected(self::shell(
+            '',
+            "#[Step(critic: 'gate')] protected function go(): void {}\n"
+            . "protected function criticRules(): array { return ['other' => 'rules for something else']; }",
+        )));
+
+        Assert::false($this->rejected(self::shell(
+            '',
+            "#[Step(critic: 'gate')] protected function go(): void {}\n"
+            . "protected function criticRules(): array { return ['gate' => 'the tests must be green']; }",
+        )));
+    }
+
+    /**
+     * A structurally valid workflow wrapped around $body, so a case can probe ONE rule without tripping
+     * the others. $extra is spliced in at class level for cases that need their own step declaration.
+     */
+    private static function shell(string $body, string $extra = '#[Step] protected function go(): void {}'): string
+    {
+        return "<?php\n declare(strict_types=1);\n namespace ClawWorkflow\\Common;\n"
+            . " use Claw\\Workflow\\Step;\n use Claw\\Workflow\\WorkflowAbstract;\n"
+            . " final class W extends WorkflowAbstract {\n"
+            . " public function name(): string { return 'w'; }\n"
+            . " {$extra}\n"
+            . " protected function body(): void { {$body} }\n }";
     }
 
     private function rejected(string $code, ?string $expectedClass = null): bool
