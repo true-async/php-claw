@@ -113,6 +113,48 @@ final class TriageTest
         });
     }
 
+    /**
+     * The verdict has a tie-break, and the type does not prescribe a procedure.
+     *
+     * Both were found by a critic and then confirmed live. The `bug` type used to read "the work has a
+     * fixed shape: reproduce it, pin it with a failing test, fix it, watch the test go green" — a
+     * procedure, which only a shelf entry or a generated solver can provide, so a model reading it
+     * seriously could never choose `direct` for a bug. Two lines later the same prompt said to judge the
+     * type from what the ticket asks for and not from its size, and called `direct` the default for
+     * anything small. The two pulled opposite ways.
+     *
+     * Live evidence: a ticket whose fix was one expression — a lost unary minus — came back `library`.
+     *
+     * And "anything small" is an adjective, not a test. Two verdicts could fit one ticket with nothing
+     * saying which won.
+     */
+    #[Test]
+    public function theStrategyListSaysHowToChooseBetweenTwoThatFit(): void
+    {
+        $this->withProject(function (ProjectStore $store, Config $config): void {
+            $issue = $store->addIssue('something small is broken');
+            $agent = new ScriptedAgent(
+                new AgentResponse([new TextBlock('thinking')], [], StopReason::EndTurn, new Usage(1, 1), 'thinking'),
+                new AgentResponse([new TextBlock('thinking')], [], StopReason::EndTurn, new Usage(1, 1), 'thinking'),
+            );
+
+            new Triage($store, $config, $agent)->analyse($issue);
+            $system = $agent->requests[0]->system;
+
+            // An operational test for `direct`, not an adjective.
+            Assert::true(str_contains($system, 'CAN YOU NAME THE FILES IT TOUCHES'));
+
+            // And a stated order for when two verdicts both fit, which is the common case for a small
+            // bug: `direct` and `library` would each have been defensible.
+            Assert::true(str_contains($system, 'CHEAPEST FIRST'));
+            Assert::true(str_contains($system, 'when two fit, take the earlier one'));
+
+            // The type describes the ticket; it does not smuggle in a procedure.
+            Assert::false(str_contains($system, 'pin it with a failing test'));
+            Assert::true(str_contains($system, 'The type never decides the strategy'));
+        });
+    }
+
     /** The ticket brief — the first user message the ProjectManager was handed. */
     private static function firstUserText(ScriptedAgent $agent): string
     {
