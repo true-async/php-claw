@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace Tests\Knowledge;
 
+use Claw\Http\HttpResponse;
 use Claw\Knowledge\EmbedderInterface;
 use Claw\Knowledge\Indexer;
 use Claw\Knowledge\KnowledgeIndex;
 use Claw\Knowledge\NoteParser;
+use Claw\Knowledge\OpenAiEmbedder;
 use Claw\Tool\KnowledgeTool;
 use Testo\Assert;
 use Testo\Test;
+use Tests\Support\ScriptedHttpClient;
 
 final class KnowledgeBaseTest
 {
@@ -212,6 +215,81 @@ final class KnowledgeBaseTest
             // A tag nobody uses says so, and points at the action that lists the real ones.
             $none = $tool->handle(['action' => 'search', 'query' => 'deploy', 'tag' => 'nonexistent']);
             Assert::true(str_contains($none, "action='tags'"));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
+     * The embedder attaches each vector to the chunk it was asked for, BY INDEX.
+     *
+     * The API documents an `index` field precisely because the order of the response array is not
+     * promised. A batch that came back reordered and was read positionally would give every chunk
+     * somebody else's vector — a base that retrieves confidently and wrongly, with nothing anywhere to
+     * see. Narrow vectors are asked for on purpose: the scan's cost is the vector's width.
+     */
+    #[Test]
+    public function theEmbedderOrdersVectorsByIndexAndNotByArrival(): void
+    {
+        // The provider answers out of order deliberately: index 1 first, then index 0.
+        $body = json_encode(['data' => [
+            ['index' => 1, 'embedding' => [0.0, 1.0]],
+            ['index' => 0, 'embedding' => [1.0, 0.0]],
+        ]]);
+
+        $http = new ScriptedHttpClient(new HttpResponse(200, (string) $body));
+        $embedder = new OpenAiEmbedder($http, 'https://api.example/v1', 'k', dimensions: 2);
+
+        Assert::same($embedder->embed(['first', 'second']), [[1.0, 0.0], [0.0, 1.0]]);
+        Assert::same($embedder->dimensions(), 2);
+
+        // A batch that comes back short is refused rather than quietly indexing half a note.
+        $short = new ScriptedHttpClient(new HttpResponse(200, (string) json_encode(['data' => [
+            ['index' => 0, 'embedding' => [1.0, 0.0]],
+        ]])));
+        $threw = false;
+
+        try {
+            new OpenAiEmbedder($short, 'https://api.example/v1', 'k', dimensions: 2)->embed(['a', 'b']);
+        } catch (\Claw\Exceptions\ClawException $e) {
+            $threw = str_contains($e->getMessage(), 'asked for 2');
+        }
+
+        Assert::true($threw);
+    }
+
+    /**
+     * The tool is offered to a run only when it can actually work.
+     *
+     * It was built and wired to nothing at all — a tested library with no callers, which is the way a
+     * feature ships looking finished and being unreachable. Now it reaches a run, and only under the two
+     * conditions that make it useful: the project has notes, and there is something to embed with.
+     * Offering it otherwise gives a model a tool whose every answer is "nothing is written down", which
+     * it will try several times before believing.
+     */
+    #[Test]
+    public function theToolReachesARunOnlyWhenTheProjectHasNotesAndAnEmbedder(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $project = new \Claw\Project\Project('p1', 'Demo', $dir);
+            $workspace = new \Claw\Tool\Workspace($dir);
+            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
+            $embedder = new KeywordEmbedder();
+
+            // No kb/ folder yet: nothing to search, so nothing is offered.
+            $bare = \Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, $embedder);
+            Assert::false($bare->has('knowledge'));
+
+            mkdir($dir . '/kb');
+            file_put_contents($dir . '/kb/one.md', "# One\n\nA note.\n");
+
+            // Notes but no embedder: every call would fail identically, so still nothing.
+            Assert::false(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, null)->has('knowledge'));
+
+            // Both present — the run gets it.
+            Assert::true(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, $embedder)->has('knowledge'));
         } finally {
             self::rmrf($dir);
         }
