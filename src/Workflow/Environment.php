@@ -10,6 +10,7 @@ use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Exec\ChainExecutor;
 use Claw\Exec\ExecutorInterface;
+use Claw\Exec\TimeoutMiddleware;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 
@@ -92,13 +93,39 @@ final class Environment
      * a call against this scope's {@see Registry} and runs it. A narrowed scope holds a narrowed
      * registry (see {@see Registry::only()}), so the executor shares the same palette: a tool
      * outside it cannot be resolved, hence cannot run — visibility and execution can no longer
-     * disagree. Permission/audit middleware is the run-path's to add; an autonomous run is allow-all.
+     * disagree.
+     *
+     * What guards a call here, and what does not:
+     *
+     *  - a per-tool TIMEOUT, when {@see EnvKey::ToolTimeoutMs} is set. Added because it was the one
+     *    missing guard with no decision behind it: a hung tool is nobody's intended behaviour.
+     *  - AUDIT is not a middleware here and does not need to be. The chat path logs to its session
+     *    store; a run is traced instead — {@see \Claw\Trace\Tracer} records every tool call and its
+     *    result into the project database, which is the same record kept by a different door.
+     *  - PERMISSION is still absent, and deliberately so rather than by oversight. The gate in
+     *    {@see \Claw\Permission\PermissionMiddleware} asks a person, and an autonomous run has none by
+     *    definition; what it should do instead — refuse, consult the supervisor, or record and allow —
+     *    is a policy nobody has chosen yet. See `dev/TODO.md`.
      */
     public function executor(): ExecutorInterface
     {
         $registry = $this->findRegistry();
+        $middlewares = [];
 
-        return new ChainExecutor([], static function (ToolCall $call) use ($registry): ToolResultBlock {
+        // Bound ONE tool run. Without it the only clock on the autonomous path is the run's total budget,
+        // which a hung `bash` does not tick: a subprocess waiting on a prompt that will never come, or on
+        // a network read with no timeout of its own, holds the coroutine for as long as the process lives
+        // and the budget's seconds are never checked because nothing returns to check them. The cap kills
+        // the subprocess through TrueAsync cancellation and hands the model an error it can act on.
+        //
+        // Innermost, so it caps the tool and not anything wrapped around it.
+        $timeout = $this->find(EnvKey::ToolTimeoutMs);
+
+        if (\is_int($timeout) && $timeout > 0) {
+            $middlewares[] = new TimeoutMiddleware($timeout);
+        }
+
+        return new ChainExecutor($middlewares, static function (ToolCall $call) use ($registry): ToolResultBlock {
             try {
                 return new ToolResultBlock($call->id, $registry->get($call->name)->handle($call->input), false);
             } catch (ToolException $e) {

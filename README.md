@@ -58,9 +58,17 @@ project ──▶ issue ──▶ run
   (`NO_COLOR` or a pipe turns it plain).
 
 The agents reach the host through a **tool layer** — `define_workflow` (write a new workflow),
-`done` (declare the task solved), `recall` (read back what a sibling step/tool/artifact did),
-plus `bash`, `read_file`, `write_file`, `list_files` — and every tool call passes through a
-middleware chain (permission gatekeeper, audit log, per-tool timeout).
+`recall` (read back what a sibling step/tool/artifact did), `artifact` (record what this step
+produced, and run the command whose output proves it), plus `bash`, `read_file`, `write_file`,
+`list_files`.
+
+Every call goes through an executor chain, and what guards it differs by path. The interactive
+chat has the full set: a permission gatekeeper that asks you, an audit log, and a per-tool
+timeout. An autonomous run has the timeout, and is traced instead of audited — every call and
+result is written to the project database. It has **no permission gate**: that gate asks a
+person, and an autonomous run has none. What it should do instead is an open question in
+[`dev/TODO.md`](dev/TODO.md), and until it is answered a run's `bash` is unrestricted inside the
+project folder you point it at.
 
 ## Architecture at a glance
 

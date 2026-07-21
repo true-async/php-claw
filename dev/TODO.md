@@ -3,16 +3,23 @@
 Ordered by value, not by effort. An entry leaves this file when it lands in
 [`DECISIONS.md`](DECISIONS.md) or turns out to be wrong.
 
-Items 1–3 came from reading the [Electric Agents](https://electric.ax/docs/agents/)
+Items 1–2 came from reading the [Electric Agents](https://electric.ax/docs/agents/)
 documentation and asking what of it applies to a single-process runtime. We are not
 adopting their architecture — only the invariants that fix something already broken here.
 
 ## 1. Waiting must live in the database, not on a stack
 
-**Now:** `HttpGateSpeaker` parks the run coroutine on an `Async\Channel` and blocks until
-`POST …/answer` pushes a reply. The wait exists only as a suspended stack frame. Restart
-the process and the run is gone, while the ticket still reads `WaitingHuman` — the ledger
-claims a wait that nobody is serving.
+**Half done (#56).** A cold start no longer strands the ticket: `TraceReader::openGate()` finds a
+run's unanswered question, the ledger can name the runs it still calls Running, and the server
+settles them at startup and hands each ticket back to Open. The wait is visible and the ticket is
+re-runnable.
+
+**What is left:** the run is not RESUMED. `HttpGateSpeaker` still parks its coroutine on an
+`Async\Channel`, and an answer that arrives while no process is serving that gate has nowhere to
+go. Picking the run back up and delivering it needs a durable record of which answers have already
+been consumed — otherwise a resumed run either re-asks a question that was answered, or eats the
+same answer twice. The state store now carries a step's in-flight exchange (#57); this is one more
+thing it should hold.
 
 **Wanted:** waiting is a persisted state like any other. The channel stays, but demoted to
 what it actually is — the runtime mechanism that delivers the answer to a live process,
@@ -26,23 +33,7 @@ new mechanism, it is one more state the existing snapshot has to be able to hold
 handler. State lives in a durable log and the handler is re-entered with a `wake` describing
 why. We want the invariant, not the runtime.
 
-## 2. Idempotency of a step — half exists, the contract does not
-
-**What we already have:** resumability. The snapshot records which steps finished, and a
-resumed run skips them.
-
-**What we do not have:** safety against a step re-running. A crash *inside* a step replays
-that whole step, and the database does not undo the effects it already had — an appended
-file, a created ticket, a pushed commit. Nothing anywhere states that a step must survive
-being executed twice with the same input, so nothing checks it.
-
-**Wanted:** make it an explicit contract of the workflow DSL — a step body must be safe to
-re-execute — and have `WorkflowValidator` reject the shapes that obviously break it.
-
-**Prior art:** Electric documents at-least-once delivery and requires handlers to be safe
-for re-execution with identical inputs. The requirement is stated, so it can be relied on.
-
-## 3. Keep secrets out of prompts
+## 2. Keep secrets out of prompts
 
 **The exposure:** `Tracer::prompt()` records the prompt text, and tool spans record full
 tool input and output, into the project database (`src/Trace/Tracer.php`, `Level::Debug`).
@@ -61,27 +52,27 @@ secret in its prompt or message, because those are persisted durably. The manage
 credential, calls the authenticated API itself, and passes only the resulting data down to
 the worker. The privilege stays with the coordinator; the worker gets facts.
 
-## 4. MCP — client, and later server
+## 3. MCP — client, and later server
 
 Neither exists today: zero references across `src/`, `config/`, `workflows/`, `bin/`.
 As a client this buys the existing tool ecosystem without writing a `ToolInterface`
 implementation per integration; `Registry::only()`/`with()` already models least-privilege
 palettes, so imported tools have somewhere to land.
 
-## 5. Knowledge base
+## 4. Knowledge base
 
 `KnowledgeBaseInterface` documents Obsidian-flavoured markdown plus sqlite-vec retrieval
 and has no implementation and no caller. Today the only memory that survives a run is
 procedural — the generated solver classes in `WorkflowStore`. Declarative memory is the
 gap: what was learned about a project, as opposed to what code was written for it.
 
-## 6. The WebSocket channel
+## 5. The WebSocket channel
 
 `/api/ws` is meant to be *the* live transport — one connection, rooms for topics, SSE kept
 only as a fallback. It is the newest surface in `Server.php` and the least finished. Four
 things, in the order they hurt. The first two are defects, not tuning.
 
-### 6a. The connection has no heartbeat, so a dead one looks alive
+### 5a. The connection has no heartbeat, so a dead one looks alive
 
 `handleWs()` is `foreach ($ws as $message)` — it blocks on inbound frames and never sends
 anything unprompted (`src/Server.php:745`). A dashboard that has subscribed and is watching
@@ -93,7 +84,7 @@ The SSE paths already solved this — a comment frame every ~10s (`src/Server.ph
 The WS path needs the same: a server-side ping on an idle timer, and a client that reconnects
 when pongs stop. Until then, "live over one connection" is true only while traffic flows.
 
-### 6b. Only run traces resume; boards do not
+### 5b. Only run traces resume; boards do not
 
 `wsSubscribe()` replays the journal past `since` — but only for a topic matching
 `project/{key}/run/{id}/trace` (`src/Server.php:783-794`). A board room
@@ -108,7 +99,7 @@ first, and there is a race between that snapshot and the subscription taking eff
 Boards need what traces already have: a cursor a subscriber can resume from, so subscribe
 alone is enough to arrive at a correct board.
 
-### 6c. Board updates are polled, not pushed
+### 5c. Board updates are polled, not pushed
 
 `broadcastBoards()` walks every project, reloads all of its issues from SQLite, diffs them,
 then sleeps two seconds — for the server's lifetime, whether or not anyone is connected
@@ -120,12 +111,12 @@ The write should announce itself, with two controls borrowed from Electric's wak
 **coalescing** (a burst arriving during a publish merges into one send — a run touching a
 ticket ten times in a second is one board frame, not ten) and **`debounceMs`** (send once
 the changes stop, so bursts settle into one frame while a lone change still lands in
-milliseconds). The periodic tick then survives only as 6a's heartbeat.
+milliseconds). The periodic tick then survives only as 5a's heartbeat.
 
 Note this mostly deletes the diff-against-`$sent` bookkeeping rather than optimising it —
-and it interacts with 6b, since a pushed board still needs a resume cursor. One change.
+and it interacts with 5b, since a pushed board still needs a resume cursor. One change.
 
-### 6d. Two transports doing the same job
+### 5d. Two transports doing the same job
 
 The run trace and the board each exist twice — once as SSE with `Last-Event-ID`, once as a
 WS room — with the same seq de-duplication implemented on both paths. Every fix above has to
@@ -139,7 +130,7 @@ whether SSE stays a real fallback or goes; not worth carrying two of everything 
 (`src/Server.php:752`, `768`) — no error frame goes back, so a client that typos a topic
 waits forever on silence with nothing to debug.
 
-## 7. Stated but not true — a backend, a guard, a route table
+## 6. Stated but not true — a backend, a guard, a route table
 
 Same shape as the prompt defects closed in #42–#49, one layer out: not a prompt promising what the code will not do, but
 the configuration, the README and `ARCHITECTURE.md` promising it. Each was confirmed against
@@ -155,23 +146,25 @@ documented backends is a null every one of the five call sites has to defend aga
 it or stop offering it; the current state costs a null branch everywhere and gives a user who
 follows `.env.example` a failure at run time.
 
-**The autonomous path has no middleware at all.** `Environment::executor()` builds
-`new ChainExecutor([], …)` — an empty chain (`src/Workflow/Environment.php:101`). No permission
-gate, no audit record, no per-tool timeout on the path where a model runs unattended in a real
-project folder. `PermissionMiddleware`, `AuditMiddleware` and `TimeoutMiddleware` exist and are
-wired only on the legacy chat path, where a human is watching every call anyway — the
-protection is present exactly where it is least needed.
+**The autonomous path has no permission gate**, and this is now the only part of that gap left.
+The timeout was added and the README corrected; audit turned out not to be missing at all — a
+run is TRACED, and `Tracer` writes every tool call and result to the project database, which is
+the same record the chat keeps through a different door.
 
-`README.md:62` states the opposite: "every tool call passes through a middleware chain
-(permission gatekeeper, audit log, per-tool timeout)". `ARCHITECTURE.md` describes the real
-situation. A reader who trusts the README believes the autonomous runner is guarded.
+What remains needs a decision, not code. `PermissionMiddleware` asks a PERSON, and an autonomous
+run has none by definition. So one of:
 
-Fixing the sentence is five minutes and makes the gap honest. Fixing the gap is the actual
-work, and it is the same conversation as item 3 — an unguarded `bash` in the project folder
-and a durable journal of everything said to the model are two halves of one security story.
+- **refuse** anything the policy would have prompted for — safest, and it will stop real work
+  the first time a solver needs a command the policy has not seen;
+- **consult the supervisor**, which is the tier already built for exactly this shape of question
+  and which can now read the project for itself;
+- **record and allow**, which is today's behaviour made explicit rather than accidental.
+
+Same conversation as item 2: an unrestricted `bash` in the project folder and a durable journal
+of everything said to the model are two halves of one security story.
 
 **The route table is behind the code.** `ARCHITECTURE.md:212-223` lists nine routes. Missing:
-the whole `/api/ws` WebSocket endpoint (item 6's subject), `POST issues/{id}/close|stop|delete`,
+the whole `/api/ws` WebSocket endpoint (item 5's subject), `POST issues/{id}/close|stop|delete`,
 and `artifact-file`. The document is the knowledge map — a map that omits the primary live
 transport sends the next reader to the fallback.
 
@@ -188,4 +181,4 @@ transport sends the next reader to the fallback.
   children instead of `Decompose` filing tickets somebody starts later. Blocked: there is no
   concurrency inside a run, `Async\spawn` appears nowhere in `src/Workflow/`. Revisit if that
   changes. (The debounce and coalescing half of the same idea is *not* blocked on this and
-  moved up to item 6.)
+  moved up to item 5.)
