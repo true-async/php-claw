@@ -63,6 +63,47 @@ final class DecomposeTest
         });
     }
 
+    /**
+     * The splitter is given ONE action, and refused the rest — not asked politely to avoid them.
+     *
+     * It opens sub-issues; each is triaged afterwards by a pass that has the shelf and the escalation
+     * ledger this one does not. Handed the whole `project_manager` surface — which its own description
+     * advertises — a model that has just opened eight tickets is one helpful impulse from setting
+     * strategies on them, closing the parent, or parking it when the split feels hard. None of those
+     * are decisions it knows enough to make here, and a rule in a prompt is not what stops it.
+     */
+    #[Test]
+    public function theSplitterIsOfferedOnlyTheActionItNeeds(): void
+    {
+        $this->withProject(function (ProjectStore $store, Config $config): void {
+            $issue = $store->addIssue('a ticket too big for one run');
+            $agent = new ScriptedAgent(self::says('thinking'));
+
+            new Decompose($store, $config, $agent)->split($issue);
+
+            // The schema hides everything else, so the model is not told the others exist.
+            $spec = $agent->requests[0]->tools[0] ?? null;
+            Assert::true($spec !== null);
+            Assert::same($spec->inputSchema['properties']['action']['enum'] ?? null, ['create_issue']);
+
+            // And an action remembered from another pass is refused at the door, not merely unlisted.
+            $tool = new \Claw\Tool\ProjectManagerTool($store, only: ['create_issue']);
+            $refused = '';
+
+            try {
+                $tool->handle(['action' => 'close_issue', 'issue' => $issue->id]);
+            } catch (\Claw\Exceptions\ToolException $e) {
+                $refused = $e->getMessage();
+            }
+
+            Assert::true(str_contains($refused, 'not available in this pass'));
+
+            // The one it does need still works.
+            $tool->handle(['action' => 'create_issue', 'title' => 'a piece', 'parent' => $issue->id]);
+            Assert::count($store->childIssues($issue->id), 1);
+        });
+    }
+
     private static function says(string $text): AgentResponse
     {
         return new AgentResponse([new TextBlock($text)], [], StopReason::EndTurn, new Usage(1, 1), $text);

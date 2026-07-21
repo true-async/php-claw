@@ -37,10 +37,32 @@ final readonly class ProjectManagerTool implements ToolInterface
      *                                       first, then the project's own. Empty means nothing ready-made
      *                                       exists, and that strategy simply cannot be recorded.
      */
+    /**
+     * @param list<\Claw\Workflow\WorkflowStore> $libraries the shelves a `library`/`approach` verdict is checked against
+     * @param list<string>                        $only      the actions this instance offers; empty = all of them
+     */
     public function __construct(
         private ProjectStoreInterface $store,
         private array $libraries = [],
+        private array $only = [],
     ) {
+    }
+
+    /**
+     * Is this action offered by this instance?
+     *
+     * The narrowing exists because a pass that needs one action should be given one action. {@see
+     * \Claw\Run\Decompose} splits a ticket and needs `create_issue` — and was handed the whole surface,
+     * with `set_strategy`, `close_issue` and `needs_human` advertised in the tool's own description, one
+     * helpful impulse away from routing the sub-issues it had just opened. Their triage runs later, with
+     * the shelf and the escalation ledger this pass does not have.
+     *
+     * A rule in a prompt asking a model not to use a capability is not a fence — this codebase says so
+     * about permissions elsewhere and it is no truer here. Not offering it is.
+     */
+    private function offers(string $action): bool
+    {
+        return $this->only === [] || \in_array($action, $this->only, true);
     }
 
     public function name(): string
@@ -76,7 +98,10 @@ final readonly class ProjectManagerTool implements ToolInterface
             'properties' => [
                 'action' => [
                     'type' => 'string',
-                    'enum' => ['create_issue', 'set_strategy', 'needs_human', 'report_failure', 'close_issue', 'reopen_issue'],
+                    'enum' => array_values(array_filter(
+                        ['create_issue', 'set_strategy', 'needs_human', 'report_failure', 'close_issue', 'reopen_issue'],
+                        $this->offers(...),
+                    )),
                     'description' => 'what to do to the ticket ledger',
                 ],
                 'issue' => ['type' => 'string', 'description' => 'the issue id to act on; not used by create_issue'],
@@ -131,6 +156,16 @@ final readonly class ProjectManagerTool implements ToolInterface
         // is turned into a ToolException here, because that is the ONLY exception the executor converts
         // into a tool result. Anything else escaping this method kills the whole run instead of coming
         // back to the model as text it can read and act on.
+        // A narrowed instance refuses at the door rather than at the schema alone. The enum already
+        // hides what is not offered, but a model that remembers an action from another pass would
+        // otherwise reach it — and a fence that only hides is not a fence.
+        if (!$this->offers($action)) {
+            throw new ToolException(
+                "project_manager: action '{$action}' is not available in this pass (use "
+                . implode('|', $this->only) . ')',
+            );
+        }
+
         try {
             return match ($action) {
                 'create_issue' => $this->createIssue($input),

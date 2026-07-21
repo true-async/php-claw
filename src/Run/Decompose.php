@@ -119,7 +119,12 @@ final readonly class Decompose
     public function split(Issue $issue): array
     {
         $registry = new Registry();
-        $registry->add(new ProjectManagerTool($this->store));
+        // ONE action, and not because the prompt asks nicely. This pass opens sub-issues; each of them
+        // is triaged afterwards, by a pass that has the shelf and the escalation ledger this one does
+        // not. Handed the whole surface, a model that has just opened eight tickets is one helpful
+        // impulse from setting strategies on them, or closing the parent, or parking it when the split
+        // feels hard — none of which it knows enough to decide here.
+        $registry->add(new ProjectManagerTool($this->store, only: ['create_issue']));
 
         foreach ($this->readOnlyTools() as $tool) {
             $registry->add($tool);
