@@ -21,11 +21,14 @@ use Claw\Workflow\WorkflowValidator;
  */
 final class ToolFactory
 {
-    public static function forRun(Project $project, Workspace $workspace): Registry
+    public static function forRun(Project $project, Workspace $workspace, ?Secrets $secrets = null): Registry
     {
         $registry = new Registry();
-        $registry->add(new BashTool($project->path));
-        $registry->add(new ReadFileTool($workspace));
+        $registry->add(new BashTool($project->path, $secrets));
+        // Reading is guarded too: a secret leaves through a FILE the run wrote (a token in `.git/config`,
+        // a credential cache under the project-rooted $HOME) far more easily than through a command's
+        // output. See ReadFileTool::handle().
+        $registry->add(new ReadFileTool($workspace, secrets: $secrets));
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
 
