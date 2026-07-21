@@ -21,6 +21,7 @@ use Claw\Project\ProjectStoreInterface;
 use Claw\Project\RunStatus;
 use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
+use Claw\Run\OrphanVerdict;
 use Claw\Run\Triage;
 use Claw\Trace\TraceBus;
 use Claw\Trace\Tracer;
@@ -159,27 +160,21 @@ final class Server
             }
 
             foreach ($store->runningRuns() as $run) {
-                // A run that was WAITING is left exactly as it is. Its question is in the journal, the
-                // ticket still says a person is expected, and that is all true — the only thing missing
-                // was a process, and answering now brings one back (see answer()). Settling it here would
-                // throw away a question somebody may be about to reply to.
-                if ($reader->openGate($run['id']) !== null) {
+                // The decision itself lives in OrphanVerdict, away from the spawning and the echoing,
+                // because it needs no event loop and therefore can be tested. Getting it wrong costs
+                // something different each way: settle a waiting run and a person's reply has nowhere to
+                // land; resume a finished one and it works for nothing.
+                $verdict = OrphanVerdict::forRun($store, $reader, $run['id'], $run['issue']);
+
+                if ($verdict === OrphanVerdict::Waiting) {
                     echo "  waiting: run #{$run['id']} is at its gate; answering it will resume the run\n";
 
                     continue;
                 }
 
-                // A run interrupted mid-work is PICKED BACK UP, not written off. Everything needed for
-                // that is already durable: the snapshot says which steps finished, the exchange says
-                // where the step it died in had got to, and the ledger row is still Running — which is
-                // exactly what IssueRunner treats as "resume this, do not start a new one".
-                //
-                // It used to be marked failed and handed back to a person, which was honest but wasteful:
-                // the work was all there, and a restart is not a reason to throw it away and pay to do it
-                // again. Failing is now only for a run we cannot revive.
                 $issue = $store->loadIssue($run['issue']);
 
-                if ($issue->status === IssueStatus::Done) {
+                if ($verdict === OrphanVerdict::Settle) {
                     $store->setRunStatus($run['id'], RunStatus::Failed);
 
                     continue;   // the ticket is settled; the row is just stale
