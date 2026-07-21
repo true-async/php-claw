@@ -15,6 +15,15 @@ use Claw\Exceptions\ToolException;
  */
 final readonly class BashTool implements ToolInterface
 {
+    /**
+     * Signal numbers rather than `SIGTERM`/`SIGKILL`, because those constants come from `pcntl` and this
+     * has to work without it — CI runs a build that does not load it, which is where the difference was
+     * found. The numbers are fixed by POSIX on every platform this runs on.
+     */
+    private const int SIG_TERM = 15;
+
+    private const int SIG_KILL = 9;
+
     public function __construct(
         private string $cwd,
         private ?Secrets $secrets = null,
@@ -206,18 +215,18 @@ final readonly class BashTool implements ToolInterface
     private static function kill($process, int $pid): void
     {
         if ($pid > 0 && \function_exists('posix_kill')) {
-            @posix_kill(-$pid, \SIGTERM);   // negative pid = the whole process group
+            @posix_kill(-$pid, self::SIG_TERM);   // negative pid = the whole process group
         }
 
-        @proc_terminate($process, \SIGTERM);
+        @proc_terminate($process, self::SIG_TERM);
         \Async\delay(100);
 
         if (@proc_get_status($process)['running']) {
             if ($pid > 0 && \function_exists('posix_kill')) {
-                @posix_kill(-$pid, \SIGKILL);
+                @posix_kill(-$pid, self::SIG_KILL);
             }
 
-            @proc_terminate($process, \SIGKILL);
+            @proc_terminate($process, self::SIG_KILL);
         }
     }
 
