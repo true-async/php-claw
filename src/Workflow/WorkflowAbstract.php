@@ -69,6 +69,21 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private string $currentStep = '';
 
     /**
+     * True while a CRITIC's exchange is running — which happens inside the step it is reviewing, so
+     * {@see $currentStep} still names that step.
+     *
+     * It exists because the step's persisted exchange is keyed by step, and the critic would otherwise
+     * overwrite the worker's conversation with its own. Seen on a live run: the saved exchange for a
+     * step contained "You are a REVIEWER of a workflow step…". Had the process died there, the resumed
+     * step would have been handed the reviewer's conversation as its own — a worker continuing a
+     * critique of itself, which is nonsense arriving in a form that looks like context.
+     *
+     * A critic's exchange is not worth persisting anyway: re-reviewing is cheap and, unlike the work,
+     * repeating it costs nothing that was already achieved.
+     */
+    private bool $reviewing = false;
+
+    /**
      * The handoff fed into the current step's model context — what the previous step handed on. Formed
      * lazily from {@see $pendingHandoff} on the first ai() call of a step, and persisted as it is formed
      * so a resume (a fresh process whose in-memory history is gone) can {@see loadHandoff()} it back
@@ -723,6 +738,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // has no idea what a step is; it only knows a turn has landed.
             /** @param list<Message> $history */
             function (array $history): void {
+                if ($this->reviewing) {
+                    return;   // a critic's conversation is not the step's; see $reviewing
+                }
+
                 $this->env->findStore()->saveExchange($this->runId, $this->currentStep, $history);
             },
         );
@@ -991,6 +1010,18 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * reviewable output — its rendered artifacts (`$output`, see {@see renderArtifacts()}).
      */
     private function critic(string $name, string $rubric, string $artifacts): ?string
+    {
+        $this->reviewing = true;
+
+        try {
+            return $this->judge($name, $rubric, $artifacts);
+        } finally {
+            $this->reviewing = false;
+        }
+    }
+
+    /** The review itself — {@see critic()} only marks the exchange as a reviewer's and unmarks it after. */
+    private function judge(string $name, string $rubric, string $artifacts): ?string
     {
         $verdict = trim($this->ai(
             $this->criticRole() . "\n\n"

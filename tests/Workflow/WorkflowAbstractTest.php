@@ -1412,6 +1412,71 @@ final class WorkflowAbstractTest
         Assert::same($store->loadExchange('r1', 'implement'), []);
     }
 
+    /**
+     * A critic must not overwrite the exchange of the step it is reviewing.
+     *
+     * Found on a live run, not by reading: a server was killed mid-step and restarted, and the exchange
+     * saved for that step turned out to hold "You are a REVIEWER of a workflow step…". The critic runs
+     * INSIDE the step it judges, so `currentStep` still names that step, and its conversation was
+     * landing under the same key.
+     *
+     * Had the process died during a review, the resumed step would have been handed the reviewer's
+     * conversation as its own — a worker continuing a critique of itself, which is nonsense arriving in
+     * the shape of context. A critic's exchange is not worth keeping anyway: re-reviewing is cheap, and
+     * unlike the work, repeating it costs nothing that was already achieved.
+     */
+    #[Test]
+    public function aCriticDoesNotOverwriteTheExchangeOfTheStepItReviews(): void
+    {
+        $store = new InMemoryStateStore();
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),   // the step
+            $this->answer('OK'),         // the critic
+        );
+
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the work must be fine'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function make(): void
+            {
+                $this->ai('do it');
+                $this->artifact('work', text: 'done');
+            }
+
+            /** Run only the step, so the exchange is still there to look at afterwards. */
+            public function only(): void
+            {
+                $this->step('make');
+            }
+        };
+
+        $wf->only();
+
+        // The step completed, so its exchange is cleared — the interesting part is WHAT was cleared, so
+        // look at what the store holds for the step while the critic was the last thing to speak.
+        $left = $store->loadExchange('r1', 'make');
+        $text = '';
+
+        foreach ($left as $message) {
+            foreach ($message->content as $block) {
+                if ($block instanceof TextBlock) {
+                    $text .= $block->text;
+                }
+            }
+        }
+
+        Assert::false(str_contains($text, 'REVIEWER'));
+    }
+
     /** A two-step relay workflow whose steps each make one ai() call — for handoff/resume cases. */
     private function relay(Environment $env): WorkflowAbstract
     {
