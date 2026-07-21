@@ -154,10 +154,161 @@ final class DefaultTurnLoopTest
     }
 
     #[Test]
-    public function aToolFailingWithDifferentErrorsIsLeftToKeepIterating(): void
+    public function aRedCommandCountsAsAFailedAttemptEvenThoughTheToolCallSucceeded(): void
     {
-        // A tool failing with a DIFFERENT error each time is the model iterating toward a fix — the
-        // circuit-breaker must NOT trip on that; only the far turn cap stops it.
+        // The signal the counter exists for. A non-zero exit is not a tool error — `bash` ran fine and
+        // returned `[exit 1]` with the output — so `isError` is false and nothing marked it as anything.
+        // Yet that IS the attempt worth counting: it is what "I tried and it did not work" looks like,
+        // and it is exactly the shape a step re-running a test suite produces.
+        $agent = new class () implements AgentInterface {
+            public int $calls = 0;
+
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $this->calls++;
+                $use = new ToolUseBlock('t' . $this->calls, 'bash', []);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $n = 0;
+        $executor = new RecordingExecutor(
+            // A successful tool call reporting a failed command, different every time — by reference, or
+            // the text would repeat and the OTHER guard would answer for this one.
+            static function (ToolCall $call) use (&$n): ToolResultBlock {
+                return new ToolResultBlock($call->id, "[exit 1]\nfailure #" . (++$n), false);
+            },
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::same($agent->calls, 4);
+    }
+
+    #[Test]
+    public function fourDifferentCommandsFailingOnceEachIsNotOneCommandFailingFourTimes(): void
+    {
+        // Every shell command in this system rides ONE tool, so counting failures by tool NAME would
+        // read four unrelated probes as a wedge. Failing commands are ordinary: `grep` exits 1 on no
+        // match, `ls` on a missing path — and this project's own bug workflow ORDERS a step to run a
+        // test and watch it fail. Keyed by name, the guard would have hanged the workflow it was
+        // written to protect.
+        $agent = new class () implements AgentInterface {
+            public int $calls = 0;
+
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $this->calls++;
+
+                if ($this->calls > 6) {
+                    return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(1, 1), 'done');
+                }
+
+                // a different command every turn, each failing once
+                $use = new ToolUseBlock('t' . $this->calls, 'bash', ['command' => 'probe ' . $this->calls]);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $n = 0;
+        $executor = new RecordingExecutor(
+            static function (ToolCall $call) use (&$n): ToolResultBlock {
+                return new ToolResultBlock($call->id, "[exit 1]\nno match #" . (++$n), false);
+            },
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::same($agent->calls, 7);   // ran to its own conclusion; no two attempts were the same
+    }
+
+    #[Test]
+    public function aStoppedExchangeSaysSoInItsOwnHistory(): void
+    {
+        // The stop must be visible to whatever reads the history next — the handoff the engine forms by
+        // CONTINUING this conversation, then the critic, then a person reading the trace. Ending on an
+        // ordinary tail of tool results would let all three take a truncation for a decision, which is
+        // the same silence this guard exists to break, one layer further out.
+        $agent = new class () implements AgentInterface {
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $use = new ToolUseBlock('t', 'bash', ['command' => 'vendor/bin/phpunit']);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $n = 0;
+        $executor = new RecordingExecutor(
+            static function (ToolCall $call) use (&$n): ToolResultBlock {
+                return new ToolResultBlock($call->id, "[exit 1]\nred #" . (++$n), false);
+            },
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
+
+        $result = $loop->run([Message::userText('go')]);
+
+        $last = $result->history[\count($result->history) - 1];
+        $text = '';
+
+        foreach ($last->content as $block) {
+            if ($block instanceof TextBlock) {
+                $text .= $block->text;
+            }
+        }
+
+        Assert::same($last->role, Role::User);
+        Assert::true(str_contains($text, 'STOPPED'));
+        Assert::true(str_contains($text, 'failed every time'));
+    }
+
+    #[Test]
+    public function aRunOfFailuresIsBrokenByOneSuccess(): void
+    {
+        // Ordinary work: try, fail, correct, succeed. The counter must be about a run of failures, not a
+        // tally over the whole exchange — otherwise a step that legitimately fails twice early is capped
+        // later for reasons that were resolved long before.
+        $agent = new class () implements AgentInterface {
+            public int $calls = 0;
+
+            public function send(AgentRequest $request): AgentResponse
+            {
+                $this->calls++;
+
+                if ($this->calls > 8) {
+                    return new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(1, 1), 'done');
+                }
+
+                $use = new ToolUseBlock('t' . $this->calls, 'bash', []);
+
+                return new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage(1, 1));
+            }
+        };
+        $n = 0;
+        $executor = new RecordingExecutor(
+            // fail, fail, fail, SUCCEED, fail, fail, fail, succeed — never four in a row
+            static function (ToolCall $call) use (&$n): ToolResultBlock {
+                $n++;
+
+                return new ToolResultBlock($call->id, $n % 4 === 0 ? 'ok ' . $n : "[exit 1]\nfailure #{$n}", false);
+            },
+        );
+        $loop = new DefaultTurnLoop($agent, $executor, 'm', 's', new Registry());
+
+        $loop->run([Message::userText('go')]);
+
+        Assert::same($agent->calls, 9);   // ran to its own conclusion; the guard never fired
+    }
+
+    #[Test]
+    public function aToolThatKeepsFailingIsStoppedEvenWhenEveryFailureIsDifferent(): void
+    {
+        // This used to assert the opposite — that distinct errors mean the model is iterating toward a
+        // fix and must be left alone until the far turn cap. A live run disproved it: a `fix` step wrote
+        // its file and ran the suite five times, red every time with new output each time, and produced
+        // nothing. Distinct failures are not evidence of progress; they are just failures that differ.
+        // The repeat breaker counts recurrences and cannot see this, so attempts are counted separately.
         $agent = new class () implements AgentInterface {
             public int $calls = 0;
 
@@ -179,7 +330,9 @@ final class DefaultTurnLoopTest
 
         $loop->run([Message::userText('go')]);
 
-        Assert::same($agent->calls, 50);   // distinct errors do not trip the breaker; only the turn cap stops it
+        // Four consecutive failures of the same tool, then it stops — with no one on the ask channel
+        // there is nobody to ask what is going on, so it does not churn on to the turn cap.
+        Assert::same($agent->calls, 4);
     }
 
     #[Test]

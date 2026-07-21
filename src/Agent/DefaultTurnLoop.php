@@ -6,6 +6,7 @@ namespace Claw\Agent;
 
 use Claw\Exceptions\ContextLengthException;
 use Claw\Exec\ExecutorInterface;
+use Claw\Tool\BashTool;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Trace\Tracer;
@@ -43,11 +44,28 @@ final class DefaultTurnLoop implements TurnLoopInterface
      * No-progress circuit-breaker: if the SAME tool returns the SAME result this many times over the
      * exchange, the model is not making progress (it keeps re-sending a call that lands identically — a
      * repeated error, OR a useless success like "no such tool"/"nothing found"). Identical (tool, result)
-     * is the signal: DIFFERENT results each time means the model is iterating and is left alone; the same
-     * result repeating is a stuck loop. Small on purpose — three identical rounds is already "it isn't
-     * learning". On trip the loop ESCALATES to the ask channel (supervisor/human) once, then stops.
+     * is the signal here; a different result each time is left to {@see FAILED_ATTEMPT_LIMIT}, which
+     * counts the same ATTEMPT failing rather than the same output recurring. Small on purpose — three
+     * identical rounds is already "it isn't learning". On trip the loop ESCALATES to the ask channel
+     * (supervisor/human) once, then stops.
      */
     private const int STUCK_TOOL_REPEAT = 3;
+
+    /**
+     * How many times in a row the SAME tool may come back FAILING before the exchange stops and asks
+     * what is going on. Distinct from {@see STUCK_TOOL_REPEAT}, which compares the output byte for byte
+     * — and byte equality is exactly what a working loop breaks: a step that edits code and re-runs the
+     * tests gets a DIFFERENT failure each time, so the repeat guard never counts past one.
+     *
+     * Measured: a `fix` step wrote its file and ran the suite five times, red every time, each with new
+     * output. Nothing counted, because nothing was counting ATTEMPTS — only recurrences. The step then
+     * returned as if it had done its job.
+     *
+     * Four, not three: writing, failing and correcting twice is ordinary work, and a guard that fires
+     * there would interrupt the loop it is meant to protect. By the fourth consecutive failure the model
+     * is not converging, and someone who can look should say so.
+     */
+    private const int FAILED_ATTEMPT_LIMIT = 4;
 
     /** Appended to the system prompt when an ask channel is present, teaching that marker. */
     private const string ASK_INSTRUCTION = "\n\nIf you need input or a decision from a person to "
@@ -104,6 +122,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
         /** @var array<string, int> identical (tool, result) → how many times it has repeated this exchange */
         $toolRepeats = [];
+
+        /** @var array<string, int> tool name → how many times IN A ROW it has come back failing */
+        $toolFailures = [];
         $stuckEscalated = false;   // escalate a wedged tool to the channel at most once, then stop
 
         // With an ask channel present, teach the worker the [question] marker so it can pause for
@@ -224,6 +245,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
             $results = [];
             $stuckTool = null;
+            $stuckWhy = '';
 
             foreach ($response->toolCalls as $call) {
                 $this->tracer?->toolCall($call->name, $call->input);
@@ -234,12 +256,37 @@ final class DefaultTurnLoop implements TurnLoopInterface
 
                 // No-progress guard: the SAME tool returning the SAME result — an error OR a useless
                 // success ("no such tool", "nothing found") — over and over is a wedged model, not work.
-                // (DIFFERENT results each time = the model iterating, and is left alone.)
+                // A different result each time is the attempt guard's business, just below.
                 $key = $call->name . "\0" . $result->content;
                 $toolRepeats[$key] = ($toolRepeats[$key] ?? 0) + 1;
 
                 if ($toolRepeats[$key] >= self::STUCK_TOOL_REPEAT) {
                     $stuckTool = $call->name;
+                    $stuckWhy = "keeps calling '{$call->name}' and getting the same result back";
+                }
+
+                // Attempt guard: the same tool FAILING over and over, whatever it prints. This is the
+                // counter the repeat guard above cannot be — a step that edits code and re-runs the tests
+                // fails DIFFERENTLY each time, so byte equality never triggers, and five red attempts in a
+                // row read as five distinct events. Counting attempts is the whole point: the run consumed
+                // real time and money learning the same thing five times, and then reported nothing.
+                // Keyed by the tool AND ITS INPUT, not the tool alone. Every shell command in this system
+                // rides one tool, so counting by name would read four DIFFERENT failing commands as one
+                // thing failing four times — and failing commands are ordinary: `grep` exits 1 on no
+                // match, and this project's own bug workflow ORDERS a step to run a test and watch it
+                // fail. What is worth stopping is the same attempt, repeated, still not working.
+                $attempt = $call->name . "\0" . json_encode($call->input, JSON_UNESCAPED_SLASHES);
+
+                if (self::failed($result)) {
+                    $toolFailures[$attempt] = ($toolFailures[$attempt] ?? 0) + 1;
+
+                    if ($toolFailures[$attempt] >= self::FAILED_ATTEMPT_LIMIT) {
+                        $stuckTool = $call->name;
+                        $stuckWhy = "has run the same '{$call->name}' call {$toolFailures[$attempt]} times "
+                            . 'and it has failed every time';
+                    }
+                } else {
+                    $toolFailures[$attempt] = 0;   // that exact attempt worked: its run of failures is over
                 }
             }
 
@@ -253,18 +300,29 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 if (!$stuckEscalated && $this->ask !== null) {
                     $stuckEscalated = true;
                     $steer = $this->ask->reply(
-                        "This step keeps calling '{$stuckTool}' and getting the same result, making no "
-                        . 'progress — it is stuck. Reply with guidance to try a different approach, or '
-                        . 'anything else to stop here.',
+                        "WHAT IS GOING ON HERE? This step {$stuckWhy}, and is not converging.\n\n"
+                        . 'You have the project\'s tools: go and look before you answer — read what the '
+                        . "step has been changing and run the thing it keeps failing, yourself.\n\n"
+                        . 'Reply with concrete guidance for a different approach, or anything else to stop '
+                        . 'the step here.',
                     );
 
                     if ($steer !== null) {
                         $history[] = Message::userText($steer);
-                        $toolRepeats = [];   // a fresh slate after the steer
+                        $toolRepeats = [];     // a fresh slate after the steer
+                        $toolFailures = [];
 
                         continue;
                     }
                 }
+
+                // Say so IN THE HISTORY before leaving. Whatever reads it next — the handoff the engine
+                // forms by continuing this very conversation, then the critic, then a person reading the
+                // trace — would otherwise see an ordinary tail of tool results and take the stop for a
+                // choice. That is the same silence this guard exists to break, one layer further out.
+                $history[] = Message::userText(
+                    "STOPPED: this exchange {$stuckWhy}, and was ended without reaching a conclusion.",
+                );
 
                 return new TurnResult($history, $lastText, new Usage($totalInput, $totalOutput, $totalCached));
             }
@@ -277,6 +335,29 @@ final class DefaultTurnLoop implements TurnLoopInterface
      * headless run must not loop forever. This is the soft backstop for a model stuck repeating a
      * failing command; the budget is the hard one.
      */
+    /**
+     * Did this tool call FAIL? Two ways, and the second is the one that matters.
+     *
+     * `isError` is set only when the tool itself threw — a bad path, a refused permission. A command
+     * that ran fine and reported failure is, to the executor, a perfectly successful call: `bash` returns
+     * the output prefixed `[exit 1]` and nothing anywhere marks that as a failure. Yet a red test run is
+     * exactly the attempt worth counting; it is what "I tried and it did not work" looks like, and it is
+     * the shape a step re-running a suite produces every time.
+     *
+     * The prefix is parsed by {@see BashTool::exitCode()} — the same class that writes it, so the two
+     * cannot drift apart in silence.
+     */
+    private static function failed(ToolResultBlock $result): bool
+    {
+        if ($result->isError) {
+            return true;
+        }
+
+        $exit = BashTool::exitCode($result->content);
+
+        return $exit !== null && $exit !== 0;
+    }
+
     private function keepGoing(int $turnNo): bool
     {
         if (!$this->ask instanceof SpeakerInterface) {
