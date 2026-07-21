@@ -155,6 +155,45 @@ final class TriageTest
         });
     }
 
+    /**
+     * Workability is judged by whether the ticket can be ACTED ON, not by whether it parses.
+     *
+     * The taxonomy used to list only degenerate cases — nonsense, a bare word, self-contradiction, an
+     * absent subject. The tickets that actually waste a solver read perfectly well: "make it faster"
+     * with no target, a request with two readings that mean different work, or a request for behaviour
+     * the project already has, where a solver happily "implements" what exists, watches the tests pass
+     * and closes the ticket having changed nothing.
+     *
+     * And the escape hatch had to widen without becoming a shrug: one reasonable reading is judgement,
+     * which is the job. Parking is for when no reading survives contact with the code.
+     */
+    #[Test]
+    public function aTicketThatReadsWellButCannotBeFinishedIsStillUnworkable(): void
+    {
+        $this->withProject(function (ProjectStore $store, Config $config): void {
+            $issue = $store->addIssue('make it faster');
+            $agent = new ScriptedAgent(
+                new AgentResponse([new TextBlock('thinking')], [], StopReason::EndTurn, new Usage(1, 1), 'thinking'),
+                new AgentResponse([new TextBlock('thinking')], [], StopReason::EndTurn, new Usage(1, 1), 'thinking'),
+            );
+
+            new Triage($store, $config, $agent)->analyse($issue);
+            $system = $agent->requests[0]->system;
+
+            Assert::true(str_contains($system, 'HOW ANYONE WOULD KNOW it was done'));
+            Assert::true(str_contains($system, 'no observable criterion'));
+            Assert::true(str_contains($system, 'behaviour the project ALREADY HAS'));
+
+            // Judgement, not a shrug: one reasonable reading is taken and named.
+            Assert::true(str_contains($system, 'take it and say in your reason which reading you took'));
+
+            // And the one-call rule counts ACCEPTED verdicts, not calls — the tool refuses by design,
+            // so a model that made one refused call had satisfied the old wording while settling nothing.
+            Assert::true(str_contains($system, 'has been ACCEPTED'));
+            Assert::true(str_contains($system, 'A REFUSED call settles nothing'));
+        });
+    }
+
     /** The ticket brief — the first user message the ProjectManager was handed. */
     private static function firstUserText(ScriptedAgent $agent): string
     {
