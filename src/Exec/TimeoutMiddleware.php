@@ -19,20 +19,15 @@ use Claw\Tool\ToolCall;
  * coroutine is cancelled and an error result is returned. Sits innermost (just before the terminal), so
  * a slow tool is capped but the user's approval prompt is not.
  *
- * WHAT IT DOES NOT DO, measured rather than assumed: it does not kill a `bash` subprocess. This used to
- * claim that "TrueAsync cancellation propagates into an awaited `bash` subprocess, killing it". It does
- * not. A `sleep 40` capped at two seconds returns "timed out after 2s" on time — and is still running
- * afterwards, for as long as the PHP process lives. On the CLI that is seconds; in the dashboard server
- * it is the server's whole lifetime, so timed-out commands accumulate.
+ * WHAT IT DOES NOT DO, and this matters for how it is configured: it does not kill a subprocess. It
+ * cancels the coroutine, and a coroutine blocked in a read does not unwind — probed by placing a
+ * `catch` around that read, which logged nothing at all. So nothing inside the tool is reached, and a
+ * `bash` command capped only from here goes on running for as long as the PHP process lives.
  *
- * The reason is that {@see \Claw\Tool\BashTool} reads its pipes with `stream_get_contents`, a blocking
- * call the event loop does not drive. Cancelling the child coroutine cannot unwind it: the cancellation
- * lands only once the read returns, which is when the command has finished of its own accord. So the
- * caller is freed on time and the command is not stopped.
- *
- * Fixing it belongs in BashTool, the only place holding the process handle: its own deadline, its own
- * non-blocking read, its own `proc_terminate`. See `dev/TODO.md`. Recorded here rather than quietly,
- * because a comment claiming a subprocess is killed is worse than none — someone relies on it.
+ * {@see \Claw\Tool\BashTool} therefore holds its own deadline over a non-blocking read and kills what
+ * it started. This is set LOOSER than that one on purpose: firing first would cancel the coroutine
+ * before the tool could reach its own process handle, and re-open the leak. It is the backstop for
+ * tools that cannot bound themselves, standing behind the ones that can.
  */
 final readonly class TimeoutMiddleware implements MiddlewareInterface
 {

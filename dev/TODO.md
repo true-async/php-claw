@@ -3,45 +3,20 @@
 Ordered by value, not by effort. An entry leaves this file when it lands in
 [`DECISIONS.md`](DECISIONS.md) or turns out to be wrong.
 
-## 1. A timed-out command is not actually stopped
-
-**Measured, not suspected.** A `sleep 40` run through `bash` with the tool timeout set to two seconds
-returns `timed out after 2s` on time — and the child is still running afterwards. Counted from
-`/proc`, one survivor: `/bin/sh -c sleep 40`. It lives until the PHP process exits, which on the CLI
-is seconds and in the dashboard server is the server's whole lifetime. Every command that ever times
-out leaves one behind.
-
-`TimeoutMiddleware`'s docblock claimed cancellation "propagates into an awaited `bash` subprocess,
-killing it". It does not, and the claim has been corrected in place. The reason: `BashTool` reads its
-pipes with `stream_get_contents`, a blocking call the event loop does not drive, so cancelling the
-child coroutine cannot unwind it — the cancellation lands only once the read returns, which is when
-the command has finished anyway. The caller is freed on time; the command is not stopped.
-
-An attempted fix — terminate the process when the coroutine unwinds — was written and **reverted**,
-because it cannot work for the same reason: the unwind does not happen while the read is blocked.
-
-**Wanted:** the deadline enforced by the only thing holding the process handle. `BashTool` takes its
-own timeout, reads non-blocking, and calls `proc_terminate` when the deadline passes — SIGTERM to the
-process group first, because `sh -c 'a | b'` is several processes and signalling the shell alone
-leaves the rest. `TimeoutMiddleware` keeps bounding the CALL; only BashTool can bound the COMMAND.
-
-**Not the extension's bug.** A `kill -9` orphaning children is POSIX — SIGKILL is uncatchable and no
-cleanup runs, so there is nothing for TrueAsync to do differently. This one is ours.
-
-## 2. MCP — client, and later server
+## 1. MCP — client, and later server
 
 Neither exists today: zero references across `src/`, `config/`, `workflows/`, `bin/`.
 As a client this buys the existing tool ecosystem without writing a `ToolInterface`
 implementation per integration; `Registry::only()`/`with()` already models least-privilege
 palettes, so imported tools have somewhere to land.
 
-## 3. The WebSocket channel
+## 2. The WebSocket channel
 
 `/api/ws` is meant to be *the* live transport — one connection, rooms for topics, SSE kept
 only as a fallback. It is the newest surface in `Server.php` and the least finished. Four
 things, in the order they hurt. The first two are defects, not tuning.
 
-### 3a. The connection has no heartbeat, so a dead one looks alive
+### 2a. The connection has no heartbeat, so a dead one looks alive
 
 `handleWs()` is `foreach ($ws as $message)` — it blocks on inbound frames and never sends
 anything unprompted (`src/Server.php:745`). A dashboard that has subscribed and is watching
@@ -53,7 +28,7 @@ The SSE paths already solved this — a comment frame every ~10s (`src/Server.ph
 The WS path needs the same: a server-side ping on an idle timer, and a client that reconnects
 when pongs stop. Until then, "live over one connection" is true only while traffic flows.
 
-### 3b. Only run traces resume; boards do not
+### 2b. Only run traces resume; boards do not
 
 `wsSubscribe()` replays the journal past `since` — but only for a topic matching
 `project/{key}/run/{id}/trace` (`src/Server.php:783-794`). A board room
@@ -68,7 +43,7 @@ first, and there is a race between that snapshot and the subscription taking eff
 Boards need what traces already have: a cursor a subscriber can resume from, so subscribe
 alone is enough to arrive at a correct board.
 
-### 3c. Board updates are polled, not pushed
+### 2c. Board updates are polled, not pushed
 
 `broadcastBoards()` walks every project, reloads all of its issues from SQLite, diffs them,
 then sleeps two seconds — for the server's lifetime, whether or not anyone is connected
@@ -80,12 +55,12 @@ The write should announce itself, with two controls borrowed from Electric's wak
 **coalescing** (a burst arriving during a publish merges into one send — a run touching a
 ticket ten times in a second is one board frame, not ten) and **`debounceMs`** (send once
 the changes stop, so bursts settle into one frame while a lone change still lands in
-milliseconds). The periodic tick then survives only as 3a's heartbeat.
+milliseconds). The periodic tick then survives only as 2a's heartbeat.
 
 Note this mostly deletes the diff-against-`$sent` bookkeeping rather than optimising it —
-and it interacts with 3b, since a pushed board still needs a resume cursor. One change.
+and it interacts with 2b, since a pushed board still needs a resume cursor. One change.
 
-### 3d. Two transports doing the same job
+### 2d. Two transports doing the same job
 
 The run trace and the board each exist twice — once as SSE with `Last-Event-ID`, once as a
 WS room — with the same seq de-duplication implemented on both paths. Every fix above has to
@@ -99,7 +74,7 @@ whether SSE stays a real fallback or goes; not worth carrying two of everything 
 (`src/Server.php:752`, `768`) — no error frame goes back, so a client that typos a topic
 waits forever on silence with nothing to debug.
 
-## 4. Stated but not true — a backend, a guard, a route table
+## 3. Stated but not true — a backend, a guard, a route table
 
 Same shape as the prompt defects closed in #42–#49, one layer out: not a prompt promising what the code will not do, but
 the configuration, the README and `ARCHITECTURE.md` promising it. Each was confirmed against
@@ -133,7 +108,7 @@ Same conversation as the secrets work in #59/#60: an unrestricted `bash` in the 
 of everything said to the model are two halves of one security story.
 
 **The route table is behind the code.** `ARCHITECTURE.md:212-223` lists nine routes. Missing:
-the whole `/api/ws` WebSocket endpoint (item 3's subject), `POST issues/{id}/close|stop|delete`,
+the whole `/api/ws` WebSocket endpoint (item 2's subject), `POST issues/{id}/close|stop|delete`,
 and `artifact-file`. The document is the knowledge map — a map that omits the primary live
 transport sends the next reader to the fallback.
 
@@ -150,4 +125,4 @@ transport sends the next reader to the fallback.
   children instead of `Decompose` filing tickets somebody starts later. Blocked: there is no
   concurrency inside a run, `Async\spawn` appears nowhere in `src/Workflow/`. Revisit if that
   changes. (The debounce and coalescing half of the same idea is *not* blocked on this and
-  moved up to item 3.)
+  moved up to item 2.)

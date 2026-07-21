@@ -29,9 +29,10 @@ final class ToolFactory
         ?Secrets $secrets = null,
         ?KnowledgeIndex $index = null,
         ?EmbedderInterface $embedder = null,
+        int $timeoutMs = 0,
     ): Registry {
         $registry = new Registry();
-        $registry->add(new BashTool($project->path, $secrets));
+        $registry->add(new BashTool($project->path, $secrets, $timeoutMs));
         // Reading is guarded too: a secret leaves through a FILE the run wrote (a token in `.git/config`,
         // a credential cache under the project-rooted $HOME) far more easily than through a command's
         // output. See ReadFileTool::handle().

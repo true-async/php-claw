@@ -12,6 +12,61 @@ use Testo\Test;
 
 final class BashToolTest
 {
+    /**
+     * A timed-out command is actually KILLED, not merely stopped being waited for.
+     *
+     * Measured before this existed: a `sleep 40` capped at two seconds returned "timed out after 2s" on
+     * time and was still running afterwards — for as long as the PHP process lived, which in the
+     * dashboard server is its whole lifetime, so every timeout leaked one.
+     *
+     * The obvious arrangement cannot work, and that was probed too. The deadline used to live entirely
+     * in the surrounding middleware, which cancels this coroutine — and a coroutine blocked in
+     * `stream_get_contents` does not unwind, so nothing here was ever reached. A `catch` placed around
+     * the read to find out logged nothing at all. The deadline has to be held by the thing that owns
+     * the process handle, and the read has to stay awake to notice it.
+     */
+    #[Test]
+    public function aTimedOutCommandIsKilledAndSaysSo(): void
+    {
+        $marker = 'claw-test-' . bin2hex(random_bytes(4));
+        $bash = new BashTool(sys_get_temp_dir(), null, 1500);
+
+        $out = $bash->handle(['command' => "echo starting; sleep 30 # {$marker}"]);
+
+        Assert::true(str_contains($out, 'timed out'));
+        Assert::true(str_contains($out, 'killed'));
+        Assert::true(str_contains($out, 'starting'));   // what it managed to say is kept
+
+        Assert::same(self::aliveWith($marker), 0);
+    }
+
+    /** A command that finishes in time is untouched by any of this. */
+    #[Test]
+    public function aCommandThatFinishesInTimeIsUnaffected(): void
+    {
+        $bash = new BashTool(sys_get_temp_dir(), null, 5000);
+
+        Assert::same($bash->handle(['command' => 'echo fine']), 'fine');
+        Assert::true(str_contains($bash->handle(['command' => 'echo oops >&2; exit 3']), '[exit 3]'));
+        Assert::true(str_contains($bash->handle(['command' => 'echo oops >&2; exit 3']), 'oops'));
+    }
+
+    /** How many processes carry $marker — read from /proc, because a `pgrep` would match its own shell. */
+    private static function aliveWith(string $marker): int
+    {
+        $n = 0;
+
+        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+            $cmd = @file_get_contents($file);
+
+            if ($cmd !== false && str_contains($cmd, $marker)) {
+                $n++;
+            }
+        }
+
+        return $n;
+    }
+
     #[Test]
     public function runsCommandAndReturnsOutput(): void
     {
