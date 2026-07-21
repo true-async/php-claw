@@ -215,6 +215,42 @@ whether SSE stays a real fallback or goes; not worth carrying two of everything 
 (`src/Server.php:752`, `768`) — no error frame goes back, so a client that typos a topic
 waits forever on silence with nothing to debug.
 
+## 9. Stated but not true — a backend, a guard, a route table
+
+Same shape as item 1, one layer out: not a prompt promising what the code will not do, but
+the configuration, the README and `ARCHITECTURE.md` promising it. Each was confirmed against
+the source before being written here.
+
+**`gemini` is an offered backend that does not exist.** `Config::AGENTS` accepts it
+(`src/Config.php:28`), it has a key slot (`'gemini' => 'GEMINI_API_KEY'`, line 34), and
+`.env.example:7` lists it as one of three valid values of `CLAW_AGENT`. `AgentFactory::make()`
+handles `claude` and `openai-compatible` and returns `null` for it (`src/Agent/AgentFactory.php:26`)
+— its docblock even says "or null if that agent is not wired yet". So one of the three
+documented backends is a null every one of the five call sites has to defend against
+(`Cli/SessionMode.php:66`, `Cli/WorkflowMode.php:199,237`, `Server.php:391,891`). Either wire
+it or stop offering it; the current state costs a null branch everywhere and gives a user who
+follows `.env.example` a failure at run time.
+
+**The autonomous path has no middleware at all.** `Environment::executor()` builds
+`new ChainExecutor([], …)` — an empty chain (`src/Workflow/Environment.php:101`). No permission
+gate, no audit record, no per-tool timeout on the path where a model runs unattended in a real
+project folder. `PermissionMiddleware`, `AuditMiddleware` and `TimeoutMiddleware` exist and are
+wired only on the legacy chat path, where a human is watching every call anyway — the
+protection is present exactly where it is least needed.
+
+`README.md:62` states the opposite: "every tool call passes through a middleware chain
+(permission gatekeeper, audit log, per-tool timeout)". `ARCHITECTURE.md` describes the real
+situation. A reader who trusts the README believes the autonomous runner is guarded.
+
+Fixing the sentence is five minutes and makes the gap honest. Fixing the gap is the actual
+work, and it is the same conversation as item 5 — an unguarded `bash` in the project folder
+and a durable journal of everything said to the model are two halves of one security story.
+
+**The route table is behind the code.** `ARCHITECTURE.md:212-223` lists nine routes. Missing:
+the whole `/api/ws` WebSocket endpoint (item 8's subject), `POST issues/{id}/close|stop|delete`,
+and `artifact-file`. The document is the knowledge map — a map that omits the primary live
+transport sends the next reader to the fallback.
+
 ## Deferred, deliberately
 
 - **Serverless / addressable entities.** Electric's core model. Rejected: it rewrites the
