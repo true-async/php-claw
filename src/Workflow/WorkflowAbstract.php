@@ -9,6 +9,7 @@ use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\TurnLoopInterface;
+use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
@@ -445,6 +446,96 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $entry->source,
             $entry->note,
         );
+    }
+
+    /**
+     * The same three channels, exposed to the MODEL as a tool — present in every workflow, like `recall`.
+     *
+     * {@see artifact()} is for a step's own PHP, and that is not where most recording belongs: the party
+     * that knows what is worth keeping is the model doing the work, and it knows it mid-exchange. A
+     * workflow's author has to guess in advance, and when the guess is wrong there is no recourse — the
+     * one hand-written library workflow told its model to "call `artifact`" and no such tool existed, so
+     * both of its reviewed steps demanded evidence the step had no way to produce.
+     *
+     * THE EVIDENCE CHANNEL TAKES A COMMAND, NOT ITS OUTPUT, and runs it here. That is the whole point:
+     * evidence is the one artifact kind a step cannot compose, and it would stop being that the moment a
+     * model could type the text of it. The model decides WHAT to prove; this code produces the proof.
+     *
+     * What it does not defend against: a model choosing a command whose output says whatever it wants
+     * (`echo 'all green'`). Nothing here can — which is why the command itself is recorded as the
+     * evidence's source, so a reviewer judges the output KNOWING what produced it, and why every rubric
+     * tells the critic to run the thing again.
+     *
+     * A note on privilege: the run's `bash` is reached through {@see tool()}, which resolves against the
+     * run's full registry rather than the narrowed palette of the current `ai()` call. A step that
+     * deliberately excluded `bash` can therefore still reach a shell through this. No shipped workflow
+     * does, and closing it means teaching tool() about the active palette — worth doing, not here.
+     *
+     * @throws ToolException on a bad channel combination; the model reads it and corrects itself, which
+     *                       a LogicException escaping into the executor would not allow — that is not
+     *                       turned into a tool result, so it would take the whole run down, and on a
+     *                       generated solver it would then trigger a repair pass for code that is fine
+     */
+    #[Tool(name: 'artifact', description: 'Record a named output of this step: what you produced, kept in '
+        . 'the run journal and shown to the reviewer who judges this step. Pass EXACTLY ONE of: '
+        . '`text` (your own words — a decision, a summary, generated source: useful, but it is a claim); '
+        . '`file` (the path of a file you wrote — the reviewer opens it itself); or '
+        . '`command` (a shell command to RUN NOW, whose verbatim output is recorded as evidence — use '
+        . 'this whenever the thing being judged is a fact a command settles, such as tests passing or a '
+        . 'clean lint; do not paste output you already have, name the command and it will be re-run). '
+        . '`note` is optional and only meaningful with `command`: your own reading of the output, kept '
+        . 'separate from it and shown as your claim about it, never merged into the evidence.')]
+    protected function recordArtifact(
+        string $label,
+        string $text = '',
+        string $file = '',
+        string $command = '',
+        string $note = '',
+    ): string {
+        if (trim($label) === '') {
+            throw new ToolException("artifact: 'label' is required — it is how the reviewer refers to this output");
+        }
+
+        $given = array_keys(array_filter(['text' => $text, 'file' => $file, 'command' => $command], static fn (string $v): bool => trim($v) !== ''));
+
+        if (\count($given) !== 1) {
+            throw new ToolException(
+                'artifact: pass exactly one of `text`, `file` or `command`'
+                . ($given === [] ? ' — none was given' : ' — got ' . implode(' and ', $given)),
+            );
+        }
+
+        if ($command !== '') {
+            // The command runs HERE, and what it printed is what is kept. `from` is the command itself,
+            // not the word 'bash': a reviewer judging an output has to know which one produced it.
+            $out = self::clip($this->tool('bash', ['command' => $command]));
+            $this->artifact($label, text: $note !== '' ? $note : null, evidence: $out, from: $command);
+
+            return "recorded '{$label}' as evidence of `{$command}`. Its output was:\n{$out}";
+        }
+
+        $file !== '' ? $this->artifact($label, file: $file) : $this->artifact($label, text: $text);
+
+        return "recorded '{$label}'.";
+    }
+
+    /**
+     * Keep a captured output to a size a reviewer's context can hold, from both ends — a test runner puts
+     * the summary last and the first failure first, and a middle-out cut keeps both. The marker is left
+     * in the text on purpose: a truncated log that does not say so is a log that lies by omission.
+     */
+    private static function clip(string $output, int $limit = 20_000): string
+    {
+        if (\strlen($output) <= $limit) {
+            return $output;
+        }
+
+        $keep = intdiv($limit, 2);
+        $dropped = \strlen($output) - $limit;
+
+        return substr($output, 0, $keep)
+            . "\n\n[… {$dropped} bytes of output omitted …]\n\n"
+            . substr($output, -$keep);
     }
 
     /** The issue this run was started under, if any — climb to it for wider context. */

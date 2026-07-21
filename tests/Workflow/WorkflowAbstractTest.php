@@ -12,6 +12,8 @@ use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
+use Claw\Agent\ToolResultBlock;
+use Claw\Agent\ToolSpec;
 use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
 use Claw\Exceptions\WorkflowException;
@@ -597,8 +599,11 @@ final class WorkflowAbstractTest
 
         $wf->run();
 
-        // request 0 = the step's own ai() ([] -> no tools); request 1 = the critic, which must see all.
-        Assert::count($worker->requests[1]->tools, 2);
+        // request 0 = the step's own ai() ([] -> no tools); request 1 = the critic, which must see all —
+        // the two the run registered, plus `artifact`, which every workflow carries.
+        $names = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[1]->tools);
+        sort($names);
+        Assert::same($names, ['artifact', 'bash', 'read']);
     }
 
     #[Test]
@@ -639,6 +644,149 @@ final class WorkflowAbstractTest
         Assert::true(str_contains($prompt, 'ERRORS! Tests: 10, Errors: 10.'));
         // the contradicting summary is shown, but as the step's claim — never as part of the output
         Assert::true(str_contains($prompt, 'which is a claim: the suite is green'));
+    }
+
+    /**
+     * The `artifact` tool exists, is present in every workflow without anyone declaring it, and its
+     * evidence channel takes a COMMAND rather than the output of one.
+     *
+     * That last part is the whole design. Evidence is the one artifact kind a step cannot compose, and
+     * it would stop being that the moment a model could type the text of it — so the model names what
+     * to prove and the code runs it. The tool had been instructed in the one hand-written library
+     * workflow for some time without ever existing, which made both of that workflow's reviewed steps
+     * demand evidence the step had no way to produce.
+     */
+    #[Test]
+    public function theArtifactToolRunsTheCommandItselfSoTheEvidenceIsNotTyped(): void
+    {
+        $suite = "PHPUnit 9.6.34\n\nOK (34 tests, 91 assertions)";
+        $call = new ToolUseBlock('t1', 'artifact', [
+            'label' => 'tests',
+            'command' => 'vendor/bin/phpunit',
+            'note' => 'all green',
+        ]);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage()),
+            $this->answer('done'),
+        );
+
+        $registry = new Registry();
+        $registry->add($this->cannedTool('bash', $suite));
+
+        $sink = new ArrayTraceSink();
+        $env = $this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink));
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                $this->ai('prove it');
+            }
+        };
+
+        $wf->run();
+
+        $recorded = [];
+
+        foreach ($sink->records as $record) {
+            if ($record->event()->type === 'artifact') {
+                $recorded = $record->event()->data;
+            }
+        }
+
+        Assert::same($recorded['label'] ?? null, 'tests');
+        Assert::same($recorded['kind'] ?? null, 'evidence');
+        Assert::same($recorded['value'] ?? null, $suite);                  // verbatim, from the tool that ran
+        Assert::same($recorded['source'] ?? null, 'vendor/bin/phpunit');   // the command, not the word 'bash'
+        Assert::same($recorded['note'] ?? null, 'all green');              // the model's claim, kept apart
+    }
+
+    /**
+     * A bad channel combination comes back as a TOOL ERROR the model can read and correct. It must not
+     * be the LogicException the PHP-side artifact() throws: the executor turns only ToolException into a
+     * tool result, so anything else takes the whole run down — and on a generated solver that crash then
+     * triggers a repair pass for code that was never at fault.
+     */
+    #[Test]
+    public function theArtifactToolRefusesABadCallWithoutKillingTheRun(): void
+    {
+        $call = new ToolUseBlock('t1', 'artifact', ['label' => 'x', 'text' => 'a', 'file' => 'b.txt']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage()),
+            $this->answer('understood, recorded nothing'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public string $out = '';
+
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                $this->out = $this->ai('record something');
+            }
+        };
+
+        $wf->run();   // the run survives; the model saw the refusal and carried on
+
+        Assert::same($wf->out, 'understood, recorded nothing');
+
+        // And the refusal reached the model as a tool result it could act on.
+        $refusal = '';
+        $key = array_key_last($worker->requests) ?? throw new \RuntimeException('no request was made');
+        $last = $worker->requests[$key];
+
+        foreach ($last->messages as $message) {
+            foreach ($message->content as $block) {
+                if ($block instanceof ToolResultBlock) {
+                    $refusal = $block->content;
+                }
+            }
+        }
+
+        Assert::true(str_contains($refusal, 'exactly one of'));
+    }
+
+    /** A tool that ignores its input and returns a fixed string — stands in for a real command run. */
+    private function cannedTool(string $name, string $output): ToolInterface
+    {
+        return new class ($name, $output) implements ToolInterface {
+            public function __construct(private readonly string $toolName, private readonly string $output)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->toolName;
+            }
+
+            public function description(): string
+            {
+                return 'runs a command';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object', 'properties' => ['command' => ['type' => 'string']]];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function handle(array $input): string
+            {
+                return $this->output;
+            }
+        };
     }
 
     #[Test]

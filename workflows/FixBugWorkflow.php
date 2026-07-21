@@ -61,10 +61,14 @@ final class FixBugWorkflow extends WorkflowAbstract
             . "looking for.\n"
             . "- Do not touch production code here. The fix is the next step's job, and a bug fixed "
             . "before it was demonstrated was never demonstrated.\n\n"
-            . 'Record the exact command you ran and the failure it produced by calling `artifact` with '
-            . '`evidence` set to the command\'s real output, `from` set to the command itself, and a '
-            . 'short `text` saying what the failure shows. If the defect genuinely cannot be reached by '
-            . 'a test, say so with the `[question]` marker instead of inventing one.',
+            . 'Record TWO things with the `artifact` tool, each by passing `command` — it runs the command '
+            . "and keeps exactly what it printed, so do not paste output you already have:\n"
+            . '- `baseline` — the whole suite as it stands. This is what tells the later steps which '
+            . "failures were already here and are not yours.\n"
+            . '- `reproduction` — the failing test itself, with a short `note` saying what the failure '
+            . "shows.\n\n"
+            . 'If the defect genuinely cannot be reached by a test, say so with the `[question]` marker '
+            . 'instead of inventing one.',
         );
     }
 
@@ -100,18 +104,23 @@ final class FixBugWorkflow extends WorkflowAbstract
         $this->ai(
             "Run the project's WHOLE test suite — not only the test written for this bug — and read the "
             . "output.\n\n"
-            . 'If anything fails, fix it and run again. A failure elsewhere in the suite is part of this '
-            . "work: it is what the change did.\n\n"
-            . 'When the suite is green, record it by calling `artifact` with `evidence` set to the real, '
-            . 'unedited output of the run and `from` set to the command. Do not paste a summary, and do '
-            . 'not declare it green without having seen it.',
+            . 'A failure the change explains is part of this work: fix it and run again. A failure that '
+            . 'was ALREADY THERE before any of this is not yours to chase — the reproduce step recorded '
+            . "the suite's starting state as the `baseline` artifact, so call "
+            . "recall(what='artifacts', name='reproduce') and compare against it rather than guessing.\n\n"
+            . 'Then record the result with the `artifact` tool, passing `command` set to the suite command '
+            . '— it runs it and keeps the real output. In `note`, name any failure you are setting aside '
+            . 'as pre-existing, and say which line of the baseline says so. Do not declare it green '
+            . 'without having seen it.',
         );
     }
 
     protected function criticRules(): array
     {
         return [
-            'reproduced' => 'The evidence must be the real output of a test run, showing a test that FAILS. '
+            'reproduced' => 'Two artifacts are required: `baseline`, the suite as it stood before the work, '
+                . 'and `reproduction`, a run showing a test that FAILS. Both must be real captured output; '
+                . 'reject if either is missing. On the reproduction: '
                 . 'Run the command yourself and read what it prints. Reject if: there is no evidence, only '
                 . 'prose; the output shows a passing run or no run at all; the failure is a syntax error, a '
                 . 'missing file or an import mistake rather than the behaviour the ticket describes; or the '
@@ -123,12 +132,14 @@ final class FixBugWorkflow extends WorkflowAbstract
                 . 'this step may make, and it need not make even that one — a defect the existing suite '
                 . 'already catches is reproduced by running it.',
 
-            'proven' => 'The evidence must be the real output of running the WHOLE suite, and it must be '
-                . 'green. Run it yourself. Reject if: the output covers only the new test; anything in it '
-                . 'failed, errored or was skipped to get past it; the test written for the bug was weakened '
+            'proven' => 'The evidence must be the real output of running the WHOLE suite. Run it yourself. '
+                . 'Reject if: the output covers only the new test; the test written for the bug was weakened '
                 . 'or deleted rather than satisfied; or the claim of a green suite has no output behind it. '
-                . 'A suite that was already failing before this work is not this step\'s fault — say so '
-                . 'plainly instead of rejecting, and judge only what this change did.',
+                . 'A failure that was ALREADY THERE is not this step\'s fault — but that is now checkable '
+                . "rather than a matter of faith: call recall(what='artifacts', name='reproduce') and read "
+                . 'the `baseline` artifact, which is the suite\'s verbatim output before any of this work. '
+                . 'Accept a failure the baseline also shows; reject one it does not, and reject a step that '
+                . 'sets a failure aside without pointing at the baseline line that excuses it.',
         ];
     }
 
