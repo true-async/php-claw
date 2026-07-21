@@ -26,6 +26,7 @@ The knowledge map is [`ARCHITECTURE.md`](../ARCHITECTURE.md) in the repository r
 - How work is done here: [`WORKFLOW.md`](WORKFLOW.md) — branches, commits, PRs, what must be green.
 - Why things are the way they are: [`DECISIONS.md`](DECISIONS.md).
 - What has already gone wrong: [`POSTMORTEM.md`](POSTMORTEM.md).
+- What is agreed but not started: [`TODO.md`](TODO.md) — and what was deliberately rejected.
 
 ## Hot paths
 
