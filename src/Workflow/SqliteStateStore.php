@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Agent\Message;
+
 /**
  * The durable {@see WorkflowStateStoreInterface}: snapshots a run's state into the project db, so a run that
  * was killed mid-flight resumes after a restart — the next instance for the same run id loads the
@@ -35,6 +37,18 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
                 from_step  TEXT NOT NULL,
                 handoff    TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+            )',
+        );
+
+        // The conversation a step is in the MIDDLE of. Keyed by (run, step) rather than by run, because
+        // a run has one in-flight exchange per step and a resumed run must find the right one.
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS workflow_exchange (
+                run_id     TEXT NOT NULL,
+                step       TEXT NOT NULL,
+                history    TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (run_id, step)
             )',
         );
 
@@ -70,6 +84,52 @@ final readonly class SqliteStateStore implements WorkflowStateStoreInterface
             'state' => $this->decodeState($row['state'] ?? ''),
             'done' => $this->decodeDone($row['done'] ?? ''),
         ];
+    }
+
+    public function saveExchange(string $runId, string $step, array $history): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT OR REPLACE INTO workflow_exchange (run_id, step, history, updated_at)
+             VALUES (:run, :step, :history, :at)',
+        );
+
+        $stmt->execute([
+            'run' => $runId,
+            'step' => $step,
+            'history' => json_encode(
+                array_map(static fn (Message $m): array => $m->toArray(), $history),
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+            ),
+            'at' => time(),
+        ]);
+    }
+
+    public function loadExchange(string $runId, string $step): array
+    {
+        $stmt = $this->pdo->prepare('SELECT history FROM workflow_exchange WHERE run_id = :run AND step = :step');
+        $stmt->execute(['run' => $runId, 'step' => $step]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
+        if (!\is_array($row)) {
+            return [];
+        }
+
+        $decoded = json_decode((string) ($row['history'] ?? ''), true);
+        $messages = [];
+
+        foreach (\is_array($decoded) ? $decoded : [] as $entry) {
+            if (\is_array($entry)) {
+                $messages[] = Message::fromArray($entry);
+            }
+        }
+
+        return $messages;
+    }
+
+    public function clearExchange(string $runId, string $step): void
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM workflow_exchange WHERE run_id = :run AND step = :step');
+        $stmt->execute(['run' => $runId, 'step' => $step]);
     }
 
     public function saveHandoff(string $runId, string $fromStep, string $handoff): void

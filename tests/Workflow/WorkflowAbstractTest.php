@@ -1298,6 +1298,94 @@ final class WorkflowAbstractTest
         return new CriticStepWorkflow($this->config(worker: $worker)->set(EnvKey::Ask, $supervisor), 'r1');
     }
 
+    /**
+     * A step interrupted mid-exchange carries on from where it stopped, instead of starting over.
+     *
+     * The step-edge snapshot records which steps FINISHED, so a crash inside one replayed that whole
+     * step from a cold start: the model was asked again for work it had already done, against a world
+     * that had already moved — the files it wrote the first time were still written. Idempotency was
+     * neither stated as a contract nor achieved by the machinery.
+     *
+     * It is achieved by resuming rather than replaying. The exchange is written down at every turn, and
+     * a re-entered step continues it: the model sees its own earlier tool results in the history and has
+     * no reason to repeat them.
+     */
+    #[Test]
+    public function aStepInterruptedMidExchangeResumesItRatherThanRepeatingIt(): void
+    {
+        $store = new InMemoryStateStore();
+        $use = new ToolUseBlock('t1', 'write', ['path' => 'src/X.php']);
+
+        // The first process: one turn lands (the tool ran), then the model call dies.
+        $dying = new ScriptedAgent(
+            new AgentResponse([$use], [$use], StopReason::ToolUse, new Usage()),
+            new \RuntimeException('the process went away'),
+        );
+        $registry = new Registry();
+        $registry->add($this->echoTool('write'));
+
+        $first = new class ($this->config(worker: $dying, registry: $registry, store: $store), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crashy';
+            }
+
+            #[Step]
+            protected function implement(): void
+            {
+                $this->ai('write the file');
+            }
+        };
+
+        $crashed = false;
+
+        try {
+            $first->run();
+        } catch (\RuntimeException) {
+            $crashed = true;
+        }
+
+        Assert::true($crashed);
+
+        // The second process picks the same run up. Nothing finished, so the step runs again — but it
+        // must not start cold.
+        $resumed = new ScriptedAgent($this->answer('already written, carrying on'));
+        $second = new class ($this->config(worker: $resumed, registry: $registry, store: $store), 'r1') extends WorkflowAbstract {
+            public string $out = '';
+
+            public function name(): string
+            {
+                return 'crashy';
+            }
+
+            #[Step]
+            protected function implement(): void
+            {
+                $this->out = $this->ai('write the file');
+            }
+        };
+
+        $second->run();
+
+        Assert::same($second->out, 'already written, carrying on');
+
+        // The model was handed the interrupted conversation: its own tool call and the result it got.
+        $sent = $resumed->requests[0]->messages;
+        $kinds = [];
+
+        foreach ($sent as $message) {
+            foreach ($message->content as $block) {
+                $kinds[] = $block::class;
+            }
+        }
+
+        Assert::true(\in_array(ToolUseBlock::class, $kinds, true));      // what it had already asked for
+        Assert::true(\in_array(ToolResultBlock::class, $kinds, true));   // and what came back
+
+        // And once the step finishes, the half-conversation is not left lying around to re-enter.
+        Assert::same($store->loadExchange('r1', 'implement'), []);
+    }
+
     /** A two-step relay workflow whose steps each make one ai() call — for handoff/resume cases. */
     private function relay(Environment $env): WorkflowAbstract
     {

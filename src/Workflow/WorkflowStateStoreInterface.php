@@ -58,5 +58,29 @@ interface WorkflowStateStoreInterface
     public function loadHandoff(string $runId): array;
 
     /** A fresh, monotonic id for a leaf call — the store owns identity, not the caller. */
+    /**
+     * Write down the conversation a step is in the MIDDLE of, so an interruption does not cost it.
+     *
+     * The step-edge snapshot ({@see save()}) records which steps FINISHED. A crash inside one therefore
+     * replayed that whole step from a cold start: the model was asked again for work it had already
+     * done, and the files it had already written were still written — the same instruction against a
+     * world that had already moved. This is the other half of the snapshot, taken at every turn: the
+     * resumed step continues its exchange from where it stopped, seeing its own earlier tool results,
+     * and so does not repeat them.
+     *
+     * @param list<\Claw\Agent\Message> $history
+     */
+    public function saveExchange(string $runId, string $step, array $history): void;
+
+    /**
+     * The conversation a step was in the middle of, or an empty list when it was not in one.
+     *
+     * @return list<\Claw\Agent\Message>
+     */
+    public function loadExchange(string $runId, string $step): array;
+
+    /** Forget a step's exchange — it finished, and what it did is in the snapshot and the journal now. */
+    public function clearExchange(string $runId, string $step): void;
+
     public function nextId(): string;
 }
