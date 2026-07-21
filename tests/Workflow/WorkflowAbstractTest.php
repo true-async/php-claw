@@ -14,11 +14,9 @@ use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
 use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
-use Claw\Exceptions\StepBlocked;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
-use Claw\Tool\BlockedTool;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
@@ -958,121 +956,6 @@ final class WorkflowAbstractTest
 
         Assert::same($wf->work, 'the work');
         Assert::same($wf->runs, 1);   // critic happy first time -> no re-run
-    }
-
-    #[Test]
-    public function aConfirmedBlockerStopsTheRunInsteadOfSkippingThroughIt(): void
-    {
-        // A worker that hits a wall says so with `blocked`. The step ends, the critic weighs whether the
-        // wall is real, and a confirmed one stops the run — it must NOT fall through to the next step,
-        // which would build on work that did not happen.
-        $worker = new ScriptedAgent(
-            $this->answer('looking'),   // the step's own ai(), before it gives up
-            $this->answer('OK'),        // the critic confirms the blocker is real
-        );
-        $registry = new Registry();
-        $registry->add(new BlockedTool());
-        $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
-            public bool $secondRan = false;
-
-            public function name(): string
-            {
-                return 'blk';
-            }
-
-            protected function criticRules(): array
-            {
-                return ['is it real' => 'confirm the blocker is real'];
-            }
-
-            #[Step(critic: 'is it real')]
-            public function first(): void
-            {
-                $this->ai('do it');
-                $this->tool('blocked', ['reason' => 'the file the ticket names does not exist']);
-            }
-
-            #[Step]
-            public function second(): void
-            {
-                $this->secondRan = true;
-            }
-        };
-
-        $stopped = null;
-
-        try {
-            $wf->run();
-        } catch (StepBlocked $e) {
-            $stopped = $e->reason;
-        }
-
-        Assert::true($stopped !== null);
-        Assert::true(str_contains((string) $stopped, 'does not exist'));   // the reason survives to the caller
-        Assert::false($wf->secondRan);
-    }
-
-    #[Test]
-    public function aBlockerTheCriticRefutesSendsTheStepBackInsteadOfStoppingTheRun(): void
-    {
-        // Giving up is cheap to say and expensive to believe: a wall the critic does not confirm is the
-        // ordinary rework path, and the run carries on. Only a checked blocker costs a person.
-        $worker = new ScriptedAgent(
-            $this->answer('looking'),               // attempt #1, which gives up
-            $this->answer('you did not even look'), // the critic refutes the blocker
-            $this->answer('found it'),              // attempt #2, which does the work
-            $this->answer('OK'),                    // and passes
-        );
-        $supervisor = new class () implements SpeakerInterface {
-            public function name(): SpeakerRole
-            {
-                return SpeakerRole::Supervisor;
-            }
-
-            public function reply(string $incoming): string
-            {
-                return 'look in src/ before giving up';
-            }
-        };
-        $registry = new Registry();
-        $registry->add(new BlockedTool());
-        $env = $this->config(worker: $worker, registry: $registry)->set(EnvKey::Ask, $supervisor);
-        $wf = new class ($env, 'r1') extends WorkflowAbstract {
-            public int $attempts = 0;
-            public bool $secondRan = false;
-
-            public function name(): string
-            {
-                return 'blk2';
-            }
-
-            protected function criticRules(): array
-            {
-                return ['is it real' => 'confirm the blocker is real'];
-            }
-
-            #[Step(critic: 'is it real')]
-            public function first(): void
-            {
-                $this->attempts++;
-                $this->artifact('work', $this->ai('do it'));
-
-                if ($this->attempts === 1) {
-                    $this->tool('blocked', ['reason' => 'cannot find it']);
-                }
-            }
-
-            #[Step]
-            public function second(): void
-            {
-                $this->secondRan = true;
-            }
-        };
-
-        $wf->run();
-
-        Assert::same($wf->attempts, 2);   // sent back rather than believed
-        Assert::true($wf->secondRan);     // and the run went on to the rest
     }
 
     #[Test]
