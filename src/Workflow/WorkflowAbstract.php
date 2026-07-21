@@ -9,7 +9,6 @@ use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\TurnLoopInterface;
-use Claw\Exceptions\StepBlocked;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
@@ -298,27 +297,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
                 $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
 
-                // A worker that hits a wall says so with `blocked` and the step ENDS here. That is a
-                // report about itself, which nothing else can see — unlike a claim of success, which
-                // others can check and which is therefore not the worker's to make. It settles nothing:
-                // the reason goes to the critic below, and the code decides what follows.
-                $blocked = null;
-
-                try {
-                    $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
-                } catch (StepBlocked $signal) {
-                    $blocked = $signal->reason;
-                    $this->tracer()?->log('blocked', $signal->reason, ['step' => $name], Level::Notice);
-                }
+                $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
                 $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
 
                 if ($rubric === null) {
-                    // Nobody is reviewing this step, so a block nobody weighed cannot be walked past:
-                    // the next step would build on work that did not happen. Stop, carrying the reason.
-                    if ($blocked !== null) {
-                        throw new StepBlocked("step '{$name}' could not continue: {$blocked}");
-                    }
-
                     break;
                 }
 
@@ -327,21 +309,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 // Deterministic guard: a critic'd step that did NOTHING — no model/tool work AND no artifact
                 // — produced no result. We see that without spending an AI critic (which would only probe the
                 // journal in circles). Report it straight instead.
-                if ($workHistory === [] && $this->artifacts[$name] === [] && $blocked === null) {
+                if ($workHistory === [] && $this->artifacts[$name] === []) {
                     $findings = "step '{$name}' produced nothing: no model/tool work and no artifact. A step "
                         . 'must do real work and leave a result; if it needs no review, it should carry no critic.';
                 } else {
-                    $findings = $this->critic($name, $rubric, $artifacts, $blocked);
+                    $findings = $this->critic($name, $rubric, $artifacts);
                 }
 
-                // On a blocked step the critic answers a different question — is the wall real? — so a
-                // pass means the block STANDS and the run cannot go on pretending the step happened.
-                // Findings mean it is not a real wall, and that is the ordinary rework path below.
                 if ($findings === null) {
-                    if ($blocked !== null) {
-                        throw new StepBlocked("step '{$name}' could not continue: {$blocked}");
-                    }
-
                     break;   // the critic is satisfied
                 }
 
@@ -856,20 +831,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * step wrote, run `php -l` or the tests) rather than judge a blurb. Its standing role, prepended
      * here, is to REVIEW only: inspect and report, never do or fix the work itself. It judges the step's
      * reviewable output — its rendered artifacts (`$output`, see {@see renderArtifacts()}).
-     *
-     * $blocked is the reason a worker gave when it reported it could not continue, or null when the step
-     * simply ran. It flips the question the review answers: not "is this work good enough" but "is this
-     * wall real", because a step that stopped has no work to grade — and a blocker taken on trust would
-     * park a ticket that a second attempt could have solved.
      */
-    private function critic(string $name, string $rubric, string $artifacts, ?string $blocked = null): ?string
+    private function critic(string $name, string $rubric, string $artifacts): ?string
     {
         $verdict = trim($this->ai(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
             . "Artifacts it recorded:\n{$artifacts}\n\n"
-            . $this->renderBlocked($blocked)
             . $this->renderParams($this->stepParams[$name] ?? [])
             . 'An artifact is what the step SAYS it did. It is a claim, not evidence: a step writes its own '
             . 'artifact text and can assert success it never achieved — one reported "All tests passed" '
@@ -893,30 +862,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
         ));
 
         return strtoupper($verdict) === 'OK' ? null : $verdict;
-    }
-
-    /**
-     * The block a worker reported, put to the critic, or '' when the step simply ran.
-     *
-     * Spelled out because it REVERSES what a passing verdict means. Normally OK says the work is good
-     * enough; here it says the wall is real, and the run stops rather than carrying on over a step that
-     * did not happen. So the review has to be told that agreeing is the expensive answer.
-     */
-    private function renderBlocked(?string $blocked): string
-    {
-        if ($blocked === null) {
-            return '';
-        }
-
-        return "The worker STOPPED and reported it could not continue, with this reason:\n{$blocked}\n\n"
-            . 'Judge THAT, not the quality of the work — there is none to grade. Establish for yourself '
-            . 'whether the wall is real: if it says a file, tool or dependency is missing, look; if it says '
-            . 'the ticket asks for something the project does not have, read the project. Reply OK only if '
-            . 'you confirmed the blocker, and understand what that costs — the run STOPS and a person picks '
-            . "the ticket up.\n\n"
-            . 'If the wall is not real, or it gave up on the first obstacle, or something obvious was left '
-            . 'untried, say so concretely: that sends the step back for another attempt, which is much '
-            . "cheaper than a person.\n\n";
     }
 
     /**
