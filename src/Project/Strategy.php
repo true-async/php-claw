@@ -27,6 +27,17 @@ enum Strategy: string
     /** A ready-made, hand-written and tested workflow from the library fits this task. */
     case Library = 'library';
 
+    /**
+     * A written APPROACH from the shelf fits: generate a solver for this ticket that follows it.
+     *
+     * Its own rank because it is its own cost. `library` runs code that already exists and pays for no
+     * generation; this pays for a generation pass and gets a solver shaped to the ticket rather than to
+     * the average of every ticket like it. Folding the two into one verdict would have made one word
+     * mean two things with different prices and different behaviour — which is how `library` itself came
+     * to be recordable but unroutable, quietly generating a bespoke solver instead.
+     */
+    case Approach = 'approach';
+
     /** Nothing off the shelf fits: generate a bespoke solver workflow for this issue. */
     case Generate = 'generate';
 
@@ -74,8 +85,9 @@ enum Strategy: string
         return match ($this) {
             self::Direct => 0,
             self::Library => 1,
-            self::Generate => 2,
-            self::Decompose => 3,
+            self::Approach => 2,
+            self::Generate => 3,
+            self::Decompose => 4,
         };
     }
 }

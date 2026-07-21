@@ -161,7 +161,7 @@ final class WorkflowStore
      * fully-qualified name, both would report whichever file was read first. That is what the per-shelf
      * namespace segments prevent, and it is why they are not cosmetic.
      *
-     * @return list<array{name: string, class: string, description: string, serves: list<IssueType>}>
+     * @return list<array{name: string, class: string, description: string, serves: list<IssueType>, kind: string, recipe: string}>
      *
      * @throws WorkflowException
      */
@@ -186,23 +186,44 @@ final class WorkflowStore
             }
 
             $reflection = new \ReflectionClass($class);
-            $attribute = $reflection->getAttributes(LibraryWorkflow::class)[0] ?? null;
+            $workflow = $reflection->getAttributes(LibraryWorkflow::class)[0] ?? null;
+            $strategy = $reflection->getAttributes(GenerationStrategy::class)[0] ?? null;
 
-            if ($attribute === null) {
+            if ($workflow === null && $strategy === null) {
                 continue;   // present but not offered: a base class, a helper, something half-written
             }
 
+            // A shelf holds two kinds of entry and they are not interchangeable: one is code that runs
+            // as written, the other is prose the generator reads before writing a solver. Claiming both
+            // would leave the run path guessing which, so it is an error rather than a precedence rule.
+            if ($workflow !== null && $strategy !== null) {
+                throw new WorkflowException(
+                    "workflow library: {$class} is marked both LibraryWorkflow and GenerationStrategy — "
+                    . 'it must be one or the other: a workflow is run, an approach is read',
+                );
+            }
+
             $description = self::describe($reflection);
-            $serves = $attribute->newInstance()->serves;
+            $serves = ($workflow ?? $strategy)->newInstance()->serves;
+            $kind = $workflow !== null ? 'workflow' : 'strategy';
 
             if ($description === '' || $serves === []) {
                 throw new WorkflowException(
                     "workflow library: {$class} is offered but cannot be chosen — it needs a docblock "
-                    . 'describing when to use it, and at least one issue type in its LibraryWorkflow attribute',
+                    . 'describing when to use it, and at least one issue type in its attribute',
                 );
             }
 
-            $entries[] = ['name' => $name, 'class' => $class, 'description' => $description, 'serves' => $serves];
+            $recipe = $kind === 'strategy' ? self::recipeOf($reflection) : '';
+
+            $entries[] = [
+                'name' => $name,
+                'class' => $class,
+                'description' => $description,
+                'serves' => $serves,
+                'kind' => $kind,
+                'recipe' => $recipe,
+            ];
         }
 
         return $entries;
@@ -220,7 +241,7 @@ final class WorkflowStore
      *
      * @param list<self> $stores
      *
-     * @return array<string, array{name: string, class: string, description: string, serves: list<IssueType>}>
+     * @return array<string, array{name: string, class: string, description: string, serves: list<IssueType>, kind: string, recipe: string}>
      *
      * @throws WorkflowException
      */
@@ -237,6 +258,33 @@ final class WorkflowStore
         }
 
         return $offered;
+    }
+
+    /**
+     * A strategy's recipe: the `RECIPE` constant on the class. This is the text handed to the generator,
+     * as distinct from the docblock, which only says WHEN to choose this approach — the ProjectManager
+     * reads the latter to pick, the generator reads the former to write.
+     *
+     * A strategy without one is an error rather than an empty recipe: it would be chosen off the shelf
+     * on the strength of its description and then contribute nothing, which is indistinguishable at the
+     * far end from `generate` — the expensive path this exists to avoid taking blindly.
+     *
+     * @param \ReflectionClass<object> $class
+     *
+     * @throws WorkflowException
+     */
+    private static function recipeOf(\ReflectionClass $class): string
+    {
+        $recipe = $class->hasConstant('RECIPE') ? $class->getConstant('RECIPE') : null;
+
+        if (!\is_string($recipe) || trim($recipe) === '') {
+            throw new WorkflowException(
+                "workflow library: {$class->getName()} is a generation strategy but has no RECIPE "
+                . 'constant — the approach itself is the whole point of the entry',
+            );
+        }
+
+        return $recipe;
     }
 
     /**

@@ -499,6 +499,53 @@ final class ProjectManagerToolTest
         });
     }
 
+    /**
+     * The shelf holds two kinds of entry and each belongs to its own verdict: `library` runs a workflow
+     * as written, `approach` generates a solver that follows a written strategy. Naming an entry of the
+     * wrong kind must be refused — a verdict that is recordable but unroutable is how `library` itself
+     * once came to quietly generate a bespoke solver, which is the expense it existed to avoid.
+     */
+    #[Test]
+    public function anApproachVerdictNamesAStrategyAndRefusesAWorkflow(): void
+    {
+        $this->withStore(function (ProjectStore $store): void {
+            $library = self::tempDir();
+
+            try {
+                self::writeWorkflow($library, 'ShelvedBugFix', 'IssueType::Bug');
+                self::writeStrategy($library, 'ShelvedBugApproach', 'IssueType::Bug');
+                $tool = new ProjectManagerTool($store, [WorkflowStore::library($library)]);
+                $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
+
+                $verdict = ['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'reason' => 'a known shape'];
+
+                // A workflow named under `approach` is a near miss: it is real, it just belongs to the
+                // other verdict — and the refusal says which, rather than only that this one is wrong.
+                $refusal = $this->refusal($tool, [...$verdict, 'strategy' => 'approach', 'workflow' => 'ShelvedBugFix']);
+                Assert::true(str_contains($refusal, 'is not a generation strategy'));
+                Assert::true(str_contains($refusal, "strategy='library'"));
+
+                // And the mirror image.
+                Assert::true(str_contains(
+                    $this->refusal($tool, [...$verdict, 'strategy' => 'library', 'workflow' => 'ShelvedBugApproach']),
+                    "strategy='approach'",
+                ));
+
+                $afterTheRefusals = $store->currentStrategy('1');
+                Assert::same($afterTheRefusals, null);   // neither refusal recorded anything
+
+                $tool->handle([...$verdict, 'strategy' => 'approach', 'workflow' => 'ShelvedBugApproach']);
+
+                $current = $store->currentStrategy('1');
+                Assert::true($current !== null);
+                Assert::same($current['strategy'], Strategy::Approach);
+                Assert::same($current['workflow'], 'ShelvedBugApproach');
+            } finally {
+                self::rmrf($library);
+            }
+        });
+    }
+
     #[Test]
     public function aLibraryVerdictHasToNameAWorkflowThatExistsAndDoesThatKindOfWork(): void
     {
@@ -527,7 +574,7 @@ final class ProjectManagerToolTest
                 // filter exists for: the pair recorded can never be a workflow that does not do this work.
                 Assert::true(str_contains(
                     $this->refusal($tool, [...$verdict, 'type' => 'research', 'strategy' => 'library', 'workflow' => 'ShelvedBugFix']),
-                    "nothing ready-made serves a 'research' ticket",
+                    "no ready-made workflow serves a 'research' ticket",
                 ));
 
                 // Nothing was recorded by any of those.
@@ -571,6 +618,29 @@ final class ProjectManagerToolTest
      * class name must be unique across the whole suite — PHP loads a class once per process, so a name
      * another test also writes would resolve to whichever file was read first.
      */
+    /** A shelf entry of the OTHER kind: prose the generator reads, not code that runs. */
+    private static function writeStrategy(string $dir, string $name, string $serves): void
+    {
+        file_put_contents($dir . '/' . $name . '.php', <<<PHP
+            <?php
+
+            namespace ClawWorkflow\\Library;
+
+            use Claw\\Project\\IssueType;
+            use Claw\\Workflow\\GenerationStrategy;
+
+            /**
+             * How work of this kind is approached.
+             */
+            #[GenerationStrategy({$serves})]
+            final class {$name}
+            {
+                public const string RECIPE = 'First establish the target, then build against it.';
+            }
+
+            PHP);
+    }
+
     private static function writeWorkflow(string $dir, string $name, string $serves): void
     {
         file_put_contents($dir . '/' . $name . '.php', <<<PHP

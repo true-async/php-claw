@@ -57,7 +57,8 @@ final readonly class ProjectManagerTool implements ToolInterface
             . 'of work an issue is and HOW it is to be solved — type is one of bug, feature, refactor, '
             . 'design, research, chore; strategy is one of direct (one agent, a localized change), library '
             . '(a ready-made workflow fits — then `workflow` must name it, exactly as `list_workflows` gave '
-            . 'it), generate (write a bespoke solver), decompose (split into sub-issues); '
+            . 'it), approach (a written generation strategy fits — then `workflow` must name that strategy), '
+            . 'generate (write a bespoke solver from nothing), decompose (split into sub-issues); '
             . "action='needs_human' (issue, reason) parks the ticket for a PERSON — use it when the ticket "
             . 'cannot be worked on as written (it says nothing actionable, contradicts itself, or asks about '
             . 'something the project does not have) or when the call is not yours to make. This is a real '
@@ -97,8 +98,9 @@ final readonly class ProjectManagerTool implements ToolInterface
                 ],
                 'workflow' => [
                     'type' => 'string',
-                    'description' => 'name of the ready-made workflow to run, exactly as `list_workflows` '
-                        . "gave it; required when strategy is 'library' and ignored otherwise",
+                    'description' => 'name of the shelf entry to use, exactly as `list_workflows` gave it '
+                        . "— the workflow to run when strategy is 'library', or the generation strategy to "
+                        . "follow when it is 'approach'; ignored otherwise",
                 ],
                 'reason' => ['type' => 'string', 'description' => 'why — the justification for this decision'],
                 // NOT `needs_human`, which is also an ACTION on this tool meaning something else entirely
@@ -201,12 +203,17 @@ final readonly class ProjectManagerTool implements ToolInterface
         $this->store->assertEscalates($issueId, $strategy);
         $this->store->setIssueType($issueId, $type);
 
-        // `library` is the one verdict that has to say WHICH — and the name is checked against what
-        // actually serves this type, so the pair recorded here cannot be a workflow that does not do
-        // this kind of work. The list the model chose from was filtered the same way.
-        $workflow = $strategy === Strategy::Library
-            ? $this->resolveWorkflow($this->text($input, 'workflow'), $type)
-            : '';
+        // Two verdicts have to say WHICH — `library` names a workflow to run, `approach` names a written
+        // strategy to generate from — and the name is checked against what actually serves this type AND
+        // against the kind the verdict implies. Both halves matter: an unknown name is a verdict the
+        // runner cannot carry out, a name of the wrong kind is one it carries out wrongly, and a name
+        // that does not serve this type is one that does the wrong sort of work. The list the model chose
+        // from was filtered the same way.
+        $workflow = match ($strategy) {
+            Strategy::Library => $this->resolveShelfEntry($this->text($input, 'workflow'), $type, 'workflow'),
+            Strategy::Approach => $this->resolveShelfEntry($this->text($input, 'workflow'), $type, 'strategy'),
+            default => '',
+        };
 
         $this->store->setStrategy($issueId, $strategy, $reason, $needsHuman, $workflow);
 
@@ -223,9 +230,11 @@ final readonly class ProjectManagerTool implements ToolInterface
      *
      * @throws ToolException
      */
-    private function resolveWorkflow(string $name, IssueType $type): string
+    private function resolveShelfEntry(string $name, IssueType $type, string $kind): string
     {
         $name = trim($name);
+        $verdict = $kind === 'workflow' ? 'library' : 'approach';
+        $noun = $kind === 'workflow' ? 'ready-made workflow' : 'generation strategy';
 
         try {
             $offered = WorkflowStore::offered($this->libraries, $type);
@@ -233,16 +242,31 @@ final readonly class ProjectManagerTool implements ToolInterface
             throw new ToolException('project_manager: ' . $e->getMessage(), 0, $e);
         }
 
-        if (isset($offered[$name])) {
+        $ofKind = array_filter($offered, static fn (array $entry): bool => $entry['kind'] === $kind);
+
+        if (isset($ofKind[$name])) {
             return $name;
         }
 
-        $available = $offered === []
-            ? "nothing ready-made serves a '{$type->value}' ticket"
-            : 'available for this type: ' . implode(', ', array_keys($offered));
+        // Naming an entry of the OTHER kind is a near miss worth answering precisely: the model read the
+        // shelf and picked something real, it just paired it with the wrong verdict. Saying which verdict
+        // that entry belongs to costs a sentence and saves an exchange spent guessing.
+        if (isset($offered[$name])) {
+            $its = $offered[$name]['kind'] === 'workflow' ? 'library' : 'approach';
+
+            throw new ToolException(
+                "project_manager: '{$name}' is not a {$noun} — it is a "
+                . ($its === 'library' ? 'ready-made workflow' : 'generation strategy')
+                . ", so record it with strategy='{$its}' instead.",
+            );
+        }
+
+        $available = $ofKind === []
+            ? "no {$noun} serves a '{$type->value}' ticket"
+            : 'available for this type: ' . implode(', ', array_keys($ofKind));
 
         throw new ToolException(
-            "project_manager: strategy='library' needs the name of a ready-made workflow that handles a "
+            "project_manager: strategy='{$verdict}' needs the name of a {$noun} that handles a "
             . "'{$type->value}' ticket" . ($name === '' ? '' : ", and '{$name}' is not one") . " — {$available}. "
             . 'Use `list_workflows` to see them, or choose a strategy that does the work from scratch.',
         );
