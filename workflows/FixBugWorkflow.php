@@ -21,36 +21,64 @@ use Claw\Workflow\WorkflowAbstract;
 #[LibraryWorkflow(IssueType::Bug)]
 final class FixBugWorkflow extends WorkflowAbstract
 {
+    /**
+     * What the first two steps may reach for — everything the run offers EXCEPT `done`.
+     *
+     * `done` declares the whole TASK solved and ends the run, skipping the steps that have not run.
+     * Neither reproducing a bug nor fixing it is grounds for that claim, and the critic guarding it
+     * cannot catch the mistake: it judges the step's own rubric, so a perfectly reproduced bug passes
+     * review and finishes the run with the defect still in place. Measured — a live run closed its
+     * ticket as Done after `reproduce` alone, with the failing test it had just found still failing.
+     *
+     * An instruction not to call it would be one more rule to ignore. This is the tool not being there.
+     */
+    private const array WORK_TOOLS = ['bash', 'read_file', 'write_file', 'list_files', 'recall'];
+
     public function name(): string
     {
         return 'fix-bug';
     }
 
     /**
-     * Make the bug reproducible as a FAILING TEST, and record the failure verbatim.
+     * Make the bug visible as a FAILING TEST, and record the failure verbatim.
      *
      * This is the step that earns the rest. A fix written against a description fixes the
      * description; a fix written against a red test fixes what the test caught. The failure output
      * is stored as evidence rather than summarised, because a summary of a test run is exactly the
      * kind of claim the reviewer has no way to check.
+     *
+     * The prohibitions in the prompt are not decoration. On its first live run this step "reproduced"
+     * the bug by editing the existing test to expect the WRONG answer — the defect's own output, with
+     * the comment "Test for miscalculation" — which turns the suite green and ships the bug. The
+     * critic caught it and the run stopped, but the instruction that invited it was mine: it said
+     * "write a test" and nothing about leaving the ones already there alone.
      */
     #[Step(critic: 'reproduced')]
     protected function reproduce(): void
     {
         $this->ai(
             $this->ticket()
-            . "\n\nReproduce this defect as a FAILING TEST, in the project's own test suite and its own "
-            . "style — find how the existing tests are written and run before writing a new one.\n\n"
+            . "\n\nMake this defect visible as a FAILING TEST, in the project's own test suite and its own "
+            . "style — find how the existing tests are written and run before writing anything.\n\n"
             . "Work in this order:\n"
             . "1. Find the code the ticket is about and read it.\n"
-            . "2. Write a test that asserts the behaviour the ticket says is CORRECT.\n"
-            . '3. Run it and watch it FAIL — and check it fails for the reason in the ticket, not because '
+            . '2. RUN THE EXISTING TESTS FIRST. If one already fails for the reason the ticket describes, '
+            . "that IS the reproduction — you are done: record its output and write no test at all.\n"
+            . "3. Only if nothing covers it, ADD a test asserting the behaviour the ticket says is CORRECT.\n"
+            . '4. Run it and watch it FAIL — and check it fails for the reason in the ticket, not because '
             . "the test is wrong. A test that errors on a typo or a missing import has proved nothing.\n\n"
-            . 'Change no production code in this step. Record the exact command you ran and the failure '
-            . 'it produced by calling `artifact` with `evidence` set to the command\'s real output, `from` '
-            . 'set to the command itself, and a short `text` saying what the failure shows. If the defect '
-            . 'genuinely cannot be reached by a test, say so with the `[question]` marker instead of '
-            . 'inventing one.',
+            . "TWO THINGS YOU MUST NOT DO, because both destroy the thing you were sent to find:\n"
+            . '- Do not change what an existing test EXPECTS. Editing an assertion to match the buggy '
+            . 'output does not reproduce the defect, it erases it — the suite goes green and the bug '
+            . 'ships. If a test expects the right answer and fails, that is exactly what you were '
+            . "looking for.\n"
+            . "- Do not touch production code here. The fix is the next step's job, and a bug fixed "
+            . "before it was demonstrated was never demonstrated.\n\n"
+            . 'Record the exact command you ran and the failure it produced by calling `artifact` with '
+            . '`evidence` set to the command\'s real output, `from` set to the command itself, and a '
+            . 'short `text` saying what the failure shows. If the defect genuinely cannot be reached by '
+            . 'a test, say so with the `[question]` marker instead of inventing one.',
+            self::WORK_TOOLS,
         );
     }
 
@@ -70,6 +98,7 @@ final class FixBugWorkflow extends WorkflowAbstract
             . 'Make the smallest change that fixes the cause — not the symptom, and not the test. Do not '
             . 'edit the test to agree with the current behaviour: that erases the bug instead of fixing '
             . 'it. Do not refactor code the ticket did not ask about. Run the test as you go.',
+            self::WORK_TOOLS,
         );
     }
 
@@ -101,7 +130,13 @@ final class FixBugWorkflow extends WorkflowAbstract
                 . 'Run the command yourself and read what it prints. Reject if: there is no evidence, only '
                 . 'prose; the output shows a passing run or no run at all; the failure is a syntax error, a '
                 . 'missing file or an import mistake rather than the behaviour the ticket describes; or the '
-                . 'production code was changed in this step, which would mean the bug was never demonstrated.',
+                . 'production code was changed in this step, which would mean the bug was never demonstrated. '
+                . 'ALSO check what the step did to the tests that were already there — `git diff` on the test '
+                . 'files says it plainly. Reject if an existing expectation was changed, relaxed or deleted: '
+                . 'rewriting an assertion to match the buggy output turns the suite green and lets the bug '
+                . 'ship, which is worse than not reproducing it at all. Adding a new test is the only edit '
+                . 'this step may make, and it need not make even that one — a defect the existing suite '
+                . 'already catches is reproduced by running it.',
 
             'proven' => 'The evidence must be the real output of running the WHOLE suite, and it must be '
                 . 'green. Run it yourself. Reject if: the output covers only the new test; anything in it '
