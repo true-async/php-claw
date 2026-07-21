@@ -60,10 +60,114 @@ final class WorkflowValidator
         }
 
         $this->assertStepsAreProtected($code);
+        $this->assertStrictTypes($code);
+        $this->assertExtendsWorkflowAbstract($code);
+        $this->assertHasAtLeastOneStep($code);
+        $this->assertCriticNamesResolve($code);
 
         if ($expectedClass !== null) {
             $this->assertDeclaresExpectedClass($code, $expectedClass);
             $this->assertImplementsName($code);
+        }
+    }
+
+    /**
+     * The generator's prompt heads its requirements with "the code is validated before it is saved, and
+     * rejected if any are missed". The four checks below are the ones that sentence was promising and
+     * nothing performed — a header that trains both the model and the maintainer to trust a gate that is
+     * mostly absent. Each is mechanical, so it belongs here rather than in prose a model may or may not
+     * follow, and a rejection here comes back through the revise pass {@see WorkflowAbstract::
+     * saveGeneratedWorkflow()} already wires.
+     *
+     * `final` is deliberately NOT among them. The prompt asks for it and it is good practice, but a
+     * non-final workflow runs correctly, and a gate that fails a working class costs a revision round to
+     * buy nothing.
+     *
+     * @throws WorkflowException
+     */
+    private function assertStrictTypes(string $code): void
+    {
+        if (preg_match('/declare\s*\(\s*strict_types\s*=\s*1\s*\)/', $code) !== 1) {
+            throw new WorkflowException('workflow must open with `declare(strict_types=1);`');
+        }
+    }
+
+    /**
+     * Without the base class none of the machinery exists — `ai()`, `tool()`, `step()`, the snapshot, the
+     * critic. A class that omits it parses cleanly, saves, loads, and then fatals on its first step call.
+     *
+     * @throws WorkflowException
+     */
+    private function assertExtendsWorkflowAbstract(string $code): void
+    {
+        if (preg_match('/\bextends\s+(?:\\\\?Claw\\\\Workflow\\\\)?WorkflowAbstract\b/', $code) !== 1) {
+            throw new WorkflowException('workflow must extend WorkflowAbstract');
+        }
+    }
+
+    /**
+     * A workflow that does nothing is not a workflow: the default run() drives step methods, finds none,
+     * and the run "succeeds" having done nothing — which the run path records as a finished ticket.
+     *
+     * "Does nothing" means no `#[Step]` AND no run() of its own. Overriding run() and orchestrating by
+     * hand is a first-class shape here ({@see WorkflowAbstract}'s own docblock offers it for flow that
+     * loops or branches), so demanding a `#[Step]` outright would reject working code.
+     *
+     * @throws WorkflowException
+     */
+    private function assertHasAtLeastOneStep(string $code): void
+    {
+        if (preg_match('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b/', $code) === 1) {
+            return;
+        }
+
+        if (preg_match('/\bfunction\s+run\s*\(/', $code) === 1) {
+            return;
+        }
+
+        throw new WorkflowException('workflow must declare at least one #[Step] method, or drive the work from its own run()');
+    }
+
+    /**
+     * Every `#[Step(critic: 'x')]` must have an 'x' key in criticRules().
+     *
+     * This was checked only at RUN time, by a LogicException in {@see WorkflowAbstract::criticRubric()} —
+     * which fires mid-run on the real project, after a human approved the solver, discarding everything
+     * done before the offending step. The same thing is decidable by reading the source, so it is decided
+     * here, where the cost is one revision round.
+     *
+     * Best-effort by design: the scan for rule keys starts at criticRules() and does not track brace
+     * depth, so a quoted key in a later method could satisfy a name it has nothing to do with. That errs
+     * towards ACCEPTING, which is the right direction for a save-time gate whose runtime counterpart
+     * stays in place — and it must stay, because a library workflow is loaded by the shelf's autoloader
+     * and never passes through here at all.
+     *
+     * @throws WorkflowException
+     */
+    private function assertCriticNamesResolve(string $code): void
+    {
+        if (preg_match_all('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b[^\]]*\bcritic\s*:\s*[\'"]([^\'"]+)[\'"]/', $code, $used) === false) {
+            return;
+        }
+
+        if ($used[1] === []) {
+            return;
+        }
+
+        $start = strpos($code, 'function criticRules');
+
+        if ($start === false) {
+            throw new WorkflowException(
+                "workflow uses critic '{$used[1][0]}' but declares no criticRules() — a critic name with no rules stops the run",
+            );
+        }
+
+        preg_match_all('/[\'"]([^\'"]+)[\'"]\s*=>/', substr($code, $start), $declared);
+
+        foreach ($used[1] as $name) {
+            if (!\in_array($name, $declared[1], true)) {
+                throw new WorkflowException("workflow uses critic '{$name}' but criticRules() has no rules for it");
+            }
         }
     }
 
