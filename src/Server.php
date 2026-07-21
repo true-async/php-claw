@@ -138,11 +138,15 @@ final class Server
      * left behind was a ticket reading WaitingHuman whose `POST .../answer` returned 409 "no run is
      * waiting" for the rest of time — a wait nobody was serving and no screen could show.
      *
-     * So the run is marked failed and its ticket handed back to Open, with the reason saying which of
-     * the two it was. Not resumed: picking a run back up from its snapshot and delivering an answer that
-     * arrived while it was dead needs a durable record of which answers have been consumed, which is the
-     * rest of this item in `dev/TODO.md`. A ticket that is visibly re-runnable is not that; it is
-     * strictly better than one that is stuck and silent.
+     * What happens to each depends on what it was doing:
+     *
+     *  - AT ITS GATE — left exactly as it is. The ticket saying a person is expected is true; the only
+     *    thing missing is a process, and answering brings one back (see {@see answer()}).
+     *  - MID-WORK — picked back up. The snapshot says which steps finished, the persisted exchange says
+     *    where the step it died in had got to, and the ledger row still reads Running, which is what
+     *    {@see IssueRunner} treats as "resume this". Nothing is lost by a restart, so nothing should be
+     *    paid for twice.
+     *  - UNREVIVABLE — only then failed, with the ticket handed back to a person.
      */
     private function adoptOrphanedRuns(): void
     {
@@ -165,13 +169,33 @@ final class Server
                     continue;
                 }
 
-                $store->setRunStatus($run['id'], RunStatus::Failed);
+                // A run interrupted mid-work is PICKED BACK UP, not written off. Everything needed for
+                // that is already durable: the snapshot says which steps finished, the exchange says
+                // where the step it died in had got to, and the ledger row is still Running — which is
+                // exactly what IssueRunner treats as "resume this, do not start a new one".
+                //
+                // It used to be marked failed and handed back to a person, which was honest but wasteful:
+                // the work was all there, and a restart is not a reason to throw it away and pay to do it
+                // again. Failing is now only for a run we cannot revive.
+                $issue = $store->loadIssue($run['issue']);
 
-                if ($store->loadIssue($run['issue'])->status !== IssueStatus::Done) {
-                    $store->setIssueStatus($run['issue'], IssueStatus::Open);
+                if ($issue->status === IssueStatus::Done) {
+                    $store->setRunStatus($run['id'], RunStatus::Failed);
+
+                    continue;   // the ticket is settled; the row is just stale
                 }
 
-                echo "  adopted: run #{$run['id']} was interrupted when the server stopped\n";
+                if ($this->launch($project->id, $issue)) {
+                    echo "  resumed: run #{$run['id']} on issue #{$issue->id}\n";
+
+                    continue;
+                }
+
+                // No usable agent — nothing can be resumed now, so say so rather than leaving a row
+                // claiming to be running while nothing is.
+                $store->setRunStatus($run['id'], RunStatus::Failed);
+                $store->setIssueStatus($issue->id, IssueStatus::Open);
+                echo "  adopted: run #{$run['id']} cannot be resumed (no agent configured)\n";
             }
         }
     }
@@ -963,8 +987,7 @@ final class Server
     private function start(HttpResponse $response, string $key, string $issueId): void
     {
         try {
-            $store = $this->store($key);
-            $issue = $store->loadIssue($issueId);
+            $issue = $this->store($key)->loadIssue($issueId);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -977,13 +1000,30 @@ final class Server
             return;
         }
 
+        if (!$this->launch($key, $issue)) {
+            $response->json(['error' => 'the configured agent is not wired'], 500);
+
+            return;
+        }
+
+        $response->json(['ok' => true], 202);
+    }
+
+    /**
+     * Put a run on the event loop, detached. Returns false only when there is no usable agent.
+     *
+     * Separate from {@see start()} because it has two callers with nothing else in common: an HTTP
+     * request, which needs a status code, and {@see adoptOrphanedRuns()} at startup, which has nobody to
+     * answer. The spawning itself is the same either way, and a second copy of it would drift.
+     */
+    private function launch(string $key, Issue $issue): bool
+    {
+        $store = $this->store($key);
         $config = Config::load($this->root . '/.env');
         $agent = AgentFactory::make($config, new CurlHttpClient());
 
         if ($agent === null) {
-            $response->json(['error' => "agent '{$config->agent}' is not wired"], 500);
-
-            return;
+            return false;
         }
 
         /** @var Channel<string> $answers unbuffered: a gate's send() waits for the parked run's recv() */
@@ -1003,7 +1043,7 @@ final class Server
             }
         });
 
-        $response->json(['ok' => true], 202);
+        return true;
     }
 
     /**
