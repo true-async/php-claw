@@ -35,20 +35,13 @@ As a client this buys the existing tool ecosystem without writing a `ToolInterfa
 implementation per integration; `Registry::only()`/`with()` already models least-privilege
 palettes, so imported tools have somewhere to land.
 
-## 3. Knowledge base
-
-`KnowledgeBaseInterface` documents Obsidian-flavoured markdown plus sqlite-vec retrieval
-and has no implementation and no caller. Today the only memory that survives a run is
-procedural — the generated solver classes in `WorkflowStore`. Declarative memory is the
-gap: what was learned about a project, as opposed to what code was written for it.
-
-## 4. The WebSocket channel
+## 3. The WebSocket channel
 
 `/api/ws` is meant to be *the* live transport — one connection, rooms for topics, SSE kept
 only as a fallback. It is the newest surface in `Server.php` and the least finished. Four
 things, in the order they hurt. The first two are defects, not tuning.
 
-### 4a. The connection has no heartbeat, so a dead one looks alive
+### 3a. The connection has no heartbeat, so a dead one looks alive
 
 `handleWs()` is `foreach ($ws as $message)` — it blocks on inbound frames and never sends
 anything unprompted (`src/Server.php:745`). A dashboard that has subscribed and is watching
@@ -60,7 +53,7 @@ The SSE paths already solved this — a comment frame every ~10s (`src/Server.ph
 The WS path needs the same: a server-side ping on an idle timer, and a client that reconnects
 when pongs stop. Until then, "live over one connection" is true only while traffic flows.
 
-### 4b. Only run traces resume; boards do not
+### 3b. Only run traces resume; boards do not
 
 `wsSubscribe()` replays the journal past `since` — but only for a topic matching
 `project/{key}/run/{id}/trace` (`src/Server.php:783-794`). A board room
@@ -75,7 +68,7 @@ first, and there is a race between that snapshot and the subscription taking eff
 Boards need what traces already have: a cursor a subscriber can resume from, so subscribe
 alone is enough to arrive at a correct board.
 
-### 4c. Board updates are polled, not pushed
+### 3c. Board updates are polled, not pushed
 
 `broadcastBoards()` walks every project, reloads all of its issues from SQLite, diffs them,
 then sleeps two seconds — for the server's lifetime, whether or not anyone is connected
@@ -87,12 +80,12 @@ The write should announce itself, with two controls borrowed from Electric's wak
 **coalescing** (a burst arriving during a publish merges into one send — a run touching a
 ticket ten times in a second is one board frame, not ten) and **`debounceMs`** (send once
 the changes stop, so bursts settle into one frame while a lone change still lands in
-milliseconds). The periodic tick then survives only as 4a's heartbeat.
+milliseconds). The periodic tick then survives only as 3a's heartbeat.
 
 Note this mostly deletes the diff-against-`$sent` bookkeeping rather than optimising it —
-and it interacts with 4b, since a pushed board still needs a resume cursor. One change.
+and it interacts with 3b, since a pushed board still needs a resume cursor. One change.
 
-### 4d. Two transports doing the same job
+### 3d. Two transports doing the same job
 
 The run trace and the board each exist twice — once as SSE with `Last-Event-ID`, once as a
 WS room — with the same seq de-duplication implemented on both paths. Every fix above has to
@@ -106,7 +99,7 @@ whether SSE stays a real fallback or goes; not worth carrying two of everything 
 (`src/Server.php:752`, `768`) — no error frame goes back, so a client that typos a topic
 waits forever on silence with nothing to debug.
 
-## 5. Stated but not true — a backend, a guard, a route table
+## 4. Stated but not true — a backend, a guard, a route table
 
 Same shape as the prompt defects closed in #42–#49, one layer out: not a prompt promising what the code will not do, but
 the configuration, the README and `ARCHITECTURE.md` promising it. Each was confirmed against
@@ -140,7 +133,7 @@ Same conversation as the secrets work in #59/#60: an unrestricted `bash` in the 
 of everything said to the model are two halves of one security story.
 
 **The route table is behind the code.** `ARCHITECTURE.md:212-223` lists nine routes. Missing:
-the whole `/api/ws` WebSocket endpoint (item 4's subject), `POST issues/{id}/close|stop|delete`,
+the whole `/api/ws` WebSocket endpoint (item 3's subject), `POST issues/{id}/close|stop|delete`,
 and `artifact-file`. The document is the knowledge map — a map that omits the primary live
 transport sends the next reader to the fallback.
 
@@ -157,4 +150,4 @@ transport sends the next reader to the fallback.
   children instead of `Decompose` filing tickets somebody starts later. Blocked: there is no
   concurrency inside a run, `Async\spawn` appears nowhere in `src/Workflow/`. Revisit if that
   changes. (The debounce and coalescing half of the same idea is *not* blocked on this and
-  moved up to item 4.)
+  moved up to item 3.)

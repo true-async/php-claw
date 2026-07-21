@@ -16,6 +16,9 @@ use Claw\Config;
 use Claw\Exceptions\AgentException;
 use Claw\Exceptions\ClawException;
 use Claw\Exceptions\WorkflowException;
+use Claw\Http\CurlHttpClient;
+use Claw\Knowledge\KnowledgeIndex;
+use Claw\Knowledge\OpenAiEmbedder;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\IssueType;
@@ -174,7 +177,20 @@ final readonly class IssueRunner
         // itself, which is both within the run's reach and within the project's git.
         $secretsPath = Secrets::pathFor($this->projectsDir, $project->id);
         Secrets::assertOutside($secretsPath, $project->path);
-        $registry = ToolFactory::forRun($project, $workspace, Secrets::fromFile($secretsPath));
+        // The knowledge base lives beside the project's state database like everything else durable
+        // about it, and is built only when the project actually has notes — see ToolFactory::knowledge().
+        $index = new KnowledgeIndex(new \PDO('sqlite:' . $this->projectsDir . '/' . $project->id . '.kb.db'));
+        $embedder = $this->config->baseUrl === null
+            ? null
+            : new OpenAiEmbedder(new CurlHttpClient(), $this->config->baseUrl, $this->config->apiKey);
+
+        $registry = ToolFactory::forRun(
+            $project,
+            $workspace,
+            Secrets::fromFile($secretsPath),
+            $index,
+            $embedder,
+        );
 
         // The store is durable (a killed run resumes from its snapshot); budgets cap the run total and
         // each exchange (0 = unlimited); named agent roles share the access and override only the model.

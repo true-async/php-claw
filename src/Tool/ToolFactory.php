@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Tool;
 
+use Claw\Knowledge\EmbedderInterface;
+use Claw\Knowledge\KnowledgeIndex;
 use Claw\Project\Project;
 use Claw\Workflow\WorkflowStore;
 use Claw\Workflow\WorkflowValidator;
@@ -21,8 +23,13 @@ use Claw\Workflow\WorkflowValidator;
  */
 final class ToolFactory
 {
-    public static function forRun(Project $project, Workspace $workspace, ?Secrets $secrets = null): Registry
-    {
+    public static function forRun(
+        Project $project,
+        Workspace $workspace,
+        ?Secrets $secrets = null,
+        ?KnowledgeIndex $index = null,
+        ?EmbedderInterface $embedder = null,
+    ): Registry {
         $registry = new Registry();
         $registry->add(new BashTool($project->path, $secrets));
         // Reading is guarded too: a secret leaves through a FILE the run wrote (a token in `.git/config`,
@@ -32,7 +39,35 @@ final class ToolFactory
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
 
+        // The knowledge base, when the project has one and there is something to embed with. Offered
+        // rather than required: a project with no kb/ folder should not be handed a tool that can only
+        // tell it so, and one with no embedder configured would get a tool that fails on every call.
+        $knowledge = self::knowledge($project, $index, $embedder);
+
+        if ($knowledge !== null) {
+            $registry->add($knowledge);
+        }
+
         return $registry;
+    }
+
+    /**
+     * The knowledge tool for a project, or null when it would be useless.
+     *
+     * Two conditions, and both are about not offering a capability that cannot work. A project with no
+     * `kb/` folder has nothing to search — the tool would exist to answer "nothing is written down",
+     * which a model would try several times before believing. And with no embedder there is nothing to
+     * turn a question into a vector, so every call would fail identically.
+     */
+    private static function knowledge(Project $project, ?KnowledgeIndex $index, ?EmbedderInterface $embedder): ?KnowledgeTool
+    {
+        $folder = $project->path . '/kb';
+
+        if ($index === null || $embedder === null || !is_dir($folder)) {
+            return null;
+        }
+
+        return new KnowledgeTool($index, $embedder, $folder);
     }
 
     /** The workflow-authoring tool, mixed into the registry only while GENERATING or REPAIRING a solver. */
