@@ -52,6 +52,49 @@ final class TraceReaderTest
         Assert::same($still['prompt'], 'and at what number?');
     }
 
+    /**
+     * A reply can outlive the process it was meant for, and a resumed run has to find it exactly once.
+     *
+     * The gate's live half — the channel the run sleeps on — dies with its process, so someone can
+     * answer a question nobody is at. The answer goes into the journal against the question it names,
+     * and when the run comes back it reads from its own cursor forward: a reply it has already acted on
+     * is behind the cursor, one it has not is in front. Without the cursor a resumed run would either
+     * take the same answer twice or ask again for one sitting there answered.
+     */
+    #[Test]
+    public function anAnswerWaitsInTheJournalUntilTheRunComesBackForIt(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $tracer = new Tracer('r1', new TraceStore($pdo));
+        $reader = new TraceReader($pdo);
+
+        $first = $tracer->question('which config key controls the timeout?');
+
+        // Nothing answered yet: a run arriving here has nothing to take and must ask.
+        $none = $reader->answeredAfter('r1', 0);
+        Assert::null($none);
+
+        // Someone answers while no process is serving the gate.
+        $tracer->answer($first, 'CLAW_TURN_SECONDS');
+
+        $waiting = $reader->answeredAfter('r1', 0);
+        Assert::true($waiting !== null);
+        Assert::same($waiting['id'], $first);
+        Assert::same($waiting['text'], 'CLAW_TURN_SECONDS');
+
+        // Once taken, the cursor moves past it and it is not served a second time.
+        $consumed = $reader->answeredAfter('r1', $waiting['id']);
+        Assert::null($consumed);
+
+        // A run that gates twice works through them in the order it asked, not newest first.
+        $second = $tracer->question('and should the retry be capped?');
+        $tracer->answer($second, 'yes, at three');
+
+        $next = $reader->answeredAfter('r1', $first);
+        Assert::true($next !== null);
+        Assert::same($next['text'], 'yes, at three');
+    }
+
     #[Test]
     public function rendersATraceTreeFromTheDb(): void
     {

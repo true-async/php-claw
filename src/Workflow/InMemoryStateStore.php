@@ -22,6 +22,9 @@ final class InMemoryStateStore implements WorkflowStateStoreInterface
     /** @var array<string, list<\Claw\Agent\Message>> "run\0step" → the exchange that step was in the middle of */
     private array $exchanges = [];
 
+    /** @var array<string, int> run → the id of the last gate answer it consumed */
+    private array $gateCursors = [];
+
     /** Monotonic counter behind nextId() — the in-memory stand-in for a DB autoincrement. */
     private int $seq = 0;
 
@@ -60,6 +63,16 @@ final class InMemoryStateStore implements WorkflowStateStoreInterface
     public function clearExchange(string $runId, string $step): void
     {
         unset($this->exchanges[$runId . "\0" . $step]);
+    }
+
+    public function saveGateCursor(string $runId, int $questionId): void
+    {
+        $this->gateCursors[$runId] = $questionId;
+    }
+
+    public function loadGateCursor(string $runId): int
+    {
+        return $this->gateCursors[$runId] ?? 0;
     }
 
     public function nextId(): string

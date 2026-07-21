@@ -82,5 +82,19 @@ interface WorkflowStateStoreInterface
     /** Forget a step's exchange — it finished, and what it did is in the snapshot and the journal now. */
     public function clearExchange(string $runId, string $step): void;
 
+    /**
+     * Remember which of the run's gate answers it has already taken, by question id.
+     *
+     * A gate's DURABLE half is the journal — a `question` row and, when someone replies, an `answer` row
+     * naming it. Its live half is a channel that dies with the process. So an answer can arrive for a run
+     * that is no longer running, and a resumed run has to be able to pick it up. Which means it has to
+     * know which ones it has already had: without a cursor a resumed run would either take an answer it
+     * already acted on, or ask again for one that is sitting there answered.
+     */
+    public function saveGateCursor(string $runId, int $questionId): void;
+
+    /** The last gate answer this run consumed; 0 when it has taken none. */
+    public function loadGateCursor(string $runId): int;
+
     public function nextId(): string;
 }

@@ -23,8 +23,10 @@ use Claw\Run\HttpRunFrontend;
 use Claw\Run\IssueRunner;
 use Claw\Run\Triage;
 use Claw\Trace\TraceBus;
+use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceRecordInterface;
+use Claw\Trace\TraceStore;
 use Claw\Trace\TraceWire;
 use Claw\Workflow\SqliteStateStore;
 use TrueAsync\HttpRequest;
@@ -153,10 +155,15 @@ final class Server
             }
 
             foreach ($store->runningRuns() as $run) {
-                $gate = $reader->openGate($run['id']);
-                $why = $gate === null
-                    ? "run #{$run['id']} was interrupted when the server stopped"
-                    : "run #{$run['id']} was waiting for an answer when the server stopped: {$gate['prompt']}";
+                // A run that was WAITING is left exactly as it is. Its question is in the journal, the
+                // ticket still says a person is expected, and that is all true — the only thing missing
+                // was a process, and answering now brings one back (see answer()). Settling it here would
+                // throw away a question somebody may be about to reply to.
+                if ($reader->openGate($run['id']) !== null) {
+                    echo "  waiting: run #{$run['id']} is at its gate; answering it will resume the run\n";
+
+                    continue;
+                }
 
                 $store->setRunStatus($run['id'], RunStatus::Failed);
 
@@ -164,9 +171,46 @@ final class Server
                     $store->setIssueStatus($run['issue'], IssueStatus::Open);
                 }
 
-                echo "  adopted: {$why}\n";
+                echo "  adopted: run #{$run['id']} was interrupted when the server stopped\n";
             }
         }
+    }
+
+    /**
+     * Answer a gate whose run is no longer running: record the reply, then start the run again.
+     *
+     * The reply is recorded FIRST and the run started second, because the order is what makes it work —
+     * the resumed run reads the journal on its way into the gate, so the answer has to be there before
+     * it looks. Reversed, it would ask again and the reply would land on a question nobody is at.
+     */
+    private function deliverToADeadGate(
+        HttpResponse $response,
+        ProjectStoreInterface $store,
+        string $key,
+        Issue $issue,
+        string $text,
+    ): void {
+        $reader = new TraceReader($store->pdo());
+        $runId = null;
+        $gate = null;
+
+        foreach ($store->runningRuns() as $run) {
+            if ($run['issue'] === $issue->id && ($found = $reader->openGate($run['id'])) !== null) {
+                $runId = $run['id'];
+                $gate = $found;
+
+                break;
+            }
+        }
+
+        if ($runId === null || $gate === null) {
+            $response->json(['error' => 'no run is waiting for an answer on this issue'], 409);
+
+            return;
+        }
+
+        new Tracer($runId, new TraceStore($store->pdo()))->answer($gate['id'], $text);
+        $this->start($response, $key, $issue->id);
     }
 
     /** Route one request. Both args come straight from the server extension's handler. */
@@ -1037,16 +1081,9 @@ final class Server
      */
     private function answer(HttpRequest $request, HttpResponse $response, string $key, string $issueId): void
     {
-        $channel = $this->gates[$issueId] ?? null;
-
-        if ($channel === null) {
-            $response->json(['error' => 'no run is waiting for an answer on this issue'], 409);
-
-            return;
-        }
-
         try {
-            $issue = $this->store($key)->loadIssue($issueId);
+            $store = $this->store($key);
+            $issue = $store->loadIssue($issueId);
         } catch (\Exception $e) {
             $response->json(['error' => $e->getMessage()], 404);
 
@@ -1061,9 +1098,23 @@ final class Server
 
         $payload = \json_decode($request->getBody(), true);
         $text = \is_array($payload) && isset($payload['text']) ? (string) $payload['text'] : '';
+        $channel = $this->gates[$issueId] ?? null;
 
-        $channel->send($text);   // wake the parked run; unbuffered, so this returns once the run takes it
-        $response->json(['ok' => true], 202);
+        if ($channel !== null) {
+            $channel->send($text);   // wake the parked run; unbuffered, so this returns once the run takes it
+            $response->json(['ok' => true], 202);
+
+            return;
+        }
+
+        // No live gate: the run that asked is gone — the server was restarted, or it was killed. The
+        // QUESTION is not gone, because that half was written down. So the answer is written down against
+        // it and the run is started again; the gate reads the journal before it asks, finds this reply
+        // waiting, and carries on from there rather than asking the same thing a second time.
+        //
+        // This used to be a flat 409 forever, which made a restart mean the ticket could never be
+        // answered by anyone, while still claiming to be waiting for someone.
+        $this->deliverToADeadGate($response, $store, $key, $issue, $text);
     }
 
 }

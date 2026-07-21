@@ -12,6 +12,7 @@ use Claw\Trace\LiveTraceSink;
 use Claw\Trace\TraceBus;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceStore;
+use Claw\Workflow\SqliteStateStore;
 
 /**
  * The HTTP front-end of a run (the dashboard server): the human answers over POST .../answer through a
@@ -38,7 +39,15 @@ final readonly class HttpRunFrontend implements RunFrontendInterface
 
     public function human(Tracer $tracer): SpeakerInterface
     {
-        return new HttpGateSpeaker($tracer, $this->store, $this->issueId, $this->answers);
+        // The same store the run's own state lives in: the gate keeps a cursor there, so a reply that
+        // arrived while the run was dead is taken exactly once when it comes back.
+        return new HttpGateSpeaker(
+            $tracer,
+            $this->store,
+            $this->issueId,
+            $this->answers,
+            new SqliteStateStore($this->store->pdo()),
+        );
     }
 
     public function approveSolver(string $solverPath, string $solverCode): bool
