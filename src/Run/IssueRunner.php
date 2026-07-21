@@ -190,6 +190,7 @@ final readonly class IssueRunner
             Secrets::fromFile($secretsPath),
             $index,
             $embedder,
+            $this->config->turnTimeoutMs,
         );
 
         // The store is durable (a killed run resumes from its snapshot); budgets cap the run total and

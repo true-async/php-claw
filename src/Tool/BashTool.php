@@ -15,9 +15,19 @@ use Claw\Exceptions\ToolException;
  */
 final readonly class BashTool implements ToolInterface
 {
+    /**
+     * Signal numbers rather than `SIGTERM`/`SIGKILL`, because those constants come from `pcntl` and this
+     * has to work without it — CI runs a build that does not load it, which is where the difference was
+     * found. The numbers are fixed by POSIX on every platform this runs on.
+     */
+    private const int SIG_TERM = 15;
+
+    private const int SIG_KILL = 9;
+
     public function __construct(
         private string $cwd,
         private ?Secrets $secrets = null,
+        private int $timeoutMs = 0,
     ) {
     }
 
@@ -95,28 +105,129 @@ final readonly class BashTool implements ToolInterface
         // to a `sh` resolved from PATH (e.g. the one shipped with Git Bash).
         $shell = DIRECTORY_SEPARATOR === '\\' ? 'sh' : '/bin/sh';
 
-        $process = proc_open([$shell, '-c', $command], $descriptors, $pipes, $this->cwd, $env);
+        // Its own process group, so the whole tree can be signalled: `sh -c 'a | b & c'` leaves
+        // grandchildren that a signal to the shell alone never reaches, and those are exactly the
+        // long-running things a deadline exists for.
+        $process = proc_open(
+            [$shell, '-c', $command],
+            $descriptors,
+            $pipes,
+            $this->cwd,
+            $env,
+            ['create_process_group' => true],
+        );
 
         if (!\is_resource($process)) {
             throw new ToolException('bash: failed to start the command');
         }
 
         fclose($pipes[0]);
-        $stdout = (string) stream_get_contents($pipes[1]);
-        $stderr = (string) stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exit = proc_close($process);
+        [$stdout, $stderr, $exit, $timedOut] = $this->drain($process, $pipes);
 
         // Take the values back out before anyone — the model, the journal, a person reading the trace —
         // sees them. The command chose what to print; this decides what leaves the tool.
         $output = ($this->secrets ?? Secrets::none())->redact(trim($stdout . ($stderr !== '' ? "\n" . $stderr : '')));
+
+        if ($timedOut) {
+            $seconds = round($this->timeoutMs / 1000, 1);
+
+            return trim("[timed out after {$seconds}s — the command was killed]\n" . $output);
+        }
 
         if ($exit !== 0) {
             return trim("[exit {$exit}]\n" . $output);
         }
 
         return $output === '' ? '(no output)' : $output;
+    }
+
+    /**
+     * Read the pipes to the end, or until the deadline — and if the deadline comes first, KILL the
+     * command rather than merely stopping waiting for it.
+     *
+     * This exists because the obvious arrangement does not work, and the evidence is worth keeping. The
+     * deadline used to live entirely in {@see \Claw\Exec\TimeoutMiddleware}, which cancels the coroutine
+     * this runs in. Measured: a `sleep 40` capped at two seconds returned "timed out after 2s" on time
+     * and was STILL RUNNING afterwards — one survivor counted out of /proc, alive for as long as the PHP
+     * process lived, which in the dashboard server is its whole lifetime.
+     *
+     * Probed further, with a `catch` around the read that logged whether it was ever reached: it was
+     * NOT. A coroutine blocked in `stream_get_contents` does not unwind, so a cancellation cannot reach
+     * anything here — no `finally`, no destructor, nothing that could call `proc_terminate`. Which is
+     * why the deadline has to be held by the only thing that owns the process handle, and why the read
+     * must never block: something has to be awake to notice the time.
+     *
+     * `Async\delay` between polls rather than `usleep` — it suspends this coroutine and blocks nothing,
+     * which on a server handling other work is the whole difference.
+     *
+     * @param resource             $process
+     * @param array<int, resource> $pipes
+     *
+     * @return array{0: string, 1: string, 2: int, 3: bool} stdout, stderr, exit code, timed out
+     */
+    private function drain($process, array $pipes): array
+    {
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $deadline = $this->timeoutMs > 0 ? microtime(true) + ($this->timeoutMs / 1000) : null;
+        $stdout = '';
+        $stderr = '';
+
+        while (true) {
+            $stdout .= (string) fread($pipes[1], 65536);
+            $stderr .= (string) fread($pipes[2], 65536);
+
+            $status = proc_get_status($process);
+
+            if (!$status['running']) {
+                // Drain whatever is still buffered: the process is gone but its output is not.
+                $stdout .= (string) stream_get_contents($pipes[1]);
+                $stderr .= (string) stream_get_contents($pipes[2]);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                proc_close($process);
+
+                return [$stdout, $stderr, $status['exitcode'], false];
+            }
+
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                self::kill($process, $status['pid']);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                proc_close($process);
+
+                return [$stdout, $stderr, -1, true];
+            }
+
+            \Async\delay(20);
+        }
+    }
+
+    /**
+     * Stop the command and everything it started. The GROUP first — a pipeline is several processes and
+     * signalling the shell alone leaves the rest running, which is how a "killed" command goes on using
+     * the machine. TERM before KILL so anything with cleanup gets its chance, and a short grace period
+     * because the difference between the two is a process tree that tidies up and one that does not.
+     *
+     * @param resource $process
+     */
+    private static function kill($process, int $pid): void
+    {
+        if ($pid > 0 && \function_exists('posix_kill')) {
+            @posix_kill(-$pid, self::SIG_TERM);   // negative pid = the whole process group
+        }
+
+        @proc_terminate($process, self::SIG_TERM);
+        \Async\delay(100);
+
+        if (@proc_get_status($process)['running']) {
+            if ($pid > 0 && \function_exists('posix_kill')) {
+                @posix_kill(-$pid, self::SIG_KILL);
+            }
+
+            @proc_terminate($process, self::SIG_KILL);
+        }
     }
 
     /**

@@ -122,7 +122,13 @@ final class Environment
         $timeout = $this->find(EnvKey::ToolTimeoutMs);
 
         if (\is_int($timeout) && $timeout > 0) {
-            $middlewares[] = new TimeoutMiddleware($timeout);
+            // LOOSER than the deadline a tool holds for itself, deliberately. `bash` enforces this same
+            // figure over its own non-blocking read and kills the command; if this fired first it would
+            // cancel the coroutine before that could happen, and a cancelled coroutine cannot reach the
+            // process handle — which is exactly the leak {@see \Claw\Tool\BashTool::drain()} was written
+            // to close. So this is the backstop for tools that cannot bound themselves, and it stands
+            // behind the ones that can.
+            $middlewares[] = new TimeoutMiddleware($timeout + 5_000);
         }
 
         return new ChainExecutor($middlewares, static function (ToolCall $call) use ($registry): ToolResultBlock {
