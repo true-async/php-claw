@@ -15,12 +15,24 @@ use Claw\Agent\ToolResultBlock;
 use Claw\Tool\ToolCall;
 
 /**
- * Bounds a single tool run. The tool runs in a child coroutine; if it outlives
- * the deadline the coroutine is cancelled — and TrueAsync cancellation propagates
- * into an awaited `bash` subprocess, killing it — and an error result is returned.
+ * Bounds a single tool run: the tool runs in a child coroutine, and if it outlives the deadline the
+ * coroutine is cancelled and an error result is returned. Sits innermost (just before the terminal), so
+ * a slow tool is capped but the user's approval prompt is not.
  *
- * Sits innermost (just before the terminal), so a slow tool is capped but the
- * user's approval prompt is not.
+ * WHAT IT DOES NOT DO, measured rather than assumed: it does not kill a `bash` subprocess. This used to
+ * claim that "TrueAsync cancellation propagates into an awaited `bash` subprocess, killing it". It does
+ * not. A `sleep 40` capped at two seconds returns "timed out after 2s" on time — and is still running
+ * afterwards, for as long as the PHP process lives. On the CLI that is seconds; in the dashboard server
+ * it is the server's whole lifetime, so timed-out commands accumulate.
+ *
+ * The reason is that {@see \Claw\Tool\BashTool} reads its pipes with `stream_get_contents`, a blocking
+ * call the event loop does not drive. Cancelling the child coroutine cannot unwind it: the cancellation
+ * lands only once the read returns, which is when the command has finished of its own accord. So the
+ * caller is freed on time and the command is not stopped.
+ *
+ * Fixing it belongs in BashTool, the only place holding the process handle: its own deadline, its own
+ * non-blocking read, its own `proc_terminate`. See `dev/TODO.md`. Recorded here rather than quietly,
+ * because a comment claiming a subprocess is killed is worse than none — someone relies on it.
  */
 final readonly class TimeoutMiddleware implements MiddlewareInterface
 {
