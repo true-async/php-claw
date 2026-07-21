@@ -84,6 +84,35 @@ final class TriageTest
         });
     }
 
+    /**
+     * A re-triage must not be told to use a tool it was not given.
+     *
+     * `RecallTool` is registered only when `analyse()` is handed the failed run's id, and two of the
+     * three doors do not pass one — the dashboard and the CLI both call `analyse($issue)`. The failure
+     * history fires on any failed attempt, so it used to instruct a near-mandatory `recall` call ("and
+     * it usually does") into a palette that had no such tool.
+     */
+    #[Test]
+    public function theFailedRunIsOfferedOnlyWhereRecallIsActuallyOnThePalette(): void
+    {
+        $this->withProject(function (ProjectStore $store, Config $config): void {
+            $issue = $store->addIssue('something that has been tried before');
+            $store->setStrategy($issue->id, \Claw\Project\Strategy::Direct, 'small', false);
+            $store->failStrategy($issue->id, 'the tests stayed red');
+
+            $agent = new ScriptedAgent(
+                new AgentResponse([new TextBlock('thinking')], [], StopReason::EndTurn, new Usage(1, 1), 'thinking'),
+                new AgentResponse([new TextBlock('thinking')], [], StopReason::EndTurn, new Usage(1, 1), 'thinking'),
+            );
+
+            new Triage($store, $config, $agent)->analyse($issue);   // no run id -> no recall tool
+
+            $brief = self::firstUserText($agent);
+            Assert::true(str_contains($brief, 'the tests stayed red'));   // the history is still shown
+            Assert::false(str_contains($brief, 'recall'));                // but the tool is not offered
+        });
+    }
+
     /** The ticket brief — the first user message the ProjectManager was handed. */
     private static function firstUserText(ScriptedAgent $agent): string
     {

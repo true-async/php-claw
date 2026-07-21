@@ -53,7 +53,7 @@ final readonly class ProjectManagerTool implements ToolInterface
         return 'Manage this project\'s tickets. '
             . "action='create_issue' (title, optional description, optional parent) opens an issue — pass "
             . 'parent to open it as a SUB-ISSUE of a task too big to solve in one run; '
-            . "action='set_strategy' (issue, type, strategy, reason, optional needs_human) records WHAT KIND "
+            . "action='set_strategy' (issue, type, strategy, reason, optional requires_approval) records WHAT KIND "
             . 'of work an issue is and HOW it is to be solved — type is one of bug, feature, refactor, '
             . 'design, research, chore; strategy is one of direct (one agent, a localized change), library '
             . '(a ready-made workflow fits — then `workflow` must name it, exactly as `list_workflows` gave '
@@ -101,9 +101,15 @@ final readonly class ProjectManagerTool implements ToolInterface
                         . "gave it; required when strategy is 'library' and ignored otherwise",
                 ],
                 'reason' => ['type' => 'string', 'description' => 'why — the justification for this decision'],
-                'needs_human' => [
+                // NOT `needs_human`, which is also an ACTION on this tool meaning something else entirely
+                // (park the ticket for a person). One word for two things is a choice a model gets wrong
+                // in the direction that costs most: told to "set needs_human=true" when its escalation
+                // ladder was spent, it would set the flag on a `set_strategy` call that could only be
+                // refused, instead of calling the action that would have parked the ticket.
+                'requires_approval' => [
                     'type' => 'boolean',
-                    'description' => 'true if a person must approve before the work runs',
+                    'description' => 'true if a person must approve before the work runs (this only gates '
+                        . "the strategy; to hand the ticket over entirely, use action='needs_human')",
                 ],
             ],
             'required' => ['action'],
@@ -182,7 +188,10 @@ final readonly class ProjectManagerTool implements ToolInterface
         // as it was and the model corrects itself against an unchanged state rather than a half-applied one.
         $type = IssueType::parse($this->text($input, 'type'));
         $strategy = Strategy::parse($this->text($input, 'strategy'));
-        $needsHuman = $this->flag($input, 'needs_human');
+        // The old key is still honoured, and deliberately OR-ed rather than replaced: it is gone from the
+        // schema, so a model only sends it from habit — and reading it as "no approval needed" would let
+        // a verdict that asked for a person run without one. Where the two disagree, err towards asking.
+        $needsHuman = $this->flag($input, 'requires_approval') || $this->flag($input, 'needs_human');
 
         // The type is written first and separately BECAUSE it survives what follows: setStrategy() refuses
         // a verdict that does not escalate past one that already failed, and the classification is right

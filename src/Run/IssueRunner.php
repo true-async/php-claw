@@ -15,6 +15,7 @@ use Claw\Agent\SpeakerRole;
 use Claw\Config;
 use Claw\Exceptions\AgentException;
 use Claw\Exceptions\ClawException;
+use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStoreInterface;
@@ -89,13 +90,22 @@ final readonly class IssueRunner
         Judge only the ticket in front of you. A test suite that was already failing for unrelated
         reasons is not this ticket's problem; say so and judge what this ticket asked for.
 
-        Reply with EXACTLY one of:
-        - `SOLVED` — you ran or read something that shows the ticket's request is now satisfied. Say
-          in one further sentence what you checked and what you saw.
-        - a short sentence saying what is still missing or wrong. Nothing else: no preamble, no
-          summary of the work, no encouragement.
+        You may read and run things. You must NOT change anything — no edits, no state-changing git or
+        shell commands. A project you modified is a verdict you invalidated.
 
-        If you cannot establish it either way, that is NOT solved — say what you could not check.
+        Your FIRST LINE is the verdict, and it must be one of these two words and NOTHING else on
+        that line — no backticks, no bold, no preamble, no trailing sentence:
+
+            SOLVED
+            UNSOLVED
+
+        Put what you checked and what you saw on the lines AFTER it: one or two sentences naming the
+        command you ran and its result, or what is still missing. On an UNSOLVED verdict those lines
+        are what the next attempt is given to work from, so say what is wrong, not that it is wrong.
+
+        The first line is read by code, not by a person, and a line that is neither word counts as
+        UNSOLVED. If you cannot establish it either way, that is UNSOLVED — say what you could not
+        check.
         PROMPT;
 
     /** The supervisor agent's standing role — it settles in-run escalations or defers to the human. */
@@ -103,6 +113,11 @@ final readonly class IssueRunner
         You are the SUPERVISOR of an autonomous coding workflow. You are consulted when a step is stuck:
         a worker pauses with a question, or a step's work failed review and the run asks whether to keep
         going. Your job is to UNBLOCK with the smallest sound decision, so the run does not churn.
+
+        THE CONTROL WORDS ARE WHOLE REPLIES. `accept`, `stop` and `ESCALATE` count only when the word is
+        the ENTIRE answer — nothing before it, nothing after it. A reply that merely contains one is read
+        as guidance and sent back to the step, which is deliberate: "Stop rerunning the whole suite, run
+        only the failing test" is advice, not an order to abandon the run.
 
         How to answer (reply with ONLY the decision, no preamble):
         - To resolve a "did not pass review / is this OK?" escalation, reply with exactly one of:
@@ -368,7 +383,14 @@ final readonly class IssueRunner
      *
      * The shape here is the one that already works elsewhere in this system — {@see Triage}: a plain
      * turn loop that decides ONE thing, outside the work, with tools to check for itself, and whose
-     * answer the CODE branches on. It gets the read-only palette, so it can look and not touch.
+     * answer the CODE branches on.
+     *
+     * Its palette is narrowed to reading — plus `bash`, because a judge that cannot RUN the tests
+     * cannot judge anything, which is the whole point. That does mean the palette is not read-only
+     * in the sense the word usually carries: `bash` writes as readily as it reads. Nothing mechanical
+     * stops the judge editing the project, so {@see JUDGE_SYSTEM} forbids it in as many words. Said
+     * plainly here because a comment claiming a restraint the code does not impose is exactly the
+     * kind of paper gate this pass exists to remove.
      */
     private function unsolvedReason(RunContext $ctx): ?string
     {
@@ -395,7 +417,37 @@ final readonly class IssueRunner
             return 'the completion check could not run: ' . $e->getMessage();
         }
 
-        return str_starts_with(strtoupper($answer), 'SOLVED') ? null : ($answer === '' ? 'the completion check returned nothing' : $answer);
+        return self::readVerdict($answer);
+    }
+
+    /**
+     * Read the judge's verdict off its FIRST LINE: null when it says solved, otherwise the reason.
+     *
+     * The whole line must be the word, because a prefix test is not a verdict — it used to be
+     * `str_starts_with(strtoupper($answer), 'SOLVED')`, and "Solved for the happy path, but the null
+     * case still fails" closed the ticket. Decoration a model reaches for anyway (backticks, bold, a
+     * trailing full stop) is stripped before the comparison, because the same prompt used to print
+     * the token in backticks and a judge that copied that formatting had its PASSING verdict handed
+     * back to the ProjectManager as the reason the run failed.
+     *
+     * Anything else FAILS CLOSED. An unreadable verdict has cleared nothing, and the whole reply
+     * becomes the reason so the person reading the ledger sees what was actually said.
+     */
+    private static function readVerdict(string $answer): ?string
+    {
+        if (trim($answer) === '') {
+            return 'the completion check returned nothing';
+        }
+
+        $first = trim((string) strtok($answer, "\n"));
+        $word = strtoupper(trim($first, " \t`*_#.:—–-"));
+
+        if ($word === 'SOLVED') {
+            return null;
+        }
+
+        // Keep the judge's own words: the detail lines are what the next attempt works from.
+        return $answer;
     }
 
     /**
@@ -617,7 +669,7 @@ final readonly class IssueRunner
             } catch (\Cancellation $cancellation) {
                 throw $cancellation;   // a cancelled run must stop — never "repair" a cancellation
             } catch (\Throwable $e) {
-                // Repair answers ONE question: is this workflow's code broken? Two kinds of failure
+                // Repair answers ONE question: is this workflow's code broken? Three kinds of failure
                 // arrive here and only one of them is that.
                 //
                 // An AgentException is the model backend refusing or failing — a malformed request, a
@@ -626,9 +678,18 @@ final readonly class IssueRunner
                 // then runs that invention. Measured: a 400 from a malformed history had the supervisor
                 // rewrite a workflow whose source it could not even read.
                 //
+                // A DELIBERATE stop is the run doing what it was told: the budget ran out, the supervisor
+                // said `stop`, a step exhausted its review rounds with nobody to escalate to. The code is
+                // not merely innocent here, it is being repaired AGAINST a decision that was taken on
+                // purpose — the supervisor was sent to rewrite the class it had itself just stopped, and
+                // the cheapest way to satisfy "fix the cause of: run stopped by the supervisor" is to
+                // delete the critic that stopped it. A budget stop was worse still: the repair's own
+                // model call hit the same spent budget, so the ticket came back reading "the solver
+                // crashed and could not be repaired: run stopped: budget spent".
+                //
                 // Everything else — TypeError, ParseError, a step calling a method that is not there —
                 // really can mean the generated code is broken, which is what repair is for.
-                if (!$repairable || $e instanceof AgentException) {
+                if (!$repairable || $e instanceof AgentException || ($e instanceof WorkflowException && $e->deliberate)) {
                     $ctx->tracer->exit($solverSpan);
                     $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
                     $this->giveBackToProjectManager($ctx->issue, "run #{$ctx->runId} failed: {$e->getMessage()}", $ctx->runId);
@@ -697,8 +758,13 @@ final readonly class IssueRunner
             {
                 $answer = trim($this->supervisor->reply($incoming));
 
-                // ESCALATE (or an empty answer) -> pass up to the next tier (the human).
-                return $answer === '' || str_contains(strtoupper($answer), 'ESCALATE') ? null : $answer;
+                // ESCALATE (or an empty answer) -> pass up to the next tier (the human). Matched as the
+                // WHOLE reply, not a substring: `str_contains(…, 'ESCALATE')` sent the guidance "no need
+                // to escalate, add the missing import" to a person instead of back to the step, which is
+                // the reverse of what it says. Anything with more in it is an answer, and answers go back.
+                $word = strtoupper(trim($answer, " \t`*_.!—–-"));
+
+                return $answer === '' || $word === 'ESCALATE' ? null : $answer;
             }
         };
     }

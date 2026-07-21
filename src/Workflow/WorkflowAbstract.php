@@ -748,7 +748,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             }
         }
 
-        throw new WorkflowException('run stopped: ' . $budget->reason());
+        throw WorkflowException::stopped('run stopped: ' . $budget->reason());
     }
 
     /** The configured reaction to a spent run total — {@see BudgetPolicy::Stop} when unset. */
@@ -938,7 +938,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         if (!$channel instanceof SpeakerInterface) {
             if ($stuck) {
-                throw new WorkflowException(
+                throw WorkflowException::stopped(
                     "step '{$name}' still failed review after {$round} rounds, with no supervisor to escalate to",
                 );
             }
@@ -946,35 +946,51 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return $findings;   // no supervisor/human -> self-correct using the critic's findings
         }
 
-        // $work is the step's result (its artifacts) — the same context the critic had. The supervisor is
-        // an agent with tools, so it can recall(what='step', name='…') for more if it needs to.
+        // $work is the step's result (its artifacts) — the same context the critic had, and on the run
+        // path it is ALL the supervisor gets: that tier is built tool-less (see IssueRunner::
+        // supervisorSpeaker()), so it judges from this text and cannot go and look. Behind it the human
+        // tier can. Do not write here that it can recall() for more; it could not, and the claim stood
+        // in this comment for as long as the behaviour contradicted it.
+        //
+        // The two control words are quoted so the reply can be matched EXACTLY. Anything else is
+        // guidance, which is the safe default: a misread must send the step back for another attempt,
+        // never close it or kill the run.
         $prompt = $stuck
             ? "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
                 . "Latest findings:\n{$findings}\n\nThe step's result (artifacts):\n{$work}\n\n"
-                . "Is this OK? Reply 'accept' to keep it as is, 'stop' to abort, or guidance for one more try."
+                . 'Is this OK? Reply with exactly `accept` to keep it as is, exactly `stop` to abort, '
+                . 'or guidance for one more try. Anything else is read as guidance.'
             : "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
                 . "The step's result (artifacts):\n{$work}\n\n"
-                . "Reply with guidance to fix it, or 'accept' to keep it as is, or 'stop' to abort.";
+                . 'Reply with guidance to fix it, or exactly `accept` to keep it as is, or exactly '
+                . '`stop` to abort. Anything else is read as guidance.';
 
         $reply = $channel->reply($prompt);
+        $answer = trim($reply ?? '');
 
-        if ($reply === null) {
+        // No answer at all — nobody on the channel, or a person who pressed Enter. It is NOT acceptance:
+        // silence used to close out work the critic had just rejected, which made the emptiest possible
+        // reply the strongest verdict in the system. It is also not a stop; below the cap the step
+        // self-corrects on the findings, and only a stuck step with no one to ask gives up.
+        if ($answer === '') {
             if ($stuck) {
-                throw new WorkflowException("step '{$name}' still failed review after {$round} rounds");
+                throw WorkflowException::stopped("step '{$name}' still failed review after {$round} rounds");
             }
 
-            return $findings;   // the chain passed all the way up with no answer -> self-correct
+            return $findings;
         }
 
-        $answer = trim($reply);
-        $lower = strtolower($answer);
+        // Exact words, not prefixes. `str_starts_with($lower, 'stop')` turned the guidance "Stop
+        // rerunning the whole suite, run only the failing test" into a killed run, and anything opening
+        // with "acceptable" into acceptance — while this same prompt asks for prose guidance.
+        $word = strtolower(trim($answer, " \t`*_.!—–-"));
 
-        if ($answer === '' || str_starts_with($lower, 'accept')) {
+        if ($word === 'accept') {
             return null;   // accept the work as-is
         }
 
-        if (str_starts_with($lower, 'stop')) {
-            throw new WorkflowException("run stopped at step '{$name}' by the supervisor");
+        if ($word === 'stop') {
+            throw WorkflowException::stopped("run stopped at step '{$name}' by the supervisor");
         }
 
         return $answer;   // guidance for the re-run
