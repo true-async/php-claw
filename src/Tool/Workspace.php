@@ -40,7 +40,7 @@ final readonly class Workspace
     ];
 
     /** Extensions that carry a private key whatever the file is called. */
-    private const array SECRET_EXTENSIONS = ['pem', 'key', 'p12', 'pfx', 'jks', 'keystore'];
+    private const array SECRET_EXTENSIONS = ['pem', 'key', 'p12', 'pfx', 'jks', 'keystore', 'secrets'];
 
     /** Names that look like a secret file but exist to be read — a template, not a credential. */
     private const array ALLOWED_EXAMPLES = ['.env.example', '.env.sample', '.env.dist', '.env.template'];

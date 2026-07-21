@@ -23,6 +23,7 @@ use Claw\Project\ProjectStoreInterface;
 use Claw\Project\RunStatus;
 use Claw\Project\Strategy;
 use Claw\Tool\RecallTool;
+use Claw\Tool\Secrets;
 use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
 use Claw\Trace\Tracer;
@@ -169,7 +170,11 @@ final readonly class IssueRunner
         $workspace = new Workspace($project->path);
         $workflowStore = new WorkflowStore($this->projectsDir . '/' . $project->id . '-workflows', $project->id);
         $projectDb = $this->store->pdo();   // the one open connection: shared by the state store + trace
-        $registry = ToolFactory::forRun($project, $workspace);
+        // The project's credentials, read from beside its state database — never from inside the project
+        // itself, which is both within the run's reach and within the project's git.
+        $secretsPath = Secrets::pathFor($this->projectsDir, $project->id);
+        Secrets::assertOutside($secretsPath, $project->path);
+        $registry = ToolFactory::forRun($project, $workspace, Secrets::fromFile($secretsPath));
 
         // The store is durable (a killed run resumes from its snapshot); budgets cap the run total and
         // each exchange (0 = unlimited); named agent roles share the access and override only the model.

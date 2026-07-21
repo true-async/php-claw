@@ -15,8 +15,10 @@ use Claw\Exceptions\ToolException;
  */
 final readonly class BashTool implements ToolInterface
 {
-    public function __construct(private string $cwd)
-    {
+    public function __construct(
+        private string $cwd,
+        private ?Secrets $secrets = null,
+    ) {
     }
 
     public function name(): string
@@ -26,7 +28,22 @@ final readonly class BashTool implements ToolInterface
 
     public function description(): string
     {
-        return 'Run a shell command in the workspace and return its combined output and exit code.';
+        $names = ($this->secrets ?? Secrets::none())->names();
+
+        if ($names === []) {
+            return 'Run a shell command in the workspace and return its combined output and exit code.';
+        }
+
+        // Named, never valued. The model has to know a credential is reachable or it cannot use one; it
+        // must not know what the credential IS, or it could put it somewhere that gets written down.
+        return 'Run a shell command in the workspace and return its combined output and exit code. '
+            . 'This project has credentials available to the shell as environment variables: $'
+            . implode(', $', $names) . '. Use them by name — `curl -H "Authorization: Bearer $'
+            . $names[0] . '" …` — and do not try to read or copy the values. A value printed verbatim is '
+            . 'stripped from the output before you see it, but that is a safety net, not a wall: a value '
+            . 'you transform (encode it, split it, put it in a URL a command then writes to a file) will '
+            . 'NOT be stripped, and everything you print or write is recorded in this project\'s journal '
+            . 'permanently. Pass them to the command that needs them and nowhere else.';
     }
 
     public function inputSchema(): array
@@ -59,12 +76,19 @@ final readonly class BashTool implements ToolInterface
             2 => ['pipe', 'w'],
         ];
 
-        // Scrubbed environment: keep only PATH/HOME/LANG so host secrets
-        // (API keys, bot token) never reach the command.
+        // Scrubbed environment: keep only PATH/HOME/LANG so the HOST's secrets — the api key this
+        // process runs on, a bot token — never reach the command. The PROJECT's own secrets are then
+        // added deliberately, and they are the only ones here.
+        //
+        // As environment rather than by rewriting the command, which matters twice over: the shell does
+        // the expansion, so quoting behaves exactly as anyone reading the command would expect; and the
+        // command is never rewritten, so what the tracer records is what the MODEL wrote — `$STRIPE_KEY`
+        // unexpanded — rather than the value it stood for.
         $env = [
             'PATH' => getenv('PATH') ?: '/usr/local/bin:/usr/bin:/bin',
             'HOME' => $this->cwd,
             'LANG' => 'C.UTF-8',
+            ...($this->secrets ?? Secrets::none())->environment(),
         ];
 
         // POSIX `sh` on Unix; on Windows /bin/sh is not a valid path, so fall back
@@ -84,7 +108,9 @@ final readonly class BashTool implements ToolInterface
         fclose($pipes[2]);
         $exit = proc_close($process);
 
-        $output = trim($stdout . ($stderr !== '' ? "\n" . $stderr : ''));
+        // Take the values back out before anyone — the model, the journal, a person reading the trace —
+        // sees them. The command chose what to print; this decides what leaves the tool.
+        $output = ($this->secrets ?? Secrets::none())->redact(trim($stdout . ($stderr !== '' ? "\n" . $stderr : '')));
 
         if ($exit !== 0) {
             return trim("[exit {$exit}]\n" . $output);

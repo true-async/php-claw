@@ -17,6 +17,7 @@ final readonly class ReadFileTool implements ToolInterface
     public function __construct(
         private Workspace $workspace,
         private int       $maxBytes = 100_000,
+        private ?Secrets  $secrets = null,
     ) {
     }
 
@@ -62,7 +63,18 @@ final readonly class ReadFileTool implements ToolInterface
             throw new ToolException("read_file: cannot read {$path}");
         }
 
-        if (strlen($data) > $this->maxBytes) {
+        // BEFORE truncating, and this order is the whole point: a value cut across the byte limit would
+        // match nothing and both halves would survive.
+        //
+        // Reading is guarded as well as running because the value gets OUT through a file. `git remote
+        // set-url origin "https://x:$GH_TOKEN@github.com/…"` — the canonical use of a token, and exactly
+        // what the bash tool invites — writes the expanded URL into `.git/config`. `gh auth login` and
+        // npm and pip cache credentials under $HOME, which for a run IS the project folder. Any of those
+        // files read back on a later turn would hand the value to the model and to the journal, and
+        // `.git/config` is not a credential-shaped name that any blocklist would have caught.
+        $data = ($this->secrets ?? Secrets::none())->redact($data);
+
+        if (\strlen($data) > $this->maxBytes) {
             return substr($data, 0, $this->maxBytes) . "\n... [truncated]";
         }
 
