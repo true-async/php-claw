@@ -273,3 +273,77 @@ solved", and it gets the same kind of answer.
 **Consequence for authors.** A generated solver can no longer end its run early, so the recipe's
 instruction to plan the fewest steps is now the only thing standing between a task and ceremony —
 which is where that pressure belongs.
+
+---
+
+## 2026-07-21 — Two kinds of tool, and `artifact` is one of the second kind
+
+**Decision.** There are exactly two ways a tool reaches a model, and they are not
+interchangeable:
+
+1. **Registry tools** — a class under `src/Tool/` implementing `ToolInterface`, added to a
+   `Registry` and composed into a run's palette by `ToolFactory`. They exist independently
+   of any workflow: `bash`, `read_file`, `list_files`, `recall`, `project_manager`.
+2. **Workflow-local tools** — a method on the workflow itself marked `#[Tool]` and wrapped
+   by `MethodTool`, its input schema derived from the method's typed parameters. It runs in
+   the workflow's own scope, so it reaches files and the shell only through
+   `WorkflowAbstract::tool()` and is never more privileged than the workflow owning it.
+
+`artifact` is of the second kind, and `WorkflowAbstract` registers it for **every** workflow.
+It is always present, like `recall` — not something an author remembers to add.
+
+**Why it was not, until now.** `artifact()` has only ever been a `protected` PHP method,
+callable from a step's own code. No `artifact` tool has existed at any point in this
+repository's history, and nothing parses artifact markup out of a model's text either.
+`FixBugWorkflow` — the one hand-written entry on the shelf, never run live — instructs the
+model to "call `artifact`", which could not work: both of its critic'd steps demand evidence
+the step has no way to record, so both were guaranteed to exhaust their rework rounds.
+
+**Why a tool is the right shape.** The model is the party that knows what is worth recording
+and in what form: a path to a file it just wrote, a block of text, or the command whose
+output should stand as proof. A PHP-side call can only record what the workflow's author
+anticipated, which is why a hand-written workflow that guessed wrong had no recourse.
+
+**Evidence stays uncomposable.** The tool takes the *command*, not its output, and runs it
+itself through `WorkflowAbstract::tool()`. The model chooses what to prove; the code
+produces the proof. Letting a model type the text of an `evidence:` artifact would void the
+one property that artifact kind exists for.
+
+---
+
+## 2026-07-21 — The ProjectManager chooses from one list, and a generation strategy is prose
+
+**Decision.** The verdict is a single choice from one list, and every option is named and
+priced in the prompt rather than left to be inferred:
+
+- **one step** — the work is small enough that a plain turn loop does it. Today's `direct`;
+  understood as a one-step workflow, not a separate mechanism.
+- **a ready-made workflow class** — a fixed procedure worth running exactly as written,
+  where determinism is the point and no generation pass is paid for.
+- **a generation strategy** — prose from the shelf describing how work of this kind is
+  structured, fed to the generator, which writes a solver for this ticket that follows it.
+- **decompose** — too big for one run, and the parts are separately workable.
+- **a person** — the work is genuinely uncertain. The ticket moves to human involvement:
+  one question and one answer at a time, worked out in chat with the journal recording it,
+  and only then are further steps decided.
+
+**Why a strategy is prose, not a class.** What generalises between tickets of one kind is
+the APPROACH, not the code. `FixBugWorkflow`'s three step prompts contain nothing about any
+particular bug — they are a recipe wearing a class's clothes, and the class shape is what
+makes them rigid: three steps forever, no matter that the defect needs no test to be seen
+or cannot be reached by one at all. Prose says what must be achieved and where the
+branches are; the generator decides how many steps that costs for this ticket.
+
+A strategy therefore describes CONTROL FLOW, not a list of phases. The design strategy, for
+instance, reads: judge how clear the goal is; for each gap propose a piece of research; have
+a person approve the list; open only what was approved and skip the rest — a shape the
+generated solver implements with real `if` and `$this->ask()`.
+
+**Where it goes.** Alongside the existing `RECIPE`, which stays and keeps its own job:
+`RECIPE` says what a step is and how few to use, the strategy says what this kind of work
+has to accomplish. General mechanics and domain procedure are different texts.
+
+**Why "generate with nothing" is not on the list.** A ticket too hard for one step and
+matched by no strategy is not a ticket to improvise a solver for — it is a ticket whose
+shape nobody has established yet, and that is the human option above. Generating blind is
+how a run spends a budget discovering it was the wrong shape.

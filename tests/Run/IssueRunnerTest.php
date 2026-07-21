@@ -201,6 +201,51 @@ final class IssueRunnerTest
         }
     }
 
+    /**
+     * A run that stopped ON PURPOSE is not broken code, and must not be "repaired".
+     *
+     * The repair boundary excluded only backend failures, so every deliberate halt — the budget running
+     * out, the supervisor answering `stop`, a step exhausting its review rounds with nobody to escalate
+     * to — arrived looking exactly like a crash. The supervisor was then sent to rewrite the class it had
+     * itself just stopped, and the cheapest way to satisfy "fix the cause of: run stopped at step
+     * 'verify' by the supervisor" is to delete the critic that stopped it. A budget stop was worse: the
+     * repair's own model call hit the same spent budget, so the ticket came back reading "the solver
+     * crashed and could not be repaired: run stopped: budget spent".
+     */
+    #[Test]
+    public function aDeliberateStopIsNotTreatedAsBrokenCodeAndSoIsNotRewritten(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+
+            // See the note above: a solver class name is per-process, so burn ids to get one this owns.
+            for ($i = 0; $i < 20; $i++) {
+                $store->addIssue("filler {$i}");
+            }
+            $issue = $store->addIssue('a task whose run is stopped on purpose');
+
+            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $solver = self::solverName($issue->id);
+            $workflows->write($solver, self::stoppingSolverCode($solver), true);
+
+            $frontend = new RecordingRunFrontend();
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), $frontend);
+
+            Assert::same($runner->run($issue), 1);
+
+            // The supervisor writes its rewrite as <solver>R1. It must not exist.
+            Assert::false(is_file($workflows->path($solver . 'R1', true)));
+            Assert::false($frontend->reported('repairing'));
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
     #[Test]
     public function theDirectPathNeedsAVerdictItCannotGiveItself(): void
     {
@@ -250,15 +295,81 @@ final class IssueRunnerTest
             $issue = $store->addIssue('a ticket that really does get solved');
             $store->setStrategy($issue->id, Strategy::Direct, 'small', false);
 
+            // The verdict is the FIRST LINE and nothing else; the detail belongs on the lines after it.
             $agent = new ScriptedAgent(
                 self::says('Changed src/Thing.php and ran the tests.'),
-                self::says('SOLVED — I read src/Thing.php and ran the suite; it is green.'),
+                self::says("SOLVED\nI read src/Thing.php and ran the suite; it is green."),
             );
             $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend());
 
             Assert::same($runner->run($issue), 0);
             Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Done);
             Assert::same($store->recentRuns()[0]['status'], RunStatus::Done->value);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    /**
+     * The verdict a PREFIX test read as success. `str_starts_with(strtoupper($answer), 'SOLVED')` closed
+     * the ticket on this sentence, which says in its own words that the work is not done — the false-Done
+     * family reappearing not through a tool or a gate, but through the way an answer was parsed.
+     */
+    #[Test]
+    public function aVerdictThatMerelyOpensWithSolvedDoesNotCloseTheTicket(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+            $issue = $store->addIssue('a ticket that is only half solved');
+            $store->setStrategy($issue->id, Strategy::Direct, 'small', false);
+
+            $agent = new ScriptedAgent(
+                self::says('Changed src/Thing.php.'),
+                self::says('Solved for the happy path, but the null case still fails.'),
+                self::says('no verdict recorded'),   // the re-triage that follows the failure
+            );
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend());
+
+            Assert::same($runner->run($issue), 1);
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);
+
+            // The judge's own words travel back, so the next attempt knows what was missing.
+            $attempts = $store->strategyAttempts($issue->id);
+            Assert::true(str_contains($attempts[0]['outcomeReason'], 'the null case still fails'));
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    /**
+     * The other half of the same defect. The prompt used to print the token in backticks, so a judge that
+     * copied the formatting failed the prefix test — and its PASSING verdict was handed to the
+     * ProjectManager as the reason the run had failed, escalating a finished ticket to a costlier strategy.
+     */
+    #[Test]
+    public function aDecoratedSolvedIsStillSolved(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+            $issue = $store->addIssue('a ticket whose judge likes backticks');
+            $store->setStrategy($issue->id, Strategy::Direct, 'small', false);
+
+            $agent = new ScriptedAgent(
+                self::says('Changed src/Thing.php.'),
+                self::says("`SOLVED`\nI ran the suite and read the output."),
+            );
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend());
+
+            Assert::same($runner->run($issue), 0);
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Done);
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($projectFolder);
@@ -298,6 +409,37 @@ final class IssueRunnerTest
                     throw new BadRequestException(
                         "An assistant message with 'tool_calls' must be followed by tool messages",
                     );
+                }
+            }
+
+            PHP;
+    }
+
+    /** A solver whose step halts the run deliberately — the shape a budget or supervisor stop takes. */
+    private static function stoppingSolverCode(string $class): string
+    {
+        return <<<PHP
+            <?php
+
+            declare(strict_types=1);
+
+            namespace ClawWorkflow\\Common;
+
+            use Claw\\Exceptions\\WorkflowException;
+            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\WorkflowAbstract;
+
+            final class {$class} extends WorkflowAbstract
+            {
+                public function name(): string
+                {
+                    return 'stopping-solver';
+                }
+
+                #[Step]
+                public function implement(): void
+                {
+                    throw WorkflowException::stopped('run stopped: budget spent');
                 }
             }
 

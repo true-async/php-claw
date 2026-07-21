@@ -33,6 +33,7 @@ use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStateStoreInterface;
 use Testo\Assert;
 use Testo\Test;
+use Tests\Support\CriticStepWorkflow;
 use Tests\Support\ProbeWorkflow;
 use Tests\Support\ScriptedAgent;
 
@@ -1016,6 +1017,77 @@ final class WorkflowAbstractTest
         Assert::true($supervisor->heard !== null);              // the supervisor was consulted on the rejection
         // the supervisor judged the ACTUAL work — the rejected attempt's artifact ('v1'), not an empty result
         Assert::true(str_contains((string) $supervisor->heard, 'v1'));
+    }
+
+    /**
+     * The control words are whole replies, not prefixes. `str_starts_with($lower, 'stop')` turned this
+     * perfectly ordinary piece of advice into a killed run — while the same prompt asks the supervisor
+     * for prose guidance. A misread must send the step back for another try, never abort it.
+     */
+    #[Test]
+    public function guidanceThatMerelyBeginsWithStopIsGuidanceAndNotAnAbort(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('v1'),
+            $this->answer('needs a test'),   // critic #1 -> not OK
+            $this->answer('v2'),
+            $this->answer('OK'),             // critic #2 -> approves
+        );
+        $wf = $this->supervised($worker, 'Stop rerunning the whole suite; run only the failing test.');
+
+        $wf->run();
+
+        Assert::same($wf->work, 'v2');
+        Assert::same($wf->runs, 2);
+        Assert::same($wf->sawCritique, 'Stop rerunning the whole suite; run only the failing test.');
+    }
+
+    /**
+     * Silence is not consent. An empty reply used to be read as `accept`, which made the emptiest
+     * possible answer — nobody on the channel, or a person pressing Enter — the strongest verdict in the
+     * system: it closed out work the critic had just rejected. Below the round cap it now self-corrects
+     * on the findings, exactly as if there had been no supervisor at all.
+     */
+    #[Test]
+    public function anEmptyReplyDoesNotAcceptWorkTheCriticRejected(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('v1'),
+            $this->answer('needs a test'),   // critic #1 -> not OK
+            $this->answer('v2'),
+            $this->answer('OK'),             // critic #2 -> approves
+        );
+        $wf = $this->supervised($worker, '   ');
+
+        $wf->run();
+
+        Assert::same($wf->runs, 2);                       // it re-ran rather than being accepted as-is
+        Assert::same($wf->sawCritique, 'needs a test');   // and it re-ran on the critic's own findings
+    }
+
+    /**
+     * A one-step workflow whose step carries a critic, wired to a supervisor that always gives $reply.
+     * The step records its result as the artifact both the critic and the supervisor judge.
+     */
+    private function supervised(ScriptedAgent $worker, string $reply): CriticStepWorkflow
+    {
+        $supervisor = new class ($reply) implements SpeakerInterface {
+            public function __construct(private readonly string $reply)
+            {
+            }
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                return $this->reply;
+            }
+        };
+
+        return new CriticStepWorkflow($this->config(worker: $worker)->set(EnvKey::Ask, $supervisor), 'r1');
     }
 
     /** A two-step relay workflow whose steps each make one ai() call — for handoff/resume cases. */

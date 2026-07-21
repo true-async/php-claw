@@ -95,20 +95,27 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     protected function assess(): void
     {
         $verdict = $this->ai(
-            'Rate how hard this coding task is for an AI to solve correctly. Reply with EXACTLY one '
-            . 'word on the first line — `simple`, `moderate`, or `complex` — then one sentence of '
-            . 'reasoning. Simple = a localized, mechanical change; complex = subtle logic, wide blast '
-            . "radius, or design judgement.\n\nTask:\n{$this->taskSummary()}\n\nPlan:\n{$this->plan}",
+            'Rate how hard this coding task is for an AI to solve correctly. Your FIRST LINE must be '
+            . 'one bare word and nothing else — simple, moderate or complex. No label, no punctuation, '
+            . 'no backticks: a first line reading "Complexity: simple" is not one of those words and '
+            . "will be read as moderate. Put one sentence of reasoning on the line after it.\n\n"
+            . 'Simple = a localized, mechanical change; complex = subtle logic, wide blast radius, or '
+            . "design judgement.\n\nTask:\n{$this->taskSummary()}\n\nPlan:\n{$this->plan}",
             [],
             'supervisor-smart',
         );
 
-        // Classify on the FIRST WORD only — the one-word verdict — not the whole reply: the reasoning
+        // Classify on the FIRST LINE only — the one-word verdict — not the whole reply: the reasoning
         // sentence routinely names the other tiers ("not a simple change"), which would misclassify.
-        $word = strtolower((string) strtok(trim($verdict), " \t\r\n"));
-        $this->difficulty = match (true) {
-            str_contains($word, 'complex') => 'complex',
-            str_contains($word, 'simple') => 'simple',
+        //
+        // The match is EXACT. It used to be `str_contains($word, 'complex')` tested before 'simple', so
+        // the entirely ordinary reply "Complexity: simple" tokenized to "complexity:", contained
+        // "complex", and routed a trivial task to the expensive model — the verdict inverted by the very
+        // check written to protect it. Anything unreadable now lands on `moderate`, which is the middle
+        // and cannot be wrong in an expensive direction.
+        $word = strtolower(trim((string) strtok(trim($verdict), "\r\n"), " \t`*_.:—–-"));
+        $this->difficulty = match ($word) {
+            'simple', 'complex' => $word,
             default => 'moderate',
         };
 
@@ -196,9 +203,22 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $toolDocs = $this->availableTools();
         $recipe = self::RECIPE;
 
+        // The TICKET ITSELF, verbatim. It used to be absent: this prompt said "solves the task below"
+        // and the task was not below — the only thing describing it was $this->plan, understand()'s
+        // paraphrase. Every detail the plan happened to drop (an exact error message, a file name, an
+        // acceptance criterion) was unrecoverable here, and the solver's step prompts baked in a
+        // paraphrase of a paraphrase. Worse, the critic judging this draft DOES get the real ticket
+        // (see criticRules()), so the reviewer was better informed than the author — a reliable way to
+        // manufacture rejection rounds neither party could resolve.
+        $task = $this->taskSummary();
+
         return <<<PROMPT
             Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract.
             You DECIDE how many steps it needs — use the FEWEST the task actually requires (often just one).
+
+            THE TASK — this is the ticket the solver you write must solve. The plan below is one reading
+            of it; where they differ, this is what was actually asked for:
+            {$task}
 
             Plan:
             {$this->plan}

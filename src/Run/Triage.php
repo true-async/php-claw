@@ -197,7 +197,7 @@ final readonly class Triage
         );
 
         try {
-            $result = $loop->run([Message::userText($this->brief($issue, $libraries))]);
+            $result = $loop->run([Message::userText($this->brief($issue, $libraries, $failedRunId !== null))]);
 
             // A model that judged the ticket correctly but WROTE OUT the call instead of making it
             // leaves the ticket untouched and its reasoning wasted — seen in practice, printing the
@@ -249,8 +249,9 @@ final readonly class Triage
      * The ticket as the ProjectManager sees it, with the id it must quote back to record a verdict.
      *
      * @param list<WorkflowStore> $libraries
+     * @param bool                $canRecall whether `recall` is on the palette — see {@see history()}
      */
-    private function brief(Issue $issue, array $libraries): string
+    private function brief(Issue $issue, array $libraries, bool $canRecall): string
     {
         $project = $this->store->project();
         $description = trim($issue->description) === ''
@@ -267,8 +268,14 @@ final readonly class Triage
             . $about
             . "Ticket #{$issue->id}\nTitle: {$issue->title}\n\nDescription:\n{$description}\n\n"
             . $this->shelf($libraries)
-            . $this->history($issue)
-            . "Decide the strategy and record it, quoting issue id {$issue->id}.";
+            . $this->history($issue, $canRecall)
+            // The closing instruction used to read "Decide the strategy and record it", which presupposed
+            // the answer to the FIRST question the system prompt asks — is this workable at all — in the
+            // most recent position on the page, after the brief had pushed that prompt far behind. A
+            // borderline ticket was being nudged towards a strategy by the last thing the model read.
+            . 'Both verdicts are real answers. Decide first whether this ticket is workable, then record '
+            . "exactly one, quoting issue id {$issue->id}: `set_strategy` with the type and strategy if "
+            . 'it is, `needs_human` if it is not.';
     }
 
     /**
@@ -325,8 +332,15 @@ final readonly class Triage
      * A retry chooses from the failures, so it has to see them: without this the ProjectManager would
      * pick the same strategy that just broke, and be refused by the store for not escalating, having
      * spent a model call to learn what it could have been told.
+     *
+     * $canRecall is not decoration. {@see RecallTool} is registered only when {@see analyse()} was given
+     * the failed run's id, and two of the three doors do not pass one — `Server.php` and the CLI both
+     * call `analyse($issue)`. This paragraph fires on any failed attempt, so it used to instruct a
+     * near-mandatory call ("and it usually does") to a tool that was not on the palette: at best a
+     * wasted exchange, at worst a model reading the unknown-tool error as evidence the run is beyond
+     * saving and parking a ticket on that.
      */
-    private function history(Issue $issue): string
+    private function history(Issue $issue, bool $canRecall): string
     {
         $failed = array_filter(
             $this->store->strategyAttempts($issue->id),
@@ -342,17 +356,23 @@ final readonly class Triage
             $failed,
         );
 
+        $recall = $canRecall
+            ? 'Those reasons are one line each and rarely decide anything on their own. The failed run '
+                . 'itself is open to you with `recall` — read it before choosing when the one line is not '
+                . "enough to tell a solvable failure from a hopeless one.\n\n"
+            : '';
+
         return "This ticket has been attempted before:\n" . implode("\n", $lines) . "\n\n"
-            . 'Those reasons are one line each. If the choice turns on WHY it failed — and it usually does '
-            . '— open the run itself with `recall`: `what=\'workflow\'` maps the steps, `what=\'step\'` with '
-            . "a name returns that step's history, `what='artifacts'` its outputs, `what='tool'` a tool's "
-            . 'calls. Do that before deciding when the one-line reason is not enough to tell a solvable '
-            . "failure from a hopeless one.\n\n"
+            . $recall
             . 'A strategy that already failed cannot be chosen again, and neither can a cheaper one — the '
             . "store will refuse it. Your next verdict must do MORE than what broke.\n\n"
-            . 'If there is nothing left to escalate to, or the failures show this needs a person to '
-            . 'decide something, set needs_human=true: that hands the ticket to a human, which is a real '
-            . "answer and better than a verdict that will fail the same way.\n\n";
+            // NOT "set needs_human=true". That is the flag on `set_strategy` meaning "a person approves
+            // first", and on this path every `set_strategy` is refused for not escalating — so the one
+            // instruction the model could follow literally was the one guaranteed to fail.
+            . 'If there is nothing left to escalate to, or the failures show a person must decide '
+            . 'something first, call `project_manager` with the ACTION `needs_human`. That hands the '
+            . 'ticket to a human, which is a real answer and better than a verdict that will fail the '
+            . "same way.\n\n";
     }
 
     /**

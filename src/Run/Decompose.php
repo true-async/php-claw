@@ -10,6 +10,7 @@ use Claw\Agent\Message;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Project\Issue;
+use Claw\Project\ProjectStore;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Tool\ListFilesTool;
 use Claw\Tool\ProjectManagerTool;
@@ -52,6 +53,9 @@ final readonly class Decompose
           piece A lands, they are one piece, not two.
         - It is worth a ticket: real work someone could pick up and verify. If it is a five-minute
           change, fold it into a neighbouring piece.
+        - It is SMALL ENOUGH TO BE SOLVED IN ONE RUN. This is the bound people forget, and it is the
+          reason you are here: the parent was too big for one run, so a split into two enormous halves
+          has bought nothing — each half is judged too big in its turn and the whole thing stalls.
         - Its title says what to do, and its description carries enough context to be worked on by
           someone who has not read the parent — the sub-issue is triaged and solved on its own.
 
@@ -66,12 +70,29 @@ final readonly class Decompose
         passing the parent id, a title, and a description. One call per piece. Prefer FEWER, larger
         pieces: every sub-issue is triaged and run on its own, and costs accordingly.
 
+        YOU MAY OPEN AT MOST %d SUB-ISSUES, and the tree may be at most %d deep. Those are hard limits
+        enforced by the store, not advice. Decide the WHOLE split before your first call, so the last
+        call you make covers the last of the work — you cannot go back and widen a piece afterwards,
+        because nothing edits a sub-issue once it exists.
+
         If a call is refused because a cap was reached, stop — do not restate it or try again with
-        different wording. The remaining work belongs in the pieces you already opened.
+        different wording. But understand what that means: some of the parent's work is now covered by
+        nothing, because the split you chose did not fit. That is the mistake to avoid by counting
+        first, and it is worth saying so in the last piece's description rather than leaving it silent.
 
         Act only through the tools; describing a call, or printing it as JSON or code, creates
         nothing. Reply with nothing else.
         PROMPT;
+
+    /**
+     * {@see SYSTEM} with the real caps filled in. They are INTERPOLATED, never typed as literals: they
+     * belong to {@see ProjectStore}, which is what actually refuses the call, and a number copied into a
+     * prompt drifts the day the constant moves — one more rule that reads right and enforces nothing.
+     */
+    private static function system(): string
+    {
+        return sprintf(self::SYSTEM, ProjectStore::MAX_CHILDREN, ProjectStore::MAX_DEPTH);
+    }
 
     public function __construct(
         private ProjectStoreInterface $store,
@@ -114,7 +135,7 @@ final readonly class Decompose
             $this->agent,
             $env->executor(),
             $env->findAgentModel('project-manager'),
-            self::SYSTEM . $registry->briefing('The tools you have — these are your only way to act'),
+            self::system() . $registry->briefing('The tools you have — these are your only way to act'),
             $registry->specs(),
         );
 

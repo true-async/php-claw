@@ -138,6 +138,47 @@ final class ProjectManagerToolTest
         });
     }
 
+    /**
+     * The approval flag is `requires_approval`, and `needs_human` is an ACTION that means something else
+     * — parking the ticket for a person rather than gating a strategy behind approval. One word for two
+     * things was a mistake in the direction that cost most: the triage brief said "set needs_human=true"
+     * when the escalation ladder was spent, so the model set a flag on a `set_strategy` call that could
+     * only be refused, instead of calling the action that would have handed the ticket over.
+     *
+     * The old key is still honoured, and deliberately OR-ed rather than replaced: it is gone from the
+     * schema, so a model only sends it from habit — and reading its presence as "no approval needed"
+     * would let a verdict that asked for a person run without one.
+     */
+    #[Test]
+    public function approvalIsItsOwnFlagAndNoLongerSharesAWordWithTheAction(): void
+    {
+        $this->withStore(function (ProjectStore $store): void {
+            $tool = new ProjectManagerTool($store);
+            $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
+
+            Assert::true(isset($tool->inputSchema()['properties']['requires_approval']));
+            Assert::false(isset($tool->inputSchema()['properties']['needs_human']));
+
+            $tool->handle([
+                'action' => 'set_strategy',
+                'issue' => '1',
+                'type' => 'feature',
+                'strategy' => 'generate',
+                'reason' => 'foundational',
+                'requires_approval' => true,
+            ]);
+
+            $current = $store->currentStrategy('1');
+            Assert::true($current !== null);
+            Assert::true($current['needsHuman']);
+
+            // The ACTION still parks the ticket, which is the thing the flag never did.
+            $tool->handle(['action' => 'create_issue', 'title' => 'a nonsense ticket']);
+            $tool->handle(['action' => 'needs_human', 'issue' => '2', 'reason' => 'says nothing actionable']);
+            Assert::same($store->loadIssue('2')->status, IssueStatus::WaitingHuman);
+        });
+    }
+
     #[Test]
     public function setStrategyRecordsTheVerdictAndRejectsAnUnknownOne(): void
     {

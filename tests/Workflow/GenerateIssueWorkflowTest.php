@@ -76,6 +76,117 @@ final class GenerateIssueWorkflowTest
         }
     }
 
+    /**
+     * The draft prompt must carry the TICKET, not only the plan.
+     *
+     * It used to open "Write a PHP class that solves the task below" with no task below it: the only
+     * description of the work reaching the drafting model was understand()'s paraphrase, so anything the
+     * plan happened to drop was gone. The critic judging the draft did get the real ticket, which left
+     * the reviewer better informed than the author.
+     */
+    #[Test]
+    public function theDraftPromptCarriesTheTicketAndNotOnlyThePlan(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $agent = self::generate($dir, 'Issue8Solver', 'simple', new Issue(
+                '8',
+                'p1',
+                'Fix the CSV export',
+                'Rows with an embedded comma are written unquoted.',
+            ));
+
+            // request #5 is the draft call (plan, handoff, difficulty, handoff, DRAFT, critic)
+            $draft = self::textOf($agent, 4);
+            Assert::true(str_contains($draft, 'Fix the CSV export'));
+            Assert::true(str_contains($draft, 'Rows with an embedded comma are written unquoted.'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
+     * "Complexity: simple" is a simple task.
+     *
+     * The verdict was read by testing the first token for the SUBSTRING 'complex' before 'simple', so
+     * that entirely ordinary reply tokenized to "complexity:", matched 'complex', and routed a trivial
+     * change to the expensive model — the check written to protect the classification inverting it.
+     */
+    #[Test]
+    public function aLabelledDifficultyIsNotReadAsItsOwnOpposite(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $agent = self::generate($dir, 'Issue9Solver', 'Complexity: simple');
+
+            // The difficulty is folded into the draft prompt, so that is where the verdict shows. A line
+            // that is not one of the three bare words lands on `moderate` — the middle, which cannot be
+            // wrong in an expensive direction. What matters is that it is no longer read as `complex`.
+            $draft = self::textOf($agent, 4);
+            Assert::false(str_contains($draft, 'assessed as **complex**'));
+            Assert::true(str_contains($draft, 'assessed as **moderate**'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
+     * Run the generator end to end against a scripted model and hand back the agent, so a test can read
+     * the exact prompts it was sent. $verdict is assess()'s reply — the line whose parsing is under test.
+     */
+    private static function generate(string $dir, string $class, string $verdict, ?Issue $issue = null): ScriptedAgent
+    {
+        $store = new WorkflowStore($dir . '/workflows', 'p1');
+        $registry = new Registry();
+        $workspace = new Workspace($dir);
+        $registry->add(new ReadFileTool($workspace));
+        $registry->add(new ListFilesTool($workspace));
+        $registry->add(new DefineWorkflowTool($store, new WorkflowValidator()));
+
+        $agent = new ScriptedAgent(
+            self::answer('Plan: change the thing.'),
+            self::answer('handoff after understand'),
+            self::answer($verdict),
+            self::answer('handoff after assess'),
+            self::answer(self::solverCode($class)),
+            self::answer('OK'),
+        );
+
+        $env = new Environment()
+            ->set(EnvKey::Worker, $agent)
+            ->set(EnvKey::Registry, $registry)
+            ->set(EnvKey::ModelId, 'm')
+            ->set(EnvKey::SystemPrompt, '')
+            ->set(EnvKey::Store, new InMemoryStateStore());
+
+        new GenerateIssueWorkflow($env, 'gen', [
+            'solverName' => $class,
+            'solverNamespace' => 'ClawWorkflow\\Common',
+            'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
+        ], $issue ?? new Issue('9', 'p1', 'Do a thing'), new Project('p1', 'Demo'))->run();
+
+        return $agent;
+    }
+
+    /** The text of the last user message in the agent's $nth recorded request. */
+    private static function textOf(ScriptedAgent $agent, int $nth): string
+    {
+        $messages = $agent->requests[$nth]->messages;
+        $key = array_key_last($messages) ?? throw new \RuntimeException('the request carried no message');
+        $last = $messages[$key];
+        $text = '';
+
+        foreach ($last->content as $block) {
+            if ($block instanceof TextBlock) {
+                $text .= $block->text;
+            }
+        }
+
+        return $text;
+    }
+
     /** A valid solver class the WorkflowValidator accepts. */
     private static function solverCode(string $class): string
     {
