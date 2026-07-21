@@ -653,7 +653,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $scope->executor(),
             $scope->findModelId(),
             $system,
-            $scope->findRegistry()->specs(),
+            $scope->findRegistry(),
             $scope->findMaxHistory(),
             $this->tracer(),
             $ask,

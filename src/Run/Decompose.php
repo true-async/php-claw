@@ -136,7 +136,7 @@ final readonly class Decompose
             $env->executor(),
             $env->findAgentModel('project-manager'),
             self::system() . $registry->briefing('The tools you have — these are your only way to act'),
-            $registry->specs(),
+            $registry,
         );
 
         $loop->run([Message::userText($this->brief($issue))]);

@@ -6,6 +6,7 @@ namespace Claw\Agent;
 
 use Claw\Exceptions\ContextLengthException;
 use Claw\Exec\ExecutorInterface;
+use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Trace\Tracer;
 
@@ -54,7 +55,21 @@ final class DefaultTurnLoop implements TurnLoopInterface
         . 'followed by your question. You will receive the answer and continue.';
 
     /**
-     * @param list<ToolSpec>     $specs      the tools advertised to the model each round-trip
+     * The PALETTE IS REQUIRED, and that is the point. It used to be `array $specs = []`, so a caller
+     * that simply forgot the argument got a model with no tools at all — and nothing said so. That is
+     * what happened to the supervisor tier: built with four arguments, it was asked to judge whether
+     * "the actual work looks correct" with no way to open a file or run a test, its only input the
+     * report of the party under review.
+     *
+     * A default of "none" fails in the harmful direction and fails silently. There is no safe default
+     * here, so there is no default: pass the registry and the model sees everything in it, narrow it
+     * deliberately with {@see Registry::only()} or {@see Registry::except()}, and if a scope genuinely
+     * must not act, pass an empty `new Registry()` — which says so in the code, where it can be read.
+     *
+     * This is also the contract {@see \Claw\Workflow\WorkflowAbstract::ai()} already used (null = every
+     * tool, a list = only those, `[]` = none). Two components in one codebase disagreeing about what
+     * "unspecified" means is how the disagreement stays invisible.
+     *
      * @param int                $maxHistory soft cap on history length (0 = no cap); the
      *                                       hard bound is the model's own context window
      * @param ?SpeakerInterface  $ask        who the model reaches when it ends a turn with the
@@ -69,7 +84,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
         private readonly ExecutorInterface $executor,
         private readonly string $model,
         private readonly string $system,
-        private readonly array $specs = [],
+        private readonly Registry $tools,
         private readonly int $maxHistory = 0,
         private readonly ?Tracer $tracer = null,
         private readonly ?SpeakerInterface $ask = null,
@@ -119,7 +134,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 model: $this->model,
                 messages: $history,
                 system: $system,
-                tools: $this->specs,
+                tools: $this->tools->specs(),
             ));
 
             $totalInput  += $response->usage->inputTokens;
