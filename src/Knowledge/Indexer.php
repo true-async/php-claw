@@ -17,10 +17,22 @@ use Claw\Exceptions\ClawException;
  * its `notes` row is written last, so a pass killed halfway leaves that note looking STALE rather than
  * looking fresh and being wrong. Run again and it picks up where it stopped. That property is what makes
  * it safe to spawn this on a coroutine and let a run get on with its work.
+ *
+ * WHEN a pass runs is not decided here — {@see KnowledgeBase::fresh()} owns that, and owns the claim
+ * that stops two concurrent runs of one project from both walking the folder.
+ *
+ * @internal to {@see KnowledgeBase}.
  */
 final readonly class Indexer
 {
-    /** Notes per embedding request. The round trip dominates; a note of twenty chunks is one call. */
+    /**
+     * Chunks per embedding request, WITHIN one note.
+     *
+     * This used to claim it batched notes — it does not: {@see reindex()} runs per note and batches that
+     * note's own chunks, so a cold pass over fifty notes costs fifty round trips, not one. Worth knowing
+     * before reading any timing: a warm pass is well under a millisecond, and a cold one is dominated
+     * entirely by HTTP.
+     */
     private const int BATCH = 64;
 
     /** The notes folder inside a project. One name, so nothing has to guess it. */

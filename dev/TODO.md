@@ -8,10 +8,9 @@ Ordered by value, not by effort. An entry leaves this file when it lands in
 Ordered first because the retrieval half landed on 2026-07-22 and every project now gets a `kb/`
 folder, so for the first time there is something to look at and nowhere to look at it.
 
-**Two things come first, and neither is optional.**
-
-**0a is a defect in shipped code, not preparation.** The base is reached four different ways today,
-and everything below adds a consumer. Route them into one entry point before there are more.
+**The single entry point landed first** — `KnowledgeBaseInterface`, see
+[`DECISIONS.md`](DECISIONS.md) 2026-07-22. Everything below is a caller of it and must not reach past
+it; the wiki is not a second reader of the storage.
 
 **There is no writing action.** Three of the four items below describe a *write*, and the tool offers
 `search`, `about`, `read`, `tags` and nothing else, deliberately
@@ -19,41 +18,18 @@ and everything below adds a consumer. Route them into one entry point before the
 4 records what is still undecided about it). The write action is a piece of work in its own right, not
 an assumption underneath the other three.
 
-### 0a. ONE way into the base — before anything else is built on it
-
-There must be a single entry point, and today there are four. This is not a question about the wiki;
-it is the state of the code, and a second consumer would make it five.
-
-- `Run/IssueRunner.php:182` opens the database and constructs the index itself.
-- `Tool/ToolFactory.php:73` builds the `kb/` path a second time and scaffolds the folder.
-- `Tool/KnowledgeTool.php` constructs a fresh `Indexer` and syncs on **every** action — three call
-  sites (`:116`, `:152`, `:195`) — while holding its own copy of the folder, the index and the embedder.
-- `Tool/KnowledgeTool.php:182` reads a note **straight off the disk** through `Workspace`, bypassing
-  the index entirely. So `search` answers from the index and `read` answers from the filesystem, and
-  nothing reconciles them.
-
-The seam was designed once and abandoned: `Knowledge/KnowledgeBaseInterface.php` declares
-`get/search/byTag/add/update` and **nothing implements it or calls it**, along with the unused
-`Article`, `Tag` and `Provenance` beside it.
-
-So: make that interface real and route everything through it — the folder, the index, the sync policy,
-reads, searches and (later) writes. The tool, the wiki, the server and the CLI become callers with no
-knowledge of where anything is stored. Two things fall out for free rather than needing a decision:
-sync stops happening three times per tool call, and "index or disk" stops being answerable from
-outside because only one object knows.
-
-### 0b. A wiki in the dashboard
+### 0a. A wiki in the dashboard
 
 The whole base as a browsable thing: the note tree, one note rendered, its tags, what it links to and
 what links back. Every part is already stored — `notes`, `chunks(path, heading, ord)` for an outline,
 `tags`, `links` both ways (the `links_target` index is built and queried by nothing), `refs` for
 "what mentions this file".
 
-Built on 0a, not beside it: the wiki is a caller of the one entry point. What still needs deciding is
+A caller of the one entry point, not a second reader of the storage. What still needs deciding is
 only the transport — REST beside the existing project routes, or a room on the WebSocket the board
 already uses.
 
-### 0c. A write to the base is a step artifact
+### 0b. A write to the base is a step artifact
 
 When a run edits the base, that edit becomes an artifact of the step, listed like any other and
 readable afterwards. This is what makes a write reviewable without a human gate in front of it —
@@ -61,12 +37,12 @@ the same argument as feature 8's constraint 3, one layer up: the artifact is the
 `Artifact::file()` already carries a path relative to the project and the dashboard fetches the body
 lazily, so a note written under `kb/` fits the existing shape with nothing new underneath.
 
-### 0d. A write rings the bell
+### 0c. A write rings the bell
 
 Base edits appear in the dashboard's notification bell. Cheap once 0b exists — the artifact is
 already an event on the run's trace, so this is a filter and a label rather than a new channel.
 
-### 0e. Then, and only then, a survey of what else is worth having
+### 0d. Then, and only then, a survey of what else is worth having
 
 Deliberately last. [`design/knowledge-base-next.md`](design/knowledge-base-next.md) already holds
 nine features with sources and a rejected list with numbers; a new survey should argue with that file

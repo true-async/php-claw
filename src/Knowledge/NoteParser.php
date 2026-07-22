@@ -13,6 +13,8 @@ namespace Claw\Knowledge;
  * is most of what says which subject a paragraph belongs to, and a paragraph reading "run it again with
  * the flag" is meaningless without it. The same string is what a reader sees above the result, so it
  * costs nothing twice.
+ *
+ * @internal to {@see KnowledgeBase}.
  */
 final class NoteParser
 {

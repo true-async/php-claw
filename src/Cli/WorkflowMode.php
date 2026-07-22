@@ -8,7 +8,7 @@ use Claw\Agent\AgentFactory;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
-use Claw\Knowledge\Indexer;
+use Claw\Knowledge\KnowledgeBase;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
@@ -141,9 +141,10 @@ final class WorkflowMode
         fwrite(STDOUT, "  folder: {$project->path}\n");
         fwrite(STDOUT, '  state:  ' . $this->projectsDir() . '/' . $project->id . ".db\n");
 
-        if ($withKnowledgeBase) {
-            fwrite(STDOUT, '  notes:  ' . $project->path . '/' . Indexer::FOLDER
-                . '/ (start with ' . Indexer::README . ")\n");
+        $notes = $withKnowledgeBase ? KnowledgeBase::create($project->path) : null;
+
+        if ($notes !== null) {
+            fwrite(STDOUT, "  notes:  {$notes}/\n");
         }
 
         return 0;

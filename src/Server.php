@@ -13,7 +13,7 @@ use function Async\spawn;
 use Claw\Agent\AgentFactory;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
-use Claw\Knowledge\Indexer;
+use Claw\Knowledge\KnowledgeBase;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\Project;
@@ -413,6 +413,9 @@ final class Server
 
         try {
             $project = ProjectStore::init($this->projectsDir, $folder, $description, $withKnowledgeBase);
+            // Where a person should write notes, as the base itself reports it — the server does not
+            // assemble that path, and does not know what it is made of.
+            $notesFolder = $withKnowledgeBase ? KnowledgeBase::create($project->path) : null;
         } catch (ClawException $e) {
             $response->json(['error' => $e->getMessage()], 400);
 
@@ -427,7 +430,7 @@ final class Server
             'name' => $project->name,
             'path' => $project->path,
             'description' => $project->description,
-            'knowledgeBase' => $withKnowledgeBase ? Indexer::FOLDER : null,
+            'knowledgeBase' => $notesFolder,
         ], 201);
     }
 

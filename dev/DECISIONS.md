@@ -379,3 +379,42 @@ added to a run, and nothing reports that it was not — so a scope that ought to
 quietly stops seeing anything new. `except()` states what is actually being denied, and keeps
 denying exactly that as the palette grows. A name that is not registered is an error in both: a scope
 subtracting a tool that does not exist believes it is protected, and is not.
+
+---
+
+## 2026-07-22 — The knowledge base is one module behind one interface
+
+**What was decided.** Everything about the knowledge base goes through `KnowledgeBaseInterface`, and
+nothing outside `Claw\Knowledge` names anything else in it. Callers ask; the module decides whether a
+file is read, a database is queried, a question is embedded, or an index needs refreshing first.
+
+**What forced it.** The subsystem was reached seven different ways, each holding a different piece of
+the mechanism: the run pipeline opened the SQLite file and knew its name; the tool factory assembled
+the notes path and scaffolded the folder; the tool built an indexer and synced on every action, and
+embedded queries itself; project registration, the HTTP API and the CLI each used the folder constant
+directly. `search` answered from the index while `read` answered from the filesystem, and nothing
+reconciled the two. Adding the dashboard wiki would have made it eight.
+
+**What was considered and rejected.** Documenting which source is authoritative and leaving the
+callers as they were — that is a rule someone must remember, and the count only goes up. Splitting
+reading across two interfaces for the tool and the wiki — premature: one implementation serves both,
+and the wiki wants `search()` too.
+
+**Where the interface genuinely does split.** Writing will be a SEPARATE interface obtained
+separately, not more methods on this one. A solver's palette must not be able to write, and the way
+to guarantee that is for the object it holds to have no such method — a `match` on an action string
+is a gate on paper.
+
+**The price.** `ToolFactory::forRun()` changed shape, `Article`/`Tag`/`Provenance` and the old
+skeleton interface were deleted, and one reference remains by choice: `IssueRunner` constructs the
+`OpenAiEmbedder` because a base URL and a key are configuration, and configuration belongs to the
+composition root. `EmbedderInterface` exists as an injection seam for exactly this reason.
+
+**What it fixed on the way.** Two runs of one project — which the server starts concurrently by
+design — both walked the notes folder and wrote the same rows; measured, that killed runs outright
+with "database is locked" and, when it did not, paid twice for embedding every note. Sync is now
+claimed per project and the loser proceeds against what is already indexed, which is safe because a
+pass commits per note and writes each note's row last: an overtaken index is stale, never wrong.
+Separately, `ATTR_TIMEOUT => 4` was removed — measured, pdo_sqlite's default busy timeout on this
+build is 60000 ms, so that line lowered it fifteenfold while its comment claimed to raise it. The
+same line is still in `ProjectStore::open()`.

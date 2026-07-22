@@ -7,6 +7,7 @@ namespace Tests\Knowledge;
 use Claw\Http\HttpResponse;
 use Claw\Knowledge\EmbedderInterface;
 use Claw\Knowledge\Indexer;
+use Claw\Knowledge\KnowledgeBase;
 use Claw\Knowledge\KnowledgeIndex;
 use Claw\Knowledge\NoteParser;
 use Claw\Knowledge\OpenAiEmbedder;
@@ -153,9 +154,7 @@ final class KnowledgeBaseTest
             file_put_contents($dir . '/kb/deploy.md', "# Deploying\n\nPush the tag, then watch src/Deploy/Runner.php:88.\n");
             file_put_contents($dir . '/kb/style.md', "# Style\n\nBlank line after a closing brace.\n");
 
-            $embedder = new KeywordEmbedder();
-            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
-            $tool = new KnowledgeTool($index, $embedder, $dir . '/kb');
+            $tool = new KnowledgeTool(self::baseAt($dir));
 
             $found = $tool->handle(['action' => 'search', 'query' => 'how do we deploy']);
             Assert::true(str_contains($found, 'Push the tag'));
@@ -167,7 +166,13 @@ final class KnowledgeBaseTest
             Assert::true(str_contains($about, 'line 88'));
 
             Assert::true(str_contains($tool->handle(['action' => 'about', 'file' => 'src/Nothing.php']), 'says nothing'));
-            Assert::true(str_contains($tool->handle(['action' => 'read', 'path' => 'style.md']), 'closing brace'));
+            Assert::true(str_contains($tool->handle(['action' => 'read', 'note' => 'style.md']), 'closing brace'));
+
+            // The sections of a note, so a caller can ask about one part instead of pulling it all in.
+            Assert::true(str_contains($tool->handle(['action' => 'outline', 'note' => 'deploy.md']), 'Deploying'));
+
+            // And the project's own rules, which is how a model learns them without a copy in its prompt.
+            Assert::true(str_contains($tool->handle(['action' => 'conventions']), 'Knowledge base'));
         } finally {
             self::rmrf($dir);
         }
@@ -187,11 +192,11 @@ final class KnowledgeBaseTest
             file_put_contents($dir . '/secret.txt', 'not for the model');
             file_put_contents($dir . '/kb/ok.md', "# Ok\n\nfine\n");
 
-            $tool = new KnowledgeTool(new KnowledgeIndex(new \PDO('sqlite::memory:')), new KeywordEmbedder(), $dir . '/kb');
+            $tool = new KnowledgeTool(self::baseAt($dir));
             $threw = false;
 
             try {
-                $tool->handle(['action' => 'read', 'path' => '../secret.txt']);
+                $tool->handle(['action' => 'read', 'note' => '../secret.txt']);
             } catch (\Claw\Exceptions\ToolException) {
                 $threw = true;
             }
@@ -235,8 +240,7 @@ final class KnowledgeBaseTest
             file_put_contents($dir . '/kb/deploy.md', "---\ntags: [ops]\n---\n# Deploying\n\nPush the tag.\n");
             file_put_contents($dir . '/kb/style.md', "---\ntags: [style]\n---\n# Style\n\nDeploy a blank line after a brace.\n");
 
-            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
-            $tool = new KnowledgeTool($index, new KeywordEmbedder(), $dir . '/kb');
+            $tool = new KnowledgeTool(self::baseAt($dir));
 
             // The base can say what it is filed under, so a model narrows with a real tag not a guess.
             $tags = $tool->handle(['action' => 'tags']);
@@ -434,31 +438,60 @@ final class KnowledgeBaseTest
         try {
             $project = new \Claw\Project\Project('p1', 'Demo', $dir);
             $workspace = new \Claw\Tool\Workspace($dir);
-            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
-            $embedder = new KeywordEmbedder();
+            $store = self::tempDir();
 
-            // No embedder: every call would fail identically, so the tool is not offered at all.
-            Assert::false(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, null)->has('knowledge'));
+            // No embedder: nothing could turn a question into a search, so there is NO BASE — the
+            // decision is the module's, and the factory only asks whether it got one.
+            Assert::same(KnowledgeBase::forProject($project, $store, null), null);
+            Assert::false(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, null)->has('knowledge'));
             Assert::false(is_dir($dir . '/kb'));   // and nothing was created on the way
 
             // A MISSING FOLDER IS NOT A REASON TO WITHHOLD IT — it is made, seeded, and offered.
             // This assertion used to be the opposite, and that inverted contract is why the knowledge
             // base was never once used: the tool appeared only for a project that already had kb/,
             // and nothing anywhere created kb/.
-            Assert::true(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, $embedder)->has('knowledge'));
-            Assert::true(is_file($dir . '/kb/' . Indexer::README));
+            $base = KnowledgeBase::forProject($project, $store, new KeywordEmbedder());
 
-            // The seeded page is the one the tool's description sends a model to read.
-            $readme = (string) file_get_contents($dir . '/kb/' . Indexer::README);
-            Assert::true(str_contains($readme, 'decisions/'));
+            if ($base === null) {
+                throw new \RuntimeException('a writable project with an embedder must have a base');
+            }
 
-            // A project that has rewritten its own rules keeps them: scaffolding never overwrites.
-            file_put_contents($dir . '/kb/' . Indexer::README, '# Ours');
-            \Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, $embedder);
-            Assert::same(file_get_contents($dir . '/kb/' . Indexer::README), '# Ours');
+            Assert::true(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $base)->has('knowledge'));
+
+            // The base reports where notes go; the caller never assembles that path.
+            Assert::same($base->location(), $dir . \DIRECTORY_SEPARATOR . 'kb');
+            Assert::true(str_contains($base->conventions(), 'decisions/'));
+
+            // A project that has rewritten its own rules keeps them: creating never overwrites.
+            file_put_contents($dir . '/kb/README.md', '# Ours');
+            KnowledgeBase::create($dir);
+            Assert::same(file_get_contents($dir . '/kb/README.md'), '# Ours');
+            self::rmrf($store);
         } finally {
             self::rmrf($dir);
         }
+    }
+
+    /** A real base over a temp project folder — the tool's only dependency. */
+    private static function baseAt(string $projectDir): \Claw\Knowledge\KnowledgeBaseInterface
+    {
+        $store = $projectDir . '/state';
+
+        if (!is_dir($store)) {
+            mkdir($store, 0o775, true);
+        }
+
+        $base = KnowledgeBase::forProject(
+            new \Claw\Project\Project('p', 'P', $projectDir),
+            $store,
+            new KeywordEmbedder(),
+        );
+
+        if ($base === null) {
+            throw new \RuntimeException('the test could not build a knowledge base');
+        }
+
+        return $base;
     }
 
     private static function tempDir(): string

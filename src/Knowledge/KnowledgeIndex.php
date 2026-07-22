@@ -24,6 +24,9 @@ namespace Claw\Knowledge;
  * a model, against `sqlite-vec` becoming a platform-specific build dependency for a speed nobody's own
  * notes need. On a real 346-chunk base the scan measures 12 ms. `dev/design/knowledge-base.md` has the
  * numbers; the lexical half costs no new dependency, since this build has FTS5 with `bm25()` compiled in.
+ *
+ * @internal to {@see KnowledgeBase}. Nothing outside this namespace may name this class: it is where the
+ *           base happens to be SQLite today, and that is exactly the fact the module exists to hide.
  */
 final class KnowledgeIndex
 {
@@ -55,10 +58,12 @@ final class KnowledgeIndex
      */
     public static function openAt(string $path): self
     {
-        $pdo = new \PDO('sqlite:' . $path, null, null, [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_TIMEOUT => 4,   // busy timeout (s) — wait out a concurrent writer rather than fail
-        ]);
+        // NO ATTR_TIMEOUT. Measured on this build: pdo_sqlite's default busy timeout is 60000 ms, so
+        // the `ATTR_TIMEOUT => 4` that used to be here LOWERED it fifteen-fold while its comment
+        // claimed to be raising it. The busy timeout is not what makes concurrent access safe anyway —
+        // it is not consulted on the paths that actually collided — so serialization lives one layer
+        // up, in KnowledgeBase's sync claim, and this connection simply keeps the generous default.
+        $pdo = new \PDO('sqlite:' . $path, null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
         $pdo->exec('PRAGMA journal_mode=WAL');
 
         return new self($pdo);
@@ -489,17 +494,24 @@ final class KnowledgeIndex
      * The exact half of the base. "What do we know about src/Foo.php" has a right answer that costs one
      * indexed lookup; asking it of a vector scan would be slower and only approximately right.
      *
-     * @return list<array{path: string, line: int}>
+     * @return list<array{note: string, title: string, line: int}>
      */
     public function about(string $file): array
     {
-        $stmt = $this->pdo->prepare('SELECT path, line FROM refs WHERE file = :f ORDER BY path, line');
+        $stmt = $this->pdo->prepare(
+            'SELECT r.path, r.line, COALESCE(n.title, r.path) title FROM refs r
+             LEFT JOIN notes n ON n.path = r.path WHERE r.file = :f ORDER BY r.path, r.line',
+        );
         $stmt->execute(['f' => $file]);
 
         $found = [];
 
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
-            $found[] = ['path' => (string) $row['path'], 'line' => (int) $row['line']];
+            $found[] = [
+                'note' => (string) $row['path'],
+                'title' => (string) $row['title'],
+                'line' => (int) $row['line'],
+            ];
         }
 
         return $found;
@@ -526,6 +538,71 @@ final class KnowledgeIndex
         }
 
         return $counts;
+    }
+
+    /**
+     * Every note with its title and how it is filed — the browsable view of the base.
+     *
+     * @return list<array{note: string, title: string, tags: list<string>}>
+     */
+    public function notes(): array
+    {
+        $stmt = $this->pdo->query('SELECT path, title FROM notes ORDER BY path');
+
+        if ($stmt === false) {
+            return [];
+        }
+
+        $notes = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $path = (string) $row['path'];
+            $notes[] = ['note' => $path, 'title' => (string) $row['title'], 'tags' => $this->tagsOf($path)];
+        }
+
+        return $notes;
+    }
+
+    /**
+     * One note's sections in the order they are written.
+     *
+     * Needs no new indexing: the headings were parsed and stored when the note was indexed, so an
+     * outline is one ordered select over a column that already carries an index.
+     *
+     * @return list<array{section: string, text: string}>
+     */
+    public function sectionsOf(string $path): array
+    {
+        $stmt = $this->pdo->prepare('SELECT heading, text FROM chunks WHERE path = :p ORDER BY ord');
+        $stmt->execute(['p' => $path]);
+
+        $sections = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $sections[] = ['section' => (string) $row['heading'], 'text' => (string) $row['text']];
+        }
+
+        return $sections;
+    }
+
+    /**
+     * What a note links to, and what links back to it.
+     *
+     * The second half is what `links_target` was built for. The index has existed since the base was
+     * first written and nothing has ever queried it — "what points HERE" is usually the more useful
+     * question, because it finds where else a subject is discussed without inventing a second search.
+     *
+     * @return array{out: list<string>, in: list<string>}
+     */
+    public function linksBothWays(string $path): array
+    {
+        $stmt = $this->pdo->prepare('SELECT DISTINCT path FROM links WHERE target = :t ORDER BY path');
+        $stmt->execute(['t' => $path]);
+
+        return [
+            'out' => $this->linksOf($path),
+            'in' => array_values(array_map(strval(...), $stmt->fetchAll(\PDO::FETCH_COLUMN))),
+        ];
     }
 
     /** @return list<string> */

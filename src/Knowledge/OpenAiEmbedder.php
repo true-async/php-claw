@@ -16,6 +16,9 @@ use Claw\Http\HttpClientInterface;
  * 1332 ms at 1536. `text-embedding-3-small` shortens natively through the `dimensions` parameter — a
  * supported mode, not a truncation — so this asks for 256 and gets a store that stays usable without a
  * vector index to maintain.
+ *
+ * @internal to {@see KnowledgeBase}, apart from being CONSTRUCTED at the composition root — the base URL
+ *           and the key are configuration, and configuration is the run pipeline's to hold.
  */
 final readonly class OpenAiEmbedder implements EmbedderInterface
 {

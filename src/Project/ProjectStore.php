@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Claw\Project;
 
 use Claw\Exceptions\ClawException;
-use Claw\Knowledge\Indexer;
+use Claw\Knowledge\KnowledgeBase;
 
 /**
  * One opened project's state. A "project" is an EXTERNAL working tree (a folder, possibly a
@@ -102,7 +102,7 @@ final class ProjectStore implements ProjectStoreInterface
         }
 
         if ($withKnowledgeBase) {
-            Indexer::scaffold($abs . \DIRECTORY_SEPARATOR . Indexer::FOLDER);
+            KnowledgeBase::create($abs);
         }
 
         return new Project($id, $name, $abs, $description);
