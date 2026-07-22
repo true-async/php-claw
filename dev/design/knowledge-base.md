@@ -150,3 +150,9 @@ grows faster than anyone reads it is worse than a small one.
 - **No cross-project base yet.** `KnowledgeBaseInterface` mentions shared/session scopes; a project's
   own base is the one with an obvious owner and an obvious lifetime. Shared knowledge needs a rule
   about who may write it, which nobody has chosen.
+
+## The second pass
+
+[`knowledge-base-next.md`](knowledge-base-next.md) takes the three items above off the shelf and adds
+what a survey of comparable systems turned up: hybrid retrieval, required pages, log pages, backlinks,
+and a position on whether an agent may write here at all.

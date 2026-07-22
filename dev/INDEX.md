@@ -28,6 +28,16 @@ The knowledge map is [`ARCHITECTURE.md`](../ARCHITECTURE.md) in the repository r
 - What has already gone wrong: [`POSTMORTEM.md`](POSTMORTEM.md).
 - What is agreed but not started: [`TODO.md`](TODO.md) — and what was deliberately rejected.
 
+## Design documents
+
+Per-subject designs live in [`design/`](design). One subject per file; a second pass gets its own
+file rather than overwriting the first, so the reasoning behind what was built stays readable.
+
+| Subject | Where |
+|---|---|
+| The knowledge base, as built | [`design/knowledge-base.md`](design/knowledge-base.md) |
+| The knowledge base, second pass | [`design/knowledge-base-next.md`](design/knowledge-base-next.md) |
+
 ## Hot paths
 
 None measured. Nothing in this project is on a hot path worth a benchmark yet — the wall
