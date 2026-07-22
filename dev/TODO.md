@@ -176,7 +176,30 @@ the whole `/api/ws` WebSocket endpoint (item 1's subject), `POST issues/{id}/clo
 and `artifact-file`. The document is the knowledge map — a map that omits the primary live
 transport sends the next reader to the fallback.
 
-## 4. MCP — php-claw as a server. Later, deliberately
+## 4. The knowledge base, second pass
+
+Designed, not started: [`design/knowledge-base-next.md`](design/knowledge-base-next.md) — nine
+features ordered by return, what was rejected and with which numbers, and the traps found on the way.
+Only the headline is repeated here.
+
+**It has never been filled.** No project has a `kb/` folder and no `*.kb.db` exists, so the tool has
+never been built into a run and the tag list in its description has always been empty. Everything
+known about this subsystem comes from seven tests and two stub embedders.
+
+**The first feature repairs something already broken.** Retrieval is dense-only at 256 dimensions, and
+developer notes are full of exact strings — an error code, a flag, a file path — which is where dense
+embeddings smear and lexical search is exact. FTS5 is already compiled into this build, so full-text
+beside the vectors, fused by rank, costs no new dependency.
+
+Then: a manifest so the agent knows what the base holds, required pages on the same mechanism, an
+outline action, dated log pages in CHANGELOG shape, and backlinks — whose index is already built and
+queried by nothing (`src/Knowledge/KnowledgeIndex.php:60`).
+
+**Open, and needing a decision rather than code:** whether a writing action exists and in whose
+palette. Framed correctly it is a question about the API surface and `Registry::only()`, not about
+what an agent may be trusted to do — it has no concept of a knowledge base and only ever calls a tool.
+
+## 5. MCP — php-claw as a server. Later, deliberately
 
 **Not now.** Recorded so the direction is not rediscovered from scratch.
 
