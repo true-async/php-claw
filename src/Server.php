@@ -13,6 +13,7 @@ use function Async\spawn;
 use Claw\Agent\AgentFactory;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
+use Claw\Knowledge\Indexer;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\Project;
@@ -400,6 +401,9 @@ final class Server
         $payload = \json_decode($request->getBody(), true);
         $folder = \is_array($payload) && isset($payload['path']) ? (string) $payload['path'] : '';
         $description = \is_array($payload) && isset($payload['description']) ? (string) $payload['description'] : '';
+        // The dashboard's checkbox. Absent means yes: a project registered by a client that predates
+        // this field still gets a base, which is the whole point of the change.
+        $withKnowledgeBase = !\is_array($payload) || ($payload['knowledgeBase'] ?? true) !== false;
 
         if ($folder === '') {
             $response->json(['error' => 'a project folder path is required'], 400);
@@ -408,7 +412,7 @@ final class Server
         }
 
         try {
-            $project = ProjectStore::init($this->projectsDir, $folder, $description);
+            $project = ProjectStore::init($this->projectsDir, $folder, $description, $withKnowledgeBase);
         } catch (ClawException $e) {
             $response->json(['error' => $e->getMessage()], 400);
 
@@ -423,6 +427,7 @@ final class Server
             'name' => $project->name,
             'path' => $project->path,
             'description' => $project->description,
+            'knowledgeBase' => $withKnowledgeBase ? Indexer::FOLDER : null,
         ], 201);
     }
 

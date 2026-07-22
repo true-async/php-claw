@@ -179,7 +179,7 @@ final readonly class IssueRunner
         Secrets::assertOutside($secretsPath, $project->path);
         // The knowledge base lives beside the project's state database like everything else durable
         // about it, and is built only when the project actually has notes — see ToolFactory::knowledge().
-        $index = new KnowledgeIndex(new \PDO('sqlite:' . $this->projectsDir . '/' . $project->id . '.kb.db'));
+        $index = KnowledgeIndex::openAt($this->projectsDir . '/' . $project->id . '.kb.db');
         $embedder = $this->config->baseUrl === null
             ? null
             : new OpenAiEmbedder(new CurlHttpClient(), $this->config->baseUrl, $this->config->apiKey);

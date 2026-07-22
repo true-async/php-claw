@@ -23,6 +23,42 @@ final readonly class Indexer
     /** Notes per embedding request. The round trip dominates; a note of twenty chunks is one call. */
     private const int BATCH = 64;
 
+    /** The notes folder inside a project. One name, so nothing has to guess it. */
+    public const string FOLDER = 'kb';
+
+    /**
+     * The page that indexes the base and states how this project keeps it.
+     *
+     * The name is FIXED and that is the point: the tool description can tell a model where the rules
+     * are without carrying the rules themselves, so a project may rewrite them freely and the prompt
+     * never goes stale against the file.
+     */
+    public const string README = 'README.md';
+
+    /**
+     * Make sure a project has a notes folder, seeded with the page that explains what it is for.
+     *
+     * Idempotent, and it never touches a file that already exists — a project that has rewritten its
+     * own README keeps it. Failure is silent by design: a read-only or unwritable project folder is a
+     * reason to have no knowledge base, not a reason to fail the run that noticed.
+     */
+    public static function scaffold(string $folder): bool
+    {
+        if (!is_dir($folder) && !@mkdir($folder, 0o775, true) && !is_dir($folder)) {
+            return false;
+        }
+
+        $readme = $folder . \DIRECTORY_SEPARATOR . self::README;
+
+        if (is_file($readme)) {
+            return true;
+        }
+
+        $template = @file_get_contents(\dirname(__DIR__, 2) . '/config/knowledge-readme.md');
+
+        return $template !== false && @file_put_contents($readme, $template) !== false;
+    }
+
     public function __construct(
         private KnowledgeIndex $index,
         private EmbedderInterface $embedder,

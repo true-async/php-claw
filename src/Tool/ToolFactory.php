@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw\Tool;
 
 use Claw\Knowledge\EmbedderInterface;
+use Claw\Knowledge\Indexer;
 use Claw\Knowledge\KnowledgeIndex;
 use Claw\Project\Project;
 use Claw\Workflow\WorkflowStore;
@@ -55,17 +56,24 @@ final class ToolFactory
     /**
      * The knowledge tool for a project, or null when it would be useless.
      *
-     * Two conditions, and both are about not offering a capability that cannot work. A project with no
-     * `kb/` folder has nothing to search — the tool would exist to answer "nothing is written down",
-     * which a model would try several times before believing. And with no embedder there is nothing to
-     * turn a question into a vector, so every call would fail identically.
+     * The remaining condition is the embedder: with none there is nothing to turn a question into a
+     * vector, so every call would fail identically and offering the tool would only waste turns.
+     *
+     * A MISSING FOLDER IS NO LONGER A REASON TO WITHHOLD IT. It used to be, and that is why this
+     * subsystem was never once used: the tool appeared only for a project that already had `kb/`, and
+     * nothing anywhere created `kb/`. The folder is made here instead, with the page that explains
+     * what it is for, so a project registered before any of this still gets a base on its next run.
      */
     private static function knowledge(Project $project, ?KnowledgeIndex $index, ?EmbedderInterface $embedder): ?KnowledgeTool
     {
-        $folder = $project->path . '/kb';
-
-        if ($index === null || $embedder === null || !is_dir($folder)) {
+        if ($index === null || $embedder === null) {
             return null;
+        }
+
+        $folder = $project->path . \DIRECTORY_SEPARATOR . Indexer::FOLDER;
+
+        if (!Indexer::scaffold($folder)) {
+            return null;   // the project folder is not writable: no base, and nothing to offer
         }
 
         return new KnowledgeTool($index, $embedder, $folder);

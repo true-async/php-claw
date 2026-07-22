@@ -56,7 +56,7 @@ final class NoteParser
     {
         $tags = [];
 
-        if (preg_match('/^---\R(.*?)\R---/s', $markdown, $front) === 1) {
+        if (preg_match('/^---\R(.*?)\R---/su', $markdown, $front) === 1) {
             // `tags: [a, b]` or `tags: a, b`
             if (preg_match('/^tags:[ \t]*\[?([^\]\r\n]*)\]?[ \t]*$/mi', $front[1], $inline) === 1) {
                 foreach (explode(',', $inline[1]) as $tag) {
@@ -65,7 +65,7 @@ final class NoteParser
             }
 
             // a dashed list under `tags:`
-            if (preg_match('/^tags:\s*\R((?:\s*-\s*\S+\R?)+)/mi', $front[1], $listed) === 1) {
+            if (preg_match('/^tags:\s*\R((?:\s*-\s*\S+\R?)+)/miu', $front[1], $listed) === 1) {
                 preg_match_all('/-\s*(\S+)/', $listed[1], $items);
 
                 foreach ($items[1] as $tag) {
@@ -127,7 +127,12 @@ final class NoteParser
      */
     private static function chunks(string $body): array
     {
-        $lines = preg_split('/\R/', $body) ?: [];
+        // `/u` is load-bearing, not decoration. Without it PCRE reads the subject as bytes, and in byte
+        // mode `\R` also matches 0x85 (NEL) — which is the second byte of `х` (U+0445), `ą`, `Ѕ` and
+        // every other character whose continuation byte lands there. A Russian note was therefore split
+        // through the middle of a letter, and the malformed chunk reached json_encode() in the embedder,
+        // whose JSON_THROW_ON_ERROR killed the whole indexing pass. See dev/POSTMORTEM.md.
+        $lines = preg_split('/\R/u', $body) ?: [];
         $trail = [];        // heading stack, index 0 = h1
         $heading = '';
         $buffer = [];
@@ -179,7 +184,7 @@ final class NoteParser
         $pieces = [];
         $current = '';
 
-        foreach (preg_split('/\R{2,}/', $text) ?: [] as $paragraph) {
+        foreach (preg_split('/\R{2,}/u', $text) ?: [] as $paragraph) {
             if ($current !== '' && \strlen($current) + \strlen($paragraph) > self::MAX_CHUNK) {
                 $pieces[] = $current;
                 $current = '';

@@ -44,11 +44,18 @@ final readonly class KnowledgeTool implements ToolInterface
         $tags = array_keys($this->index->tagCounts());
         $filed = $tags === [] ? '' : ' Tags currently in use: ' . implode(', ', \array_slice($tags, 0, 25)) . '.';
 
+        // The rules are POINTED AT, never quoted. Each project keeps its own in that page and may
+        // rewrite them entirely; a description that carried a copy would silently disagree with the
+        // file the moment somebody edited it, and the model would have no way to tell which was true.
         return "This project's knowledge base — what has been LEARNED about it, outliving any one run. "
             . "It is markdown in the project's kb/ folder, filed in three kinds:\n"
             . "- decisions/ — what was decided and WHY, so a choice is not re-argued from nothing;\n"
             . "- postmortems/ — what went wrong and what it cost, so it is not paid for twice;\n"
             . "- design/ — how a part of the system works, one document per subject.\n"
+            . 'THIS PROJECT SETS ITS OWN RULES for the base, and they are one call away: '
+            . "action='read' with path='" . Indexer::README . "' returns the index — what the base "
+            . 'holds and how this project expects it to be kept. Read it before relying on the base, '
+            . "and before filing anything; the conventions below are only the defaults it may replace.\n"
             . "Every note carries tags, and a tag narrows a search to its subject.\n\n"
             . "action='search' (query, optional tag, optional limit) finds passages that ANSWER a "
             . 'question, worded however they happen to be worded; use it when you do not know where the '
@@ -110,7 +117,7 @@ final readonly class KnowledgeTool implements ToolInterface
 
         $tag = trim(\is_scalar($input['tag'] ?? null) ? (string) $input['tag'] : '');
         $vectors = $this->embedder->embed([$query]);
-        $hits = $this->index->nearest($vectors[0] ?? [], $this->limitOf($input), $tag);
+        $hits = $this->index->search($query, $vectors[0] ?? [], $this->limitOf($input), $tag);
 
         if ($hits === []) {
             $where = $tag === '' ? 'the knowledge base' : "notes tagged '{$tag}'";
@@ -125,7 +132,9 @@ final readonly class KnowledgeTool implements ToolInterface
             $where = $hit['heading'] === '' ? $hit['path'] : "{$hit['path']} — {$hit['heading']}";
             $filed = $hit['tags'] === [] ? '' : ' #' . implode(' #', $hit['tags']);
             $also = $hit['links'] === [] ? '' : "\n  see also: " . implode(', ', $hit['links']);
-            $lines[] = sprintf("[%s] (%.2f)%s\n%s%s", $where, $hit['score'], $filed, trim($hit['text']), $also);
+            // No relevance number: the score is now a rank-fusion weight, which is meaningful for
+            // ordering and meaningless to read. The order IS the signal.
+            $lines[] = sprintf("[%s]%s\n%s%s", $where, $filed, trim($hit['text']), $also);
         }
 
         return implode("\n\n---\n\n", $lines);

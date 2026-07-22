@@ -52,31 +52,69 @@ These block work below and are not resolvable from the code.
 
 ## Features, by value
 
-### 1. Full-text search beside the vectors, fused by rank
+### 1. Full-text search beside the vectors, fused by rank — BUILT
 
-The only entry that repairs something already broken rather than adding capability.
+Built on 2026-07-22. What follows is what survived measurement; the reasoning it replaces is kept
+below it, because most of this entry's original argument turned out to be wrong and the way it was
+wrong is the useful part.
 
-Retrieval is dense-only, and the vectors are 256-dimensional by deliberate choice. Developer notes
-are full of exact strings — `SQLSTATE[HY000] [2002]`, `ATTR_POOL_MAX`, `src/Run/Triage.php`, a flag
-name, a stack frame — and that is precisely where dense embeddings smear and lexical search is exact.
-Anthropic measured retrieval failure dropping from 3.7% to 2.9% by adding BM25 to contextual
-embeddings; on a corpus with precise vocabulary, BM25 alone can beat dense outright (T²-RAGBench:
-0.515 vs 0.466 nDCG@10).
+**Shipped.** An external-content FTS5 index over `chunks`, kept in step by two triggers, created and
+backfilled inside one transaction. `nearest()` became `search(text, vector, limit, tag)` — the lexical
+half needs the words, which an embedding cannot supply. The tag is lowercased once and narrows both
+halves. Fusion is RRF over both rankings.
 
-Fuse with **Reciprocal Rank Fusion**, which uses ranks only — no score normalisation, no training,
-and it sidesteps the sign convention of SQLite's `bm25()` entirely. Use k=60 and do not tune it;
-Cormack's original paper reports MAP .2123 / .2145 / .2142 at k=10 / 60 / 100 against .2016 for the
-best single ranker, and states the choice "was not critical".
+**Only identifier-shaped words reach FTS5** — a term carrying a digit, an underscore, a slash, a
+colon or an internal capital. This is the single most important line in the change and it was
+rejected twice before it was measured properly. FTS5 has no stopword list, so putting a whole
+question to it ranks documents on `what`, `the` and `about`: on a 346-chunk base an ordinary question
+matches 97–99% of the corpus, and every one of those zero-signal matches then collects a full RRF
+presence bonus. Measured, ungated fusion scores 73% on realistic exact-string queries against
+dense-only's 88% — it is *worse than not having it*. Gated, the same family scores 96%.
 
-*Cost:* no new dependency. This build has SQLite 3.45.1 with FTS5, `bm25()`, column weighting and
-porter stemming compiled in. A working prototype exists in this session's scratchpad — an
-external-content FTS table over `chunks.id`, triggers to keep it in step, and the tag filter joined
-through `rowid → chunks.path → tags.path`. It retrieved `SQLSTATE[HY000] [2002] Connection refused`
-exactly, which is the case a 256-dim vector loses. Query latency is unchanged; both rankers are cheap
-and run against the same table.
+**k=5, depth=10, and they are measured rather than imported.** Cormack's k=60 is calibrated for
+TREC-scale runs. Here it is degenerate: at depth 50 over 346 chunks the weights of rank 1 and rank 50
+differ by 1.8×, so fusion stops ordering and becomes a vote on which documents appear in both lists.
+Measured cost of the imported constants: 6 points of semantic recall and 13 of exact-string recall.
+Revisit past a few thousand chunks.
+
+**What was refuted, and how.** The claims below were reasoned from a corpus assembled out of this
+folder's markdown with a hashed bag-of-words standing in for the embedder. A stand-in that is *good*
+at exact word overlap is precisely the wrong model of a dense embedder, and every conclusion drawn
+from it inverted once 224 real notes were indexed with the real embedder:
+
+- *"Retrieval is dense-only and that loses exact strings — measured 25% recall@5."* No. That number
+  came from selecting the test tokens by asking FTS5 which terms occur in exactly one chunk, which
+  conditions the sample on the tokens dense is worst at. On identifiers sampled independently from the
+  source tree and git log, dense-only scores **92%**.
+- *"Hybrid beats dense on semantic questions."* Not shown. The apparent +10 points lived entirely in
+  the subset of eval questions where the generator leaked a rare term from the target; on leak-free
+  questions the difference is +2 points at p=1.0.
+- *"The breadcrumb prepended before embedding is a 12-point top-1 regression."* An artifact of the
+  eval protocol: the questions were written from raw chunk text, so they favoured raw-text embeddings.
+  Written from the string that is actually embedded, the ordering reverses, and neither direction is
+  significant. `Indexer::reindex()` is unchanged.
+
+**What survived every treatment.** Fusion beats lexical-only on semantic questions — p=0.0024 strict,
+p=0.0003 at note level, p=0.0039 on the leak-free subset, p=0.027 against corrected vectors. And the
+lexical half is the only thing that finds `ATTR_POOL_MAX` or `SQLSTATE[HY000]` quoted inside a
+sentence, which is how a model actually asks.
+
+**A defect found by filling the base at all,** and the argument for having done so: the chunker split
+on `/\R/` with no `/u`, and in byte mode `\R` matches 0x85 — the second byte of `х`. Every Russian
+note was cut through the middle of a letter and the whole indexing pass died on the malformed JSON.
+See `dev/POSTMORTEM.md`.
+
+*Cost:* no new dependency. This build has SQLite 3.45.1 with FTS5, `bm25()` and porter stemming
+compiled in. Retrieval measures 9.5 ms per query over 346 chunks, against 152–420 ms for the HTTP
+round trip that fetches the query's own embedding.
 
 *Source:* [Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval) ·
 [RRF, Cormack SIGIR'09](http://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf)
+
+*Still open:* the evaluation set itself is not trustworthy enough to justify the next decision — 43%
+of its paraphrase labels were rejected by a stronger judge, and its exact-string family is circular.
+Rebuild the exact side from the source tree with multi-chunk ground truth before measuring anything
+else here.
 
 ### 2. A manifest in the tool description, and required pages on the same mechanism
 
