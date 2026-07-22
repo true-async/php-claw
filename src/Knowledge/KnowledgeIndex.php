@@ -60,11 +60,37 @@ final class KnowledgeIndex
     {
         // NO ATTR_TIMEOUT. Measured on this build: pdo_sqlite's default busy timeout is 60000 ms, so
         // the `ATTR_TIMEOUT => 4` that used to be here LOWERED it fifteen-fold while its comment
-        // claimed to be raising it. The busy timeout is not what makes concurrent access safe anyway —
-        // it is not consulted on the paths that actually collided — so serialization lives one layer
-        // up, in KnowledgeBase's sync claim, and this connection simply keeps the generous default.
+        // claimed to be raising it.
         $pdo = new \PDO('sqlite:' . $path, null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
-        $pdo->exec('PRAGMA journal_mode=WAL');
+
+        // WAL is persisted in the database header, so it needs setting once — not on every open. That
+        // matters because the CONVERSION takes an exclusive lock: measured, setting it on a database
+        // that is already WAL is a harmless no-op even while another connection reads, but converting
+        // a fresh rollback-journal database while another connection has it open throws "database is
+        // locked". Two runs of one project opening a brand-new base is exactly that race, so the
+        // conversion is attempted only when it is needed and a loss is survivable — the other
+        // connection is converting it, and both end up in WAL either way.
+        $mode = $pdo->query('PRAGMA journal_mode');
+        $already = $mode !== false && $mode->fetchColumn() === 'wal';
+
+        // Release the cursor before anything opens a transaction. A PDOStatement still holding a
+        // result keeps the connection "busy", and SQLite then refuses the COMMIT that ensureTables()
+        // runs inside the constructor below with "cannot commit transaction - SQL statements in
+        // progress". Nothing in the tests caught this: they build the index over an in-memory PDO and
+        // never come through here.
+        if ($mode !== false) {
+            $mode->closeCursor();
+        }
+
+        unset($mode);
+
+        if (!$already) {
+            try {
+                $pdo->exec('PRAGMA journal_mode=WAL');
+            } catch (\PDOException) {
+                // someone else is converting it right now; their result is the one that counts
+            }
+        }
 
         return new self($pdo);
     }
@@ -128,12 +154,19 @@ final class KnowledgeIndex
     private static function ensureFullText(\PDO $pdo): void
     {
         $exists = $pdo->query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'");
+        $built = $exists !== false && $exists->fetchColumn() !== false;
 
-        if ($exists !== false && $exists->fetchColumn() !== false) {
+        if ($exists !== false) {
+            $exists->closeCursor();   // see openAt(): an open cursor blocks the COMMIT below
+        }
+
+        unset($exists);
+
+        if ($built) {
             return;
         }
 
-        $pdo->beginTransaction();
+        self::writing($pdo);
 
         try {
             $pdo->exec(
@@ -155,9 +188,9 @@ final class KnowledgeIndex
             // An index built over chunks that are already there starts empty; 'rebuild' fills it. On a
             // fresh database this is a no-op.
             $pdo->exec("INSERT INTO chunks_fts (chunks_fts) VALUES ('rebuild')");
-            $pdo->commit();
+            $pdo->exec('COMMIT');
         } catch (\Exception $e) {
-            $pdo->rollBack();
+            $pdo->exec('ROLLBACK');
 
             throw $e;
         }
@@ -214,7 +247,7 @@ final class KnowledgeIndex
         array $refs,
         array $tags = [],
     ): void {
-        $this->pdo->beginTransaction();
+        self::writing($this->pdo);
 
         try {
             $this->forgetContentOf($path);
@@ -256,12 +289,28 @@ final class KnowledgeIndex
                  VALUES (:p, :ti, :m, :s, :sha, :at)',
             )->execute(['p' => $path, 'ti' => $title, 'm' => $mtime, 's' => $size, 'sha' => $sha256, 'at' => time()]);
 
-            $this->pdo->commit();
+            $this->pdo->exec('COMMIT');
         } catch (\Throwable $e) {
-            $this->pdo->rollBack();
+            $this->pdo->exec('ROLLBACK');
 
             throw $e;
         }
+    }
+
+    /**
+     * Open a transaction that INTENDS to write, taking the write lock up front.
+     *
+     * `BEGIN IMMEDIATE`, not PDO's `beginTransaction()` — which issues a plain `BEGIN`, i.e. DEFERRED.
+     * A deferred transaction becomes a reader on its first SELECT and then has to UPGRADE to a writer,
+     * and SQLite refuses to make that upgrade wait: two readers both upgrading would deadlock, so it
+     * returns "database is locked" instantly and the busy handler is never consulted. Measured across
+     * two processes with a five-second busy timeout: deferred fails after 0 ms, immediate waits 636 ms
+     * for the other writer and succeeds. No timeout value fixes the deferred case, which is why the
+     * one that used to be set here looked like it did nothing — it did nothing.
+     */
+    private static function writing(\PDO $pdo): void
+    {
+        $pdo->exec('BEGIN IMMEDIATE');
     }
 
     /** Drop a note entirely — it is gone from the folder, so it must go from the index. */
