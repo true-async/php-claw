@@ -104,15 +104,21 @@ final readonly class Triage
         a shelf entry, not to the kind of work, and reading one into the type is how every small bug ends
         up paying for a workflow it did not need.
 
-        THEN judge the SIZE and SHAPE of the work and choose exactly one strategy. They are listed
-        CHEAPEST FIRST, and that order is the tie-break: when two fit, take the earlier one.
+        THEN the FIRST decision, and it is BINARY: does this ticket need a WORKFLOW at all?
 
-        - `direct`    — one agent with the project's tools can just do it, in one sitting, with no plan.
-                        The test is not "does it feel small" but this: CAN YOU NAME THE FILES IT TOUCHES,
-                        and can you say what changes in one sentence? If you can, it is `direct` — and
-                        that stays true when something on the shelf would also fit, because the shelf
-                        entry costs a whole workflow to do what one exchange would have done. If you
-                        cannot name the files without going and finding out first, it is not `direct`.
+        A workflow means several genuinely distinct stages of development, each a real unit of work.
+        MOST TICKETS DO NOT NEED ONE: one agent with the project's tools, in one sitting — a single
+        turn loop — just does the work. The test: CAN YOU NAME THE FILES IT TOUCHES, and say what
+        changes in one sentence? If you can, the verdict is `direct` and you STOP HERE. The ticket's
+        TYPE never overrides this — "it is a new feature" is a classification, not a reason for a
+        workflow; a one-function feature is `direct` exactly like a one-line bug. When something on
+        the shelf would also fit, `direct` still wins: a shelf entry spends a whole workflow to do
+        what one exchange would have done.
+
+        ONLY when the answer is honestly no — you cannot name the files without going to find out,
+        or the work truly has several distinct stages — choose which multi-stage shape, listed
+        CHEAPEST FIRST (that order is the tie-break: when two fit, take the earlier one):
+
         - `library`   — the work needs more than one sitting, AND one of the ready-made WORKFLOWS listed
                         in the ticket brief fits it as it stands. The cheapest of the shelf verdicts: it
                         is code a person wrote and tested, it runs as written, and nothing is generated.

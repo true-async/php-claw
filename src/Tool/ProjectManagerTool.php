@@ -121,6 +121,13 @@ final readonly class ProjectManagerTool implements ToolInterface
                     'enum' => ['direct', 'library', 'generate', 'decompose'],
                     'description' => 'how the issue is to be solved; required for set_strategy',
                 ],
+                'why_not_direct' => [
+                    'type' => 'string',
+                    'description' => "required for every strategy EXCEPT 'direct': answer the direct "
+                        . 'test concretely — why can one agent with the project tools NOT just do this '
+                        . 'in one sitting? Name what is unknown or too large. "It is a feature" is a '
+                        . 'type, not an answer.',
+                ],
                 'workflow' => [
                     'type' => 'string',
                     'description' => 'name of the shelf entry to use, exactly as `list_workflows` gave it '
@@ -225,6 +232,19 @@ final readonly class ProjectManagerTool implements ToolInterface
         // as it was and the model corrects itself against an unchanged state rather than a half-applied one.
         $type = IssueType::parse($this->text($input, 'type'));
         $strategy = Strategy::parse($this->text($input, 'strategy'));
+
+        // The direct gate. Two real tickets in a row paid for a generated workflow because the verdict
+        // pattern-matched 'new functionality means feature strategy' and never faced the cheapest question.
+        // A verdict costlier than `direct` must ANSWER the direct test, not skip it — and the answer is
+        // recorded with the reason, where the failure review will read it.
+        if ($strategy !== Strategy::Direct && trim($this->text($input, 'why_not_direct')) === '') {
+            throw new ToolException(
+                "project_manager: strategy '{$strategy->value}' needs 'why_not_direct' — first answer the "
+                . 'direct test: can one agent with the project tools just do this in one sitting, naming '
+                . "the files it touches? If yes, the verdict is 'direct'; if no, say concretely what is "
+                . 'unknown or too large.',
+            );
+        }
         // The old key is still honoured, and deliberately OR-ed rather than replaced: it is gone from the
         // schema, so a model only sends it from habit — and reading it as "no approval needed" would let
         // a verdict that asked for a person run without one. Where the two disagree, err towards asking.
