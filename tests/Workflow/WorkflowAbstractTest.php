@@ -1435,6 +1435,33 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function handoffFormationIsTracedUnderItsOwnRoleNotTheNextStepsWork(): void
+    {
+        // The handoff exchange runs at the FIRST ai() of the NEXT step, so its ai span sat inside that
+        // step's span under the 'worker' role — reading as the next step doing work it had not begun
+        // (Edmond flagged an 'assess' step as doing nothing, its only visible exchange being the PRIOR
+        // step's handoff). It is now traced as role 'handoff', distinct from the step's own work.
+        $worker = new ScriptedAgent(
+            $this->answer('did the work'),   // first()'s own ai()
+            $this->answer('the baton'),      // the handoff formation
+            $this->answer('ok'),             // second()'s own ai()
+        );
+        $sink = new ArrayTraceSink();
+        $this->relay($this->config(worker: $worker, tracer: new Tracer('r1', $sink)))->run();
+
+        $aiRoles = [];
+
+        foreach ($sink->records as $record) {
+            if ($record->event()->type === 'ai') {
+                $aiRoles[] = (string) $record->event()->data['role'];
+            }
+        }
+
+        // first's work, then the handoff formation under its own role, then second's work
+        Assert::same($aiRoles, ['worker', 'handoff', 'worker']);
+    }
+
+    #[Test]
     public function aFormedHandoffIsSavedToTheStoreKeyedByTheStepThatFormedIt(): void
     {
         // first() works, second()'s ai() triggers the handoff formation (request 1, continuing first()'s

@@ -981,6 +981,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * formed it the instant it exists — so a resume in a fresh process, where that conversation is
      * gone, reads it back at construction ({@see loadHandoff()}) instead of re-forming it. Cleared
      * before the inner call so it never re-enters; a step that ran no model exchange hands on ''.
+     *
+     * The formation exchange is traced under its OWN role, 'handoff' — not 'worker'. It runs at the
+     * FIRST ai() of the NEXT step, so before this its span sat inside that step and read as the next
+     * step doing work it had not started ('assess' looked like it did nothing, its "work" being the
+     * PREVIOUS step's handoff). The role names the exchange for what it is.
      */
     private function formPendingHandoff(): void
     {
@@ -997,8 +1002,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'attention to — decisions made, files/paths touched, what remains, gotchas. Pass on only '
             . 'what matters, not everything. Reply with that handoff only.',
             [],
-            null,
-            $pending['history'],   // continue the work conversation — the model still has the full context
+            'handoff',              // its own trace role, so the exchange is not read as the next step's work
+            $pending['history'],    // continue the work conversation — the model still has the full context
         ));
 
         // Persist it the moment it is formed, keyed by the step that formed it. A resume that lands on
