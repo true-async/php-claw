@@ -117,6 +117,28 @@ final class WorkflowValidatorTest
     public function rejectsACriticNameThatHasNoRules(): void
     {
         Assert::true($this->rejected(self::shell('', "#[Step(critic: 'gate')] protected function go(): void {}")));
+    }
+
+    /**
+     * The mirror: rules nobody consumes are a review that silently never runs — the first live
+     * solver under the cycle recipe wrote rules for every step and marked none, so it LOOKED
+     * reviewed while nothing reviewed it.
+     */
+    #[Test]
+    public function rejectsCriticRulesThatNoStepConsumes(): void
+    {
+        Assert::true($this->rejected(self::shell(
+            '',
+            "#[Step] protected function go(): void {}\n"
+            . "protected function criticRules(): array { return ['orphan' => 'judged by nobody']; }",
+        )));
+
+        // consumed rules stay valid — the existing binding is untouched
+        Assert::false($this->rejected(self::shell(
+            '',
+            "#[Step(critic: 'gate')] protected function go(): void {}\n"
+            . "protected function criticRules(): array { return ['gate' => 'the rules']; }",
+        )));
 
         Assert::true($this->rejected(self::shell(
             '',
