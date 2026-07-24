@@ -42,7 +42,12 @@ final class BackoffAgentRetryPolicyTest
     {
         $policy = new BackoffAgentRetryPolicy(rateLimitWaitCeilingMs: 60_000);
 
-        Assert::same($policy->delayBeforeRetry(new RateLimitException('x', 5_000), 1), 5_000);
+        // At least the server's resume time, plus a bounded pad so parallel
+        // runs do not retry at the same instant.
+        $delay = $policy->delayBeforeRetry(new RateLimitException('x', 5_000), 1);
+        Assert::true($delay >= 5_000);
+        Assert::true($delay <= 5_000 + 500 + 1_250);
+
         Assert::null($policy->delayBeforeRetry(new RateLimitException('x', 120_000), 1));   // too far -> give up
     }
 
@@ -53,5 +58,28 @@ final class BackoffAgentRetryPolicyTest
 
         Assert::true($policy->delayBeforeRetry(new ServerErrorException('x'), 1) > 0);
         Assert::null($policy->delayBeforeRetry(new ServerErrorException('x'), 2));
+    }
+
+    #[Test]
+    public function rateLimitGetsItsOwnLargerAttemptBudget(): void
+    {
+        $policy = new BackoffAgentRetryPolicy(maxAttempts: 4, rateLimitMaxAttempts: 8);
+
+        // A TPM 429 under parallel-run contention recurs a few times even when
+        // each wait honors the server's delay — it must outlive maxAttempts.
+        Assert::true($policy->delayBeforeRetry(new RateLimitException('x', 1_434), 4) > 0);
+        Assert::true($policy->delayBeforeRetry(new RateLimitException('x', 1_434), 7) > 0);
+        Assert::null($policy->delayBeforeRetry(new RateLimitException('x', 1_434), 8));
+
+        // Other transient errors keep the small budget.
+        Assert::null($policy->delayBeforeRetry(new ServerErrorException('x'), 4));
+    }
+
+    #[Test]
+    public function rateLimitWithoutResumeTimeStillBacksOff(): void
+    {
+        $policy = new BackoffAgentRetryPolicy();
+
+        Assert::true($policy->delayBeforeRetry(new RateLimitException('x'), 1) > 0);
     }
 }
