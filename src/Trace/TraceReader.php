@@ -305,6 +305,7 @@ final class TraceReader
                 'status' => (string) ($artifact['status'] ?? ''),
                 'tool' => (string) ($artifact['tool'] ?? ''),
                 'summary' => (string) ($artifact['summary'] ?? ''),
+                'type' => (string) ($artifact['type'] ?? ''),
             ];
         }
 

@@ -137,7 +137,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
 
         // The generated class IS this step's output — record it as the artifact the critic judges. (A
         // codegen step produces no run artifacts, and that is correct; the artifact is the source itself.)
-        $this->artifact('solver-class', $this->code);
+        $this->artifact('solver-class', $this->code, type: 'solver');
 
         return $this->code;   // a rejection re-runs draft with the findings
     }

@@ -466,6 +466,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         ?string $evidence = null,
         string $from = '',
         ?ToolResultMeta $meta = null,
+        string $type = '',
     ): void {
         // Exactly one CONTENT channel — enforce the contract rather than silently preferring one
         // (dropping the other) or recording an empty artifact when none is given. $text is the one
@@ -473,8 +474,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // rides along, stored and shown separately.
         $entry = match (true) {
             $evidence !== null && $file === null => Artifact::evidence($label, $evidence, $from, $text ?? '', $meta),
-            $file !== null && $text === null => Artifact::file($label, $file),
-            $text !== null && $file === null => Artifact::text($label, $text, $lang),
+            $file !== null && $text === null => Artifact::file($label, $file, $type),
+            $text !== null && $file === null => Artifact::text($label, $text, $lang, $type),
             default => throw new \LogicException(
                 "artifact('{$label}') needs exactly one of \$text, \$file or \$evidence "
                 . '(a $text alongside $evidence is allowed — it is the step\'s note about that output).',
@@ -492,6 +493,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $entry->status,
             $entry->tool,
             $entry->summary,
+            $entry->type,
         );
     }
 
@@ -1040,6 +1042,60 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /** The review itself — {@see critic()} only marks the exchange as a reviewer's and unmarks it after. */
+    /**
+     * What the critic is TOLD about verifying this step's work, instead of being left to guess:
+     * the exact commands the step recorded as evidence (with the runtime's grading), the task
+     * text (it may name how the result is meant to be checked), and whatever the project's
+     * knowledge base says about verifying work here. The observed failure this closes: a
+     * reviewer re-inventing the test invocation, failing on its own typo, and burning rework
+     * rounds on work that was already green.
+     */
+    private function verificationToolbox(string $name): string
+    {
+        $sections = [];
+        $commands = [];
+
+        foreach ($this->artifacts[$name] ?? [] as $artifact) {
+            if ($artifact->kind === 'evidence' && $artifact->source !== '') {
+                $graded = $artifact->status === ''
+                    ? ''
+                    : " → {$artifact->status}" . ($artifact->summary === '' ? '' : ": {$artifact->summary}");
+                $commands[] = "- `{$artifact->source}`{$graded}";
+            }
+        }
+
+        if ($commands !== []) {
+            $sections[] = "Commands the step already ran as evidence (re-run THESE, verbatim):\n"
+                . implode("\n", $commands);
+        }
+
+        $issue = $this->issue();
+
+        if ($issue !== null) {
+            $brief = trim($issue->title . "\n" . $issue->description);
+
+            if ($brief !== '') {
+                $sections[] = "The task, which may name how the result is meant to be verified:\n"
+                    . self::clip($brief, 600);
+            }
+        }
+
+        // Whatever the project's own base says about checking work here. Absent base or silent
+        // base → no section; the critic still has the recorded commands and the task.
+        $known = $this->tool('knowledge', [
+            'action' => 'search',
+            'query' => 'how to verify work in this project: run tests, lint, static analysis, build',
+            'limit' => 3,
+        ]);
+
+        if (!str_starts_with($known, "tool 'knowledge' failed:") && trim($known) !== '') {
+            $sections[] = "What the project's knowledge base says about verifying work here:\n"
+                . self::clip($known, 1_200);
+        }
+
+        return $sections === [] ? '' : "Your verification toolbox:\n\n" . implode("\n\n", $sections) . "\n\n";
+    }
+
     private function judge(string $name, string $rubric, string $artifacts): ?string
     {
         $verdict = trim($this->ai(
@@ -1048,6 +1104,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
             . "Artifacts it recorded:\n{$artifacts}\n\n"
             . $this->renderParams($this->stepParams[$name] ?? [])
+            . $this->verificationToolbox($name)
             . 'An artifact is what the step SAYS it did. It is a claim, not evidence: a step writes its own '
             . 'artifact text and can assert success it never achieved — one reported "All tests passed" '
             . 'while the suite was erroring, and was believed. So when the step CLAIMS to have ALREADY '
@@ -1059,8 +1116,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'you the artifact is code or a plan that has NOT run yet, the project as it stands is not '
             . 'evidence about it. Judge it on its own terms and do NOT hold the current state of the files, '
             . "or a red test suite, against work that was never supposed to have happened yet.\n\n"
-            . 'Where verification does apply, verify against the PROJECT (read the changed files, run the '
-            . 'tests or `php -l`), which is cheap and conclusive. Do NOT go spelunking the journal: '
+            . 'Where verification does apply, verify against the PROJECT — and use the toolbox above: '
+            . 're-run the recorded commands VERBATIM rather than composing your own variant. A check that '
+            . 'itself failed to run (command not found, wrong path) is YOUR tooling problem, not evidence '
+            . 'against the work — fix the invocation or say plainly that you could not verify; never '
+            . 'reject for it. Do NOT go spelunking the journal: '
             . "recall(what='step', name='{$name}') is available ONCE if you need to see what the step did, "
             . "and not beyond that.\n\n"
             . 'If it satisfies the rubric, reply with exactly: OK. Otherwise reply with the concrete problems '
