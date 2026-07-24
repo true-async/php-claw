@@ -7,6 +7,7 @@ namespace Claw\Tool;
 use Claw\Exceptions\ClawException;
 use Claw\Exceptions\ToolException;
 use Claw\Knowledge\KnowledgeBaseInterface;
+use Claw\Knowledge\KnowledgeWriterInterface;
 
 /**
  * The knowledge base, as one tool: what has been LEARNED about this project.
@@ -31,8 +32,15 @@ use Claw\Knowledge\KnowledgeBaseInterface;
  */
 final readonly class KnowledgeTool implements ToolInterface
 {
-    public function __construct(private KnowledgeBaseInterface $knowledge)
-    {
+    /**
+     * $writer is the WRITE half, obtained separately by design (see {@see KnowledgeWriterInterface}):
+     * without one, `record` is absent from the schema and the description — a palette that must not
+     * write is not told writing exists, rather than told not to.
+     */
+    public function __construct(
+        private KnowledgeBaseInterface $knowledge,
+        private ?KnowledgeWriterInterface $writer = null,
+    ) {
     }
 
     public function name(): string
@@ -65,28 +73,45 @@ final readonly class KnowledgeTool implements ToolInterface
             . "action='read' (note) returns one note in full, for when a result is worth reading around. "
             . "action='outline' (note) lists its sections, for when it is not. "
             . "action='tags' lists what the base is filed under."
+            . ($this->writer === null ? '' : ' '
+                . "action='record' (kind, title, body, optional tags) files a NEW note: kind='decision' "
+                . "for a choice made here and WHY, so it is not re-argued from nothing; kind='postmortem' "
+                . 'for something that went wrong and what it cost, so it is not paid for twice; '
+                . "kind='design' for how a part of the system works. Record it the moment it is learned — "
+                . 'a later run knows only what was filed. Write the principle, not the transcript.')
             . $filed;
     }
 
     public function inputSchema(): array
     {
-        return [
-            'type' => 'object',
-            'properties' => [
-                'action' => ['type' => 'string', 'enum' => ['search', 'about', 'read', 'outline', 'tags', 'conventions']],
-                'query' => ['type' => 'string', 'description' => "what you want to know, in words — action='search'"],
-                'file' => ['type' => 'string', 'description' => "a source path, e.g. src/Run/Triage.php — action='about'"],
-                'note' => ['type' => 'string', 'description' => "a note, exactly as a result named it — action='read'/'outline'"],
-                'tag' => ['type' => 'string', 'description' => "narrow the search to one subject — action='search'"],
-                'limit' => ['type' => 'integer', 'description' => 'how many passages to return (default 5)'],
-            ],
-            'required' => ['action'],
+        $actions = ['search', 'about', 'read', 'outline', 'tags', 'conventions'];
+        $properties = [
+            'action' => ['type' => 'string', 'enum' => $actions],
+            'query' => ['type' => 'string', 'description' => "what you want to know, in words — action='search'"],
+            'file' => ['type' => 'string', 'description' => "a source path, e.g. src/Run/Triage.php — action='about'"],
+            'note' => ['type' => 'string', 'description' => "a note, exactly as a result named it — action='read'/'outline'"],
+            'tag' => ['type' => 'string', 'description' => "narrow the search to one subject — action='search'"],
+            'limit' => ['type' => 'integer', 'description' => 'how many passages to return (default 5)'],
         ];
+
+        // The write half exists in the schema only when this palette actually holds a writer — the
+        // action's presence is the teaching, its absence is the constraint.
+        if ($this->writer !== null) {
+            $properties['action']['enum'][] = 'record';
+            $properties['kind'] = ['type' => 'string', 'enum' => ['decision', 'postmortem', 'design'],
+                'description' => "what question the note answers — action='record'"];
+            $properties['title'] = ['type' => 'string', 'description' => "the note's one subject — action='record'"];
+            $properties['body'] = ['type' => 'string', 'description' => "the note, in markdown — action='record'"];
+            $properties['tags'] = ['type' => 'array', 'items' => ['type' => 'string'],
+                'description' => "how the note is filed for later narrowing — action='record'"];
+        }
+
+        return ['type' => 'object', 'properties' => $properties, 'required' => ['action']];
     }
 
     public function risk(): Risk
     {
-        return Risk::Safe;
+        return $this->writer === null ? Risk::Safe : Risk::Mutating;
     }
 
     public function handle(array $input): string
@@ -101,8 +126,10 @@ final readonly class KnowledgeTool implements ToolInterface
                 'outline' => $this->outline($input),
                 'tags' => $this->tags(),
                 'conventions' => $this->conventions(),
+                'record' => $this->record($input),
                 default => throw new ToolException(
-                    "knowledge: unknown action '{$action}' (use search|about|read|outline|tags|conventions)",
+                    "knowledge: unknown action '{$action}' (use search|about|read|outline|tags|conventions"
+                    . ($this->writer === null ? ')' : '|record)'),
                 ),
             };
         } catch (ToolException $e) {
@@ -216,6 +243,40 @@ final readonly class KnowledgeTool implements ToolInterface
         return $rules === ''
             ? 'This project has not written down how it keeps its knowledge base.'
             : $rules;
+    }
+
+    /** @param array<string, mixed> $input */
+    private function record(array $input): string
+    {
+        if ($this->writer === null) {
+            throw new ToolException(
+                'knowledge: this palette cannot write to the base — record what you learned in an artifact instead',
+            );
+        }
+
+        $kind = trim(\is_scalar($input['kind'] ?? null) ? (string) $input['kind'] : '');
+        $title = trim(\is_scalar($input['title'] ?? null) ? (string) $input['title'] : '');
+        $body = trim(\is_scalar($input['body'] ?? null) ? (string) $input['body'] : '');
+
+        if ($kind === '' || $title === '' || $body === '') {
+            throw new ToolException(
+                "knowledge: action='record' needs 'kind' (decision|postmortem|design), 'title' and 'body'",
+            );
+        }
+
+        $tags = [];
+
+        foreach (\is_array($input['tags'] ?? null) ? $input['tags'] : [] as $tag) {
+            if (\is_scalar($tag) && trim((string) $tag) !== '') {
+                $tags[] = trim((string) $tag);
+            }
+        }
+
+        // An unknown kind is the base's refusal (ClawException) — handle() turns it into a tool
+        // error the model reads and corrects, same as every other refusal here.
+        $note = $this->writer->record($kind, $title, $body, $tags);
+
+        return "Recorded {$note}. It is readable now (action='read'); search picks it up from the next run.";
     }
 
     /** @param array<string, mixed> $input */

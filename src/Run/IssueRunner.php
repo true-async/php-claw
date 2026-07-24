@@ -191,6 +191,7 @@ final readonly class IssueRunner
             $workspace,
             Secrets::fromFile($secretsPath),
             $knowledge,
+            $knowledge,   // the same base is the writer: a run both consults and records what it learns
             $this->config->turnTimeoutMs,
         );
 

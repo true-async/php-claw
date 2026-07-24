@@ -472,6 +472,202 @@ final class KnowledgeBaseTest
         }
     }
 
+    #[Test]
+    public function recordFilesANoteByKindAndItIsImmediatelyReadable(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $base = self::writableBaseAt($dir);
+
+            $note = $base->record(
+                'decision',
+                'Use SQLite for the index',
+                "Chosen over a service because the base is per-project and local.\n\nSee src/Knowledge/KnowledgeIndex.php.",
+                ['index', 'sqlite'],
+            );
+
+            Assert::same($note, 'decisions/use-sqlite-for-the-index.md');
+            Assert::true(is_file($dir . '/kb/' . $note));
+
+            // Readable at once — read() is authoritative and does not wait for the index.
+            $written = $base->read($note);
+            Assert::true(str_contains($written, 'tags: [index, sqlite]'));
+            Assert::true(str_contains($written, '# Use SQLite for the index'));
+            Assert::true(str_contains($written, 'per-project and local'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    #[Test]
+    public function recordKeepsAnOwnH1ButSuppliesTheTitleForLesserOpenings(): void
+    {
+        // The parser reads the first H1 as the title. A body that opens with its own `# ` keeps it;
+        // one opening with `## Context` (or a #tag) has no title of its own, so ours must be added —
+        // otherwise the parser falls back to the filename slug, which rides into every embedded chunk.
+        $dir = self::tempDir();
+
+        try {
+            $base = self::writableBaseAt($dir);
+
+            $own = $base->read($base->record('design', 'Ignored title', "# Real Heading\n\nprose"));
+            Assert::true(str_contains($own, '# Real Heading'));
+            Assert::false(str_contains($own, '# Ignored title'));   // no second, competing title
+
+            $lesser = $base->read($base->record('design', 'Supplied Title', "## Context\n\nprose"));
+            Assert::true(str_contains($lesser, "# Supplied Title\n\n## Context"));   // ours precedes the subsection
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    #[Test]
+    public function recordStripsFrontmatterDelimitersFromTags(): void
+    {
+        // A tag carrying the very characters that delimit `tags: [a, b]` would mis-parse the note it
+        // is meant to file; they are stripped so the frontmatter the indexer reads stays well-formed.
+        $dir = self::tempDir();
+
+        try {
+            $base = self::writableBaseAt($dir);
+
+            $note = $base->record('decision', 'Tag hygiene', 'body', ['clean', "pool],\nsqlite", '   ']);
+            $written = $base->read($note);
+
+            Assert::true(str_contains($written, 'tags: [clean, pool sqlite]'));   // the `],\n` run collapses to a space; blank dropped
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    #[Test]
+    public function recordNeverOverwritesACollidingTitle(): void
+    {
+        // By the base's own conventions a decision that replaces an earlier one is a NEW note —
+        // so a colliding title files beside the old note, never over it.
+        $dir = self::tempDir();
+
+        try {
+            $base = self::writableBaseAt($dir);
+
+            $first = $base->record('postmortem', 'The pool starved', 'first account');
+            $second = $base->record('postmortem', 'The pool starved', 'second account');
+
+            Assert::same($first, 'postmortems/the-pool-starved.md');
+            Assert::same($second, 'postmortems/the-pool-starved-2.md');
+            Assert::true(str_contains($base->read($first), 'first account'));
+            Assert::true(str_contains($base->read($second), 'second account'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    #[Test]
+    public function recordRefusesBadInputAndAHostileTitleCannotEscapeTheFolder(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $base = self::writableBaseAt($dir);
+
+            foreach ([
+                ['note', 'a title', 'a body'],      // unknown kind
+                ['design', '', 'a body'],           // no title
+                ['design', 'a title', ''],          // no body
+            ] as [$kind, $title, $body]) {
+                $threw = false;
+
+                try {
+                    $base->record($kind, $title, $body);
+                } catch (\Claw\Exceptions\ClawException) {
+                    $threw = true;
+                }
+
+                Assert::true($threw);
+            }
+
+            // The slug admits only [a-z0-9-]: traversal is not expressible in a handle.
+            $note = $base->record('design', '../../outside', 'stays put');
+            Assert::same($note, 'design/outside.md');
+            Assert::true(is_file($dir . '/kb/design/outside.md'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    #[Test]
+    public function theToolTeachesRecordOnlyWhenHandedAWriter(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $base = self::writableBaseAt($dir);
+
+            // Read-only palette: `record` does not exist — not in the actions, not in the prose, and
+            // an attempt anyway is refused with where to put the learning instead.
+            $readOnly = new \Claw\Tool\KnowledgeTool($base);
+            $schema = $readOnly->inputSchema();
+            Assert::false(\in_array('record', $schema['properties']['action']['enum'], true));
+            Assert::false(str_contains($readOnly->description(), "action='record'"));
+            Assert::same($readOnly->risk(), \Claw\Tool\Risk::Safe);
+
+            $threw = false;
+
+            try {
+                $readOnly->handle(['action' => 'record', 'kind' => 'decision', 'title' => 't', 'body' => 'b']);
+            } catch (\Claw\Exceptions\ToolException $e) {
+                $threw = true;
+                Assert::true(str_contains($e->getMessage(), 'cannot write'));
+            }
+
+            Assert::true($threw);
+
+            // With the writer, the action exists — schema, prose, honest risk — and it files notes.
+            $writing = new \Claw\Tool\KnowledgeTool($base, $base);
+            $schema = $writing->inputSchema();
+            Assert::true(\in_array('record', $schema['properties']['action']['enum'], true));
+            Assert::true(str_contains($writing->description(), "action='record'"));
+            Assert::same($writing->risk(), \Claw\Tool\Risk::Mutating);
+
+            $answer = $writing->handle([
+                'action' => 'record',
+                'kind' => 'decision',
+                'title' => 'Pin the model per role',
+                'body' => 'So a cheap default never reviews.',
+                'tags' => ['agents'],
+            ]);
+            Assert::true(str_contains($answer, 'Recorded decisions/pin-the-model-per-role.md'));
+            Assert::true(is_file($dir . '/kb/decisions/pin-the-model-per-role.md'));
+
+            // Half a call is refused with what is missing, not half-filed.
+            $threw = false;
+
+            try {
+                $writing->handle(['action' => 'record', 'kind' => 'decision', 'title' => 'no body']);
+            } catch (\Claw\Exceptions\ToolException $e) {
+                $threw = true;
+                Assert::true(str_contains($e->getMessage(), "'kind' (decision|postmortem|design), 'title' and 'body'"));
+            }
+
+            Assert::true($threw);
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /** The concrete base over a temp project folder, typed with its write half visible. */
+    private static function writableBaseAt(string $projectDir): KnowledgeBase
+    {
+        $base = self::baseAt($projectDir);
+
+        if (!$base instanceof KnowledgeBase) {
+            throw new \RuntimeException('the test needs the concrete base');
+        }
+
+        return $base;
+    }
+
     /** A real base over a temp project folder — the tool's only dependency. */
     private static function baseAt(string $projectDir): \Claw\Knowledge\KnowledgeBaseInterface
     {
