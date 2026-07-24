@@ -19,6 +19,7 @@ use Claw\Tool\ListWorkflowsTool;
 use Claw\Tool\ProjectManagerTool;
 use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
+use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
 use Claw\Trace\TraceStore;
@@ -243,8 +244,11 @@ final readonly class Triage
             }
         } catch (\Cancellation $cancellation) {
             throw $cancellation;
-        } catch (\Throwable) {
-            return null;   // see the docblock: a ticket outlives a failed analysis
+        } catch (\Exception $e) {
+            // The ticket outlives a failed analysis — and so does a verdict recorded by an earlier
+            // turn, which is why this falls through to the read below instead of returning null.
+            // Without the trace line, "the model never decided" and "the call died" read identically.
+            $tracer->log('analysis-failed', $e->getMessage(), level: Level::Notice);
         } finally {
             $tracer->exit($span);   // a failed analysis is worth reading too — often more so
         }
