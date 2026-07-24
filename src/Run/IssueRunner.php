@@ -29,6 +29,7 @@ use Claw\Tool\RecallTool;
 use Claw\Tool\Secrets;
 use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
+use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
 use Claw\Workflow\BudgetPolicy;
@@ -409,9 +410,8 @@ final readonly class IssueRunner
             throw $cancellation;
         } catch (\Throwable $e) {
             $ctx->tracer->exit($span);
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->failRun($ctx, "run #{$ctx->runId} failed: {$e->getMessage()}");
             $this->giveBackToProjectManager($ctx->issue, "the direct attempt failed: {$e->getMessage()}", $ctx->runId);
-            $this->frontend->report("run #{$ctx->runId} failed: {$e->getMessage()}", true);
 
             return 1;
         }
@@ -424,15 +424,11 @@ final readonly class IssueRunner
             // Not a crash, so there is no error to report — the work simply is not done. Hand it back:
             // the ProjectManager escalates, or decides a person is needed, which is the right answer
             // when the ticket itself is the problem.
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->failRun($ctx, "run #{$ctx->runId} ended without finishing issue #{$ctx->issue->id}: {$unsolved}");
             $this->giveBackToProjectManager(
                 $ctx->issue,
                 "the direct attempt did not solve the ticket: {$unsolved}",
                 $ctx->runId,
-            );
-            $this->frontend->report(
-                "run #{$ctx->runId} ended without finishing issue #{$ctx->issue->id}; handed back for triage",
-                true,
             );
 
             return 1;
@@ -541,6 +537,20 @@ final readonly class IssueRunner
      * Best-effort: {@see Triage::analyse()} swallows its own failures, so a model that is down leaves
      * the ticket open and untriaged rather than taking the run report down with it.
      */
+    /**
+     * Mark the run failed and JOURNAL why. The reason goes through the trace, not only the frontend:
+     * the server frontend deliberately has no console — the journal IS its log — so a failure
+     * reported only through report() was invisible on dashboard runs. Seen live: a generation died
+     * on a provider rate limit and the only written record was the strategy ledger; the run's trace
+     * just stopped mid-step with nothing to read.
+     */
+    private function failRun(RunContext $ctx, string $reason): void
+    {
+        $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+        $ctx->tracer->log('run-failed', $reason, [], Level::Notice);
+        $this->frontend->report($reason, true);
+    }
+
     private function giveBackToProjectManager(Issue $issue, string $reason, string $runId): void
     {
         // FIRST, stop the issue claiming to be in progress. The run set it to InProgress at the start
@@ -590,11 +600,14 @@ final readonly class IssueRunner
         $ctx->tracer->exit($span);
 
         if ($children === []) {
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
-            $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::WaitingHuman);
-            $this->frontend->report(
+            $this->failRun(
+                $ctx,
                 "issue #{$ctx->issue->id} was judged too big to solve in one run, and could not be split{$why} — "
                 . 'a person needs to say what the pieces are',
+            );
+            $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::WaitingHuman);
+            $this->frontend->report(
+                'waiting on a person to split it',
                 true,
             );
 
@@ -693,18 +706,16 @@ final readonly class IssueRunner
             throw $cancellation;   // a cancelled run must stop, not be reported as a generation failure
         } catch (\Throwable $e) {
             $ctx->tracer->exit($gen);
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->failRun($ctx, 'generation failed: ' . $e->getMessage());
             $this->giveBackToProjectManager($ctx->issue, 'generation failed: ' . $e->getMessage(), $ctx->runId);
-            $this->frontend->report('generation failed: ' . $e->getMessage(), true);
 
             return 1;
         }
         $ctx->tracer->exit($gen);
 
         if (!is_file($solverPath)) {
-            $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+            $this->failRun($ctx, 'no solver workflow was produced');
             $this->giveBackToProjectManager($ctx->issue, 'no solver workflow was produced', $ctx->runId);
-            $this->frontend->report('no solver workflow was produced', true);
 
             return 1;
         }
@@ -770,9 +781,8 @@ final readonly class IssueRunner
                 // really can mean the generated code is broken, which is what repair is for.
                 if (!$repairable || $e instanceof AgentException || ($e instanceof WorkflowException && $e->deliberate)) {
                     $ctx->tracer->exit($solverSpan);
-                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                    $this->failRun($ctx, "run #{$ctx->runId} failed: {$e->getMessage()}");
                     $this->giveBackToProjectManager($ctx->issue, "run #{$ctx->runId} failed: {$e->getMessage()}", $ctx->runId);
-                    $this->frontend->report("Run #{$ctx->runId} failed: {$e->getMessage()}", true);
 
                     return 1;
                 }
@@ -781,10 +791,9 @@ final readonly class IssueRunner
                 // so catch the lot here and repair-and-resume — that is exactly this boundary's job
                 if (++$attempt > self::MAX_REPAIRS) {
                     $ctx->tracer->exit($solverSpan);
-                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
                     $message = "run #{$ctx->runId} failed after {$attempt} repair attempt(s): {$e->getMessage()}";
+                    $this->failRun($ctx, $message);
                     $this->giveBackToProjectManager($ctx->issue, $message, $ctx->runId);
-                    $this->frontend->report($message, true);
 
                     return 1;
                 }
@@ -794,9 +803,8 @@ final readonly class IssueRunner
 
                 if ($fixed === null) {
                     $ctx->tracer->exit($solverSpan);
-                    $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
+                    $this->failRun($ctx, "the solver crashed and could not be repaired: {$e->getMessage()}");
                     $this->giveBackToProjectManager($ctx->issue, "the solver crashed and could not be repaired: {$e->getMessage()}", $ctx->runId);
-                    $this->frontend->report("the supervisor could not repair run #{$ctx->runId}", true);
 
                     return 1;
                 }
