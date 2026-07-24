@@ -158,6 +158,13 @@ final class ProjectStore implements ProjectStoreInterface
         $projects = [];
 
         foreach (glob($projectsDir . '/*.db') ?: [] as $dbPath) {
+            // A knowledge-base index (<id>.kb.db) lives beside the project dbs. Opening it here would
+            // not just list garbage — openHandle() runs ensureSchema(), planting project tables inside
+            // the index file before the metadata check throws.
+            if (str_ends_with($dbPath, '.kb.db')) {
+                continue;
+            }
+
             try {
                 $projects[] = self::openHandle($dbPath)->project;
             } catch (\Exception) {
