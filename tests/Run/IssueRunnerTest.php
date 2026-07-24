@@ -135,9 +135,9 @@ final class IssueRunnerTest
             $issue = $store->addIssue('a task that will not work');
 
             // A solver that throws on its only step: the run fails for a real reason, not a missing file.
-            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $workflows = WorkflowStore::solvers($projectsDir, $store->project()->id);
             $solver = self::solverName($issue->id);
-            $workflows->write($solver, self::throwingSolverCode($solver), true);
+            $workflows->write($solver, self::throwingSolverCode($workflows->namespaceFor(true), $solver), true);
 
             $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), new RecordingRunFrontend());
 
@@ -179,9 +179,9 @@ final class IssueRunnerTest
             }
             $issue = $store->addIssue('a task the model backend will refuse');
 
-            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $workflows = WorkflowStore::solvers($projectsDir, $store->project()->id);
             $solver = self::solverName($issue->id);
-            $workflows->write($solver, self::backendFailingSolverCode($solver), true);
+            $workflows->write($solver, self::backendFailingSolverCode($workflows->namespaceFor(true), $solver), true);
 
             $frontend = new RecordingRunFrontend();
             $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), $frontend);
@@ -228,9 +228,9 @@ final class IssueRunnerTest
             }
             $issue = $store->addIssue('a task whose run is stopped on purpose');
 
-            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $workflows = WorkflowStore::solvers($projectsDir, $store->project()->id);
             $solver = self::solverName($issue->id);
-            $workflows->write($solver, self::stoppingSolverCode($solver), true);
+            $workflows->write($solver, self::stoppingSolverCode($workflows->namespaceFor(true), $solver), true);
 
             $frontend = new RecordingRunFrontend();
             $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), $frontend);
@@ -384,14 +384,14 @@ final class IssueRunnerTest
     }
 
     /** A solver whose step fails the way a refusing model backend does — not the way broken code does. */
-    private static function backendFailingSolverCode(string $class): string
+    private static function backendFailingSolverCode(string $namespace, string $class): string
     {
         return <<<PHP
             <?php
 
             declare(strict_types=1);
 
-            namespace ClawWorkflow\\Common;
+            namespace {$namespace};
 
             use Claw\\Exceptions\\BadRequestException;
             use Claw\\Workflow\\Step;
@@ -417,14 +417,14 @@ final class IssueRunnerTest
     }
 
     /** A solver whose step halts the run deliberately — the shape a budget or supervisor stop takes. */
-    private static function stoppingSolverCode(string $class): string
+    private static function stoppingSolverCode(string $namespace, string $class): string
     {
         return <<<PHP
             <?php
 
             declare(strict_types=1);
 
-            namespace ClawWorkflow\\Common;
+            namespace {$namespace};
 
             use Claw\\Exceptions\\WorkflowException;
             use Claw\\Workflow\\Step;
@@ -447,14 +447,14 @@ final class IssueRunnerTest
             PHP;
     }
 
-    private static function throwingSolverCode(string $class): string
+    private static function throwingSolverCode(string $namespace, string $class): string
     {
         return <<<PHP
             <?php
 
             declare(strict_types=1);
 
-            namespace ClawWorkflow\\Common;
+            namespace {$namespace};
 
             use Claw\\Workflow\\Step;
             use Claw\\Workflow\\WorkflowAbstract;
@@ -493,18 +493,18 @@ final class IssueRunnerTest
     /** Write a trivial, AI-free solver to the same Common folder the runner reuses from. */
     private static function placeSolver(string $projectsDir, string $projectId, string $solverName): void
     {
-        $workflows = new WorkflowStore($projectsDir . '/' . $projectId . '-workflows', $projectId);
-        $workflows->write($solverName, self::solverCode($solverName), true);
+        $workflows = WorkflowStore::solvers($projectsDir, $projectId);
+        $workflows->write($solverName, self::solverCode($workflows->namespaceFor(true), $solverName), true);
     }
 
-    private static function solverCode(string $class): string
+    private static function solverCode(string $namespace, string $class): string
     {
         return <<<PHP
             <?php
 
             declare(strict_types=1);
 
-            namespace ClawWorkflow\\Common;
+            namespace {$namespace};
 
             use Claw\\Workflow\\Step;
             use Claw\\Workflow\\WorkflowAbstract;
@@ -550,9 +550,9 @@ final class IssueRunnerTest
             }
             $issue = $store->addIssue('a task whose solver asks a question');
 
-            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $workflows = WorkflowStore::solvers($projectsDir, $store->project()->id);
             $solver = self::solverName($issue->id);
-            $workflows->write($solver, self::askingSolverCode($solver), true);
+            $workflows->write($solver, self::askingSolverCode($workflows->namespaceFor(true), $solver), true);
 
             $agent = new ScriptedAgent(self::says('read the config key from src/'));
             new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend())->run($issue);
@@ -601,9 +601,9 @@ final class IssueRunnerTest
             }
             $issue = $store->addIssue('a task whose solver talks to a model');
 
-            $workflows = new WorkflowStore($projectsDir . '/' . $store->project()->id . '-workflows', $store->project()->id);
+            $workflows = WorkflowStore::solvers($projectsDir, $store->project()->id);
             $solver = self::solverName($issue->id);
-            $workflows->write($solver, self::talkingSolverCode($solver), true);
+            $workflows->write($solver, self::talkingSolverCode($workflows->namespaceFor(true), $solver), true);
 
             $agent = new ScriptedAgent(self::says('done'), self::says('handoff'));
             new IssueRunner($projectsDir, $store, self::config($projectsDir), $agent, new RecordingRunFrontend())->run($issue);
@@ -619,14 +619,14 @@ final class IssueRunnerTest
     }
 
     /** A solver whose only step makes one plain model call. */
-    private static function talkingSolverCode(string $class): string
+    private static function talkingSolverCode(string $namespace, string $class): string
     {
         return <<<PHP
             <?php
 
             declare(strict_types=1);
 
-            namespace ClawWorkflow\\Common;
+            namespace {$namespace};
 
             use Claw\\Workflow\\Step;
             use Claw\\Workflow\\WorkflowAbstract;
@@ -649,14 +649,14 @@ final class IssueRunnerTest
     }
 
     /** A solver whose only step asks a question — the shortest path to the supervisor tier. */
-    private static function askingSolverCode(string $class): string
+    private static function askingSolverCode(string $namespace, string $class): string
     {
         return <<<PHP
             <?php
 
             declare(strict_types=1);
 
-            namespace ClawWorkflow\\Common;
+            namespace {$namespace};
 
             use Claw\\Workflow\\Step;
             use Claw\\Workflow\\WorkflowAbstract;

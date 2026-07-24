@@ -118,6 +118,37 @@ final class WorkflowLibraryTest
     }
 
     #[Test]
+    public function twoProjectsGeneratedSolversOfTheSameNameDoNotShadowEachOther(): void
+    {
+        // Seen live, not hypothesised: two projects each generated a solver for THEIR issue #2, both
+        // declaring ClawWorkflow\Common\Issue2Solver. The server holds every project open in one
+        // process, so whichever loaded first ran for both — and one project's run implemented the
+        // other project's feature inside the wrong repository.
+        $projectsDir = self::tempDir();
+
+        try {
+            $one = WorkflowStore::solvers($projectsDir, 'project-one');
+            $two = WorkflowStore::solvers($projectsDir, 'project-two');
+
+            $classOne = $one->classFor('Issue2Solver', true);
+            $classTwo = $two->classFor('Issue2Solver', true);
+            Assert::true($classOne !== $classTwo);
+
+            $body = "<?php\n\nnamespace %s;\n\nfinal class Issue2Solver {}\n";
+            $one->write('Issue2Solver', \sprintf($body, $one->namespaceFor(true)), true);
+            $two->write('Issue2Solver', \sprintf($body, $two->namespaceFor(true)), true);
+
+            // Each class really loads, and each from ITS OWN project's file — not whichever came first.
+            Assert::true(class_exists($classOne));
+            Assert::true(class_exists($classTwo));
+            Assert::same($one->path('Issue2Solver', true), new \ReflectionClass($classOne)->getFileName());
+            Assert::same($two->path('Issue2Solver', true), new \ReflectionClass($classTwo)->getFileName());
+        } finally {
+            self::rmrf($projectsDir);
+        }
+    }
+
+    #[Test]
     public function aFileThatDoesNotDeclareTheClassItsNameimpliesIsReported(): void
     {
         $dir = self::tempDir();
