@@ -75,14 +75,17 @@ final class Server
     private ?HttpServer $httpServer = null;
 
     /**
-     * Issue id → the detached run coroutine. Presence guards against a concurrent double-start; the
-     * handle itself lets {@see stop()} cancel a run in flight.
+     * "{project key}/{issue id}" → the detached run coroutine. Presence guards against a concurrent
+     * double-start; the handle itself lets {@see stop()} cancel a run in flight. Issue ids count from
+     * 1 in EVERY project, so the bare id once collided across projects: with two boards up, issue #1
+     * of one project 409'd because issue #1 of another was running — and stop() would have cancelled
+     * the other project's run.
      *
      * @var array<string, Coroutine<mixed>>
      */
     private array $active = [];
 
-    /** @var array<string, Channel<string>> issue id → the open gate's answer channel ({@see answer()} feeds it). */
+    /** @var array<string, Channel<string>> "{project key}/{issue id}" → the open gate's answer channel ({@see answer()} feeds it). */
     private array $gates = [];
 
     /**
@@ -997,7 +1000,7 @@ final class Server
             return;
         }
 
-        if (isset($this->active[$issue->id])) {
+        if (isset($this->active[$key . '/' . $issue->id])) {
             $response->json(['error' => 'a run for this issue is already active'], 409);
 
             return;
@@ -1031,18 +1034,19 @@ final class Server
 
         /** @var Channel<string> $answers unbuffered: a gate's send() waits for the parked run's recv() */
         $answers = new Channel();
-        $this->gates[$issue->id] = $answers;
+        $slot = $key . '/' . $issue->id;
+        $this->gates[$slot] = $answers;
 
         $frontend = new HttpRunFrontend($store, $issue->id, $answers, $this->bus, $this->roomPublisher(), $key);
 
         // Spawn detached so the run survives this handler returning; the dashboard watches the run stream.
         // The run records its own final status, so there is nothing to catch — only the active/gate cleanup.
         // The handle is kept in $active so stop() can cancel the run.
-        $this->active[$issue->id] = spawn(function () use ($store, $config, $agent, $issue, $frontend): void {
+        $this->active[$slot] = spawn(function () use ($store, $config, $agent, $issue, $frontend, $slot): void {
             try {
                 new IssueRunner($this->projectsDir, $store, $config, $agent, $frontend)->run($issue);
             } finally {
-                unset($this->active[$issue->id], $this->gates[$issue->id]);
+                unset($this->active[$slot], $this->gates[$slot]);
             }
         });
 
@@ -1056,7 +1060,7 @@ final class Server
      */
     private function stop(HttpResponse $response, string $key, string $issueId): void
     {
-        $coroutine = $this->active[$issueId] ?? null;
+        $coroutine = $this->active[$key . '/' . $issueId] ?? null;
 
         if ($coroutine === null) {
             $response->json(['error' => 'no run is active for this issue'], 409);
@@ -1092,7 +1096,7 @@ final class Server
             return;
         }
 
-        $active = $this->active[$issueId] ?? null;
+        $active = $this->active[$key . '/' . $issueId] ?? null;
         $active?->cancel();   // stop an in-flight run before hiding the issue
         $store->setIssueStatus($issueId, IssueStatus::Deleted);
         $response->json(['ok' => true], 202);
@@ -1141,7 +1145,7 @@ final class Server
 
         $payload = \json_decode($request->getBody(), true);
         $text = \is_array($payload) && isset($payload['text']) ? (string) $payload['text'] : '';
-        $channel = $this->gates[$issueId] ?? null;
+        $channel = $this->gates[$key . '/' . $issueId] ?? null;
 
         if ($channel !== null) {
             $channel->send($text);   // wake the parked run; unbuffered, so this returns once the run takes it

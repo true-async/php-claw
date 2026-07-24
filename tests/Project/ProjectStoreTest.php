@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Project;
 
 use Claw\Exceptions\ClawException;
+use Claw\Knowledge\KnowledgeIndex;
 use Claw\Project\IssueStatus;
 use Claw\Project\IssueType;
 use Claw\Project\ProjectStore;
@@ -51,6 +52,38 @@ final class ProjectStoreTest
             }
 
             Assert::true($threw);
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($folder);
+        }
+    }
+
+    /**
+     * A knowledge-base index (`<id>.kb.db`) lives beside the project dbs and matches `*.db`.
+     *
+     * all() used to open it like any candidate: ensureSchema() planted project tables inside the
+     * index file before the metadata check could throw, and the server's startup scan died on a
+     * file that was never a project.
+     */
+    #[Test]
+    public function allSkipsAKnowledgeBaseIndexBesideTheProjectDbs(): void
+    {
+        $projectsDir = self::tempDir();
+        $folder = self::tempDir();
+
+        try {
+            $project = ProjectStore::init($projectsDir, $folder);
+            $kbPath = $projectsDir . '/' . $project->id . '.kb.db';
+            KnowledgeIndex::openAt($kbPath);   // a real index file, as the tool factory creates it
+
+            $projects = ProjectStore::all($projectsDir);
+
+            Assert::same(1, \count($projects));
+            Assert::same($project->id, $projects[0]->id);
+
+            $kb = new \PDO('sqlite:' . $kbPath);
+            $stmt = $kb->query("SELECT count(*) FROM sqlite_master WHERE name = 'project'");
+            Assert::same(0, (int) ($stmt === false ? -1 : $stmt->fetchColumn()));
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($folder);

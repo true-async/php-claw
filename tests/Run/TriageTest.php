@@ -8,9 +8,11 @@ use Claw\Agent\AgentResponse;
 use Claw\Agent\Message;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
+use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
 use Claw\Config;
 use Claw\Project\ProjectStore;
+use Claw\Project\Strategy;
 use Claw\Run\Triage;
 use Claw\Trace\TraceReader;
 use Testo\Assert;
@@ -81,6 +83,41 @@ final class TriageTest
             $tree = new TraceReader($store->pdo())->render(Triage::traceId($issue));
             Assert::true(str_contains($tree, 'triage'));
             Assert::true(str_contains($tree, 'a considered answer'));
+        });
+    }
+
+    /**
+     * A verdict recorded before the loop died is still the verdict.
+     *
+     * Seen live under four concurrent triages: the model recorded the strategy in its first turn,
+     * then the NEXT model call died. The catch returned null past a verdict already in force, and
+     * the CLI told the operator nothing was recorded while the ledger said otherwise — and the
+     * swallowed exception appeared nowhere, so "the model never decided" and "the transport died"
+     * were indistinguishable from outside.
+     */
+    #[Test]
+    public function aVerdictRecordedBeforeTheLoopDiedIsStillTheVerdict(): void
+    {
+        $this->withProject(function (ProjectStore $store, Config $config): void {
+            $issue = $store->addIssue('something is broken');
+            $record = new ToolUseBlock('t1', 'project_manager', [
+                'action' => 'set_strategy',
+                'issue' => $issue->id,
+                'type' => 'feature',
+                'strategy' => 'direct',
+                'reason' => 'small and clear',
+            ]);
+            $agent = new ScriptedAgent(
+                new AgentResponse([$record], [$record], StopReason::ToolUse, new Usage(1, 1)),
+                new \RuntimeException('the transport died mid-loop'),
+            );
+
+            $strategy = new Triage($store, $config, $agent)->analyse($issue);
+
+            Assert::same(Strategy::Direct, $strategy);
+
+            $tree = new TraceReader($store->pdo())->render(Triage::traceId($issue));
+            Assert::true(str_contains($tree, 'the transport died mid-loop'));
         });
     }
 

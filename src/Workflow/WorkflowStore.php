@@ -16,14 +16,16 @@ use Claw\Project\IssueType;
  * a workflow of the same name would resolve to whichever autoloader registered first, and nothing
  * would report it.
  *
- *   solvers  -> ClawWorkflow\Common\<Name>            @ <appHome>/<key>-workflows/Common/<Name>.php
+ *   solvers  -> ClawWorkflow\Solvers\P<key>\<Name>    @ <appHome>/<key>-workflows/Common/<Name>.php
  *   session  -> ClawWorkflow\Session\S<sid>\<Name>    @ <base>/Session/S<sid>/<Name>.php
  *   library  -> ClawWorkflow\Library\<Name>           @ <CLAW_LIBRARY>/<Name>.php
  *   project  -> ClawWorkflow\Project\P<key>\<Name>    @ <project>/.claw/workflows/<Name>.php
  *
- * The two libraries are read here and written by people; `Common` is where a run's GENERATED solver
- * lands, which is why its name says less than it should — renaming the segment would orphan the files
- * already on disk that declare it.
+ * The two libraries are read here and written by people; `Common` (the DIRECTORY) is where a run's
+ * GENERATED solver lands. Its namespace used to be `Common` too, shared by every project — renaming
+ * was once declined to spare the files already on disk, but the collision stopped being hypothetical:
+ * see {@see solvers()}. A solver generated before the rename declares the old namespace and reports
+ * itself as mismatched; it is regenerated on the next run.
  *
  * A workflow file is pulled in by a plain namespace->path autoloader, so each class is included
  * exactly once per process.
@@ -97,6 +99,21 @@ final class WorkflowStore
     public static function projectLibrary(string $dir, string $projectKey): self
     {
         return new self($dir, '', 'Project\\P' . self::sanitize($projectKey), $dir);
+    }
+
+    /**
+     * A project's GENERATED solvers, keyed by project for the same reason {@see projectLibrary()} is —
+     * and this one was seen failing live, not hypothesised: two projects each generated a solver for
+     * THEIR issue #2, both declaring `ClawWorkflow\Common\Issue2Solver`, and whichever loaded first ran
+     * for both — one project's run implemented the other project's feature inside the wrong repository.
+     */
+    public static function solvers(string $projectsDir, string $projectKey): self
+    {
+        return new self(
+            $projectsDir . '/' . $projectKey . '-workflows',
+            $projectKey,
+            'Solvers\\P' . self::sanitize($projectKey),
+        );
     }
 
     /**

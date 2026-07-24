@@ -171,7 +171,7 @@ final readonly class IssueRunner
 
         // The palette acts on the REAL project folder: this run works on the user's repo.
         $workspace = new Workspace($project->path);
-        $workflowStore = new WorkflowStore($this->projectsDir . '/' . $project->id . '-workflows', $project->id);
+        $workflowStore = WorkflowStore::solvers($this->projectsDir, $project->id);
         $projectDb = $this->store->pdo();   // the one open connection: shared by the state store + trace
         // The project's credentials, read from beside its state database — never from inside the project
         // itself, which is both within the run's reach and within the project's git.
