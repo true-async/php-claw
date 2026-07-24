@@ -13,9 +13,11 @@ use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Agent\ToolResultBlock;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
+use Claw\Tool\ToolResultMeta;
 use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
@@ -463,13 +465,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
         string $lang = '',
         ?string $evidence = null,
         string $from = '',
+        ?ToolResultMeta $meta = null,
     ): void {
         // Exactly one CONTENT channel — enforce the contract rather than silently preferring one
         // (dropping the other) or recording an empty artifact when none is given. $text is the one
         // exception: alongside $evidence it is not content but the step's own note about it, so it
         // rides along, stored and shown separately.
         $entry = match (true) {
-            $evidence !== null && $file === null => Artifact::evidence($label, $evidence, $from, $text ?? ''),
+            $evidence !== null && $file === null => Artifact::evidence($label, $evidence, $from, $text ?? '', $meta),
             $file !== null && $text === null => Artifact::file($label, $file),
             $text !== null && $file === null => Artifact::text($label, $text, $lang),
             default => throw new \LogicException(
@@ -486,6 +489,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $entry->mime,
             $entry->source,
             $entry->note,
+            $entry->status,
+            $entry->tool,
+            $entry->summary,
         );
     }
 
@@ -546,24 +552,37 @@ abstract class WorkflowAbstract implements WorkflowInterface
             );
         }
 
+        // A pasted test/lint report is a claim wearing evidence's clothes: it freezes the moment the
+        // step chose to copy, carries no exit status, and cannot be re-run. The refusal names the fix,
+        // and the violation stops being expressible — see Artifact::looksLikeToolOutput().
+        if ($text !== '' && Artifact::looksLikeToolOutput($text)) {
+            throw new ToolException(
+                'artifact: this text reads as a tool\'s own output — do not paste it. Pass the command '
+                . 'that produced it (`command: "…"`); it will be re-run here and recorded verbatim as '
+                . 'evidence, with its real exit status.',
+            );
+        }
+
         if ($command !== '') {
             // The command runs HERE, and what it printed is what is kept. `from` is the command itself,
             // not the word 'bash': a reviewer judging an output has to know which one produced it.
-            $out = $this->tool('bash', ['command' => $command]);
+            $result = $this->dispatchTool('bash', ['command' => $command]);
 
             // A command that could not be RUN produces no evidence — most often because this step's
             // palette withholds `bash` on purpose. Recording the failure text as if it were output would
             // manufacture exactly the kind of proof this artifact kind exists to make impossible, so it
             // comes back as a refusal the model can read instead.
-            if (str_starts_with($out, "tool 'bash' failed:")) {
+            if ($result->isError) {
                 throw new ToolException(
-                    "artifact: could not run `{$command}` — {$out}. Nothing was recorded; if this step is "
-                    . 'not allowed to run commands, record what you did with `text` or `file` instead.',
+                    "artifact: could not run `{$command}` — {$result->content}. Nothing was recorded; if this "
+                    . 'step is not allowed to run commands, record what you did with `text` or `file` instead.',
                 );
             }
 
-            $out = self::clip($out);
-            $this->artifact($label, text: $note !== '' ? $note : null, evidence: $out, from: $command);
+            $out = self::clip($result->content);
+            // $result->meta is bash's OWN report of this very execution (exit, program, verdict line) —
+            // the artifact stores it; nothing here or downstream parses the output for it.
+            $this->artifact($label, text: $note !== '' ? $note : null, evidence: $out, from: $command, meta: $result->meta);
 
             return "recorded '{$label}' as evidence of `{$command}`. Its output was:\n{$out}";
         }
@@ -1196,6 +1215,21 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     protected function tool(string $name, array $params): string
     {
+        $result = $this->dispatchTool($name, $params);
+
+        if ($result->isError) {
+            return "tool '{$name}' failed: " . $result->content;
+        }
+
+        return $result->content;
+    }
+
+    /**
+     * The traced dispatch behind {@see tool()}, returning the whole envelope — for the callers that
+     * need more than the text, like the evidence recorder reading the tool's own result report.
+     */
+    private function dispatchTool(string $name, array $params): ToolResultBlock
+    {
         $tracer = $this->tracer();
         $tracer?->toolCall($name, $params);
 
@@ -1206,11 +1240,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $tracer?->toolResult($name, $result->content, $result->isError);
 
-        if ($result->isError) {
-            return "tool '{$name}' failed: " . $result->content;
-        }
-
-        return $result->content;
+        return $result;
     }
 
     /**

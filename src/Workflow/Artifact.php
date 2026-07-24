@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Tool\ToolResultMeta;
+
 /**
  * A named output a step produces — the concrete thing the step made, recorded so it is visible in the
  * run's journal and handed to the step's critic for review. Beyond review, artifacts are the inspectable
@@ -62,6 +64,9 @@ final class Artifact
         public readonly string $mime,   // content MIME, e.g. 'text/x-php'
         public readonly string $source = '',   // evidence only: what produced it, e.g. 'bash'
         public readonly string $note = '',     // evidence only: the step's own summary, kept apart
+        public readonly string $status = '',   // evidence only: 'ok' | 'fail' — from the command's exit
+        public readonly string $tool = '',     // evidence only: recognized producer, e.g. 'phpunit'
+        public readonly string $summary = '',  // evidence only: the producer's own verdict line, parsed
     ) {
     }
 
@@ -87,9 +92,45 @@ final class Artifact
      * output rather than blended into it, so a reviewer can always tell the machine's words from the
      * step's.
      */
-    public static function evidence(string $label, string $output, string $source = '', string $note = ''): self
+    /**
+     * The verbatim output of a tool the step ran, with the tool's OWN structured report about that
+     * execution ($meta — see {@see \Claw\Tool\ReportsResultMetaInterface}). Nothing is derived
+     * here: the tool that ran the command is the one party that knows the exit and the program, so
+     * the tool declares it and this record just keeps it.
+     */
+    public static function evidence(
+        string $label,
+        string $output,
+        string $source = '',
+        string $note = '',
+        ?ToolResultMeta $meta = null,
+    ): self {
+        return new self(
+            $label,
+            'evidence',
+            $output,
+            'txt',
+            'text/plain',
+            $source,
+            $note,
+            $meta->status ?? '',
+            $meta->producer ?? '',
+            $meta->summary ?? '',
+        );
+    }
+
+    /**
+     * Does this text read as a verification tool's own output? The model-facing artifact tool uses
+     * this to refuse a PASTED test/lint report on the text channel: pasted output is a claim wearing
+     * evidence's clothes, and the command channel exists exactly so it can be re-run and recorded
+     * verbatim instead.
+     */
+    public static function looksLikeToolOutput(string $text): bool
     {
-        return new self($label, 'evidence', $output, 'txt', 'text/plain', $source, $note);
+        return preg_match(
+            '/^(PHPUnit \d|No syntax errors detected|OK \(\d+ tests?|FAILURES!|\[exit \d+\]|PHPStan \d)/m',
+            $text,
+        ) === 1;
     }
 
     /**
@@ -105,7 +146,9 @@ final class Artifact
 
         if ($this->kind === 'evidence') {
             $from = $this->source === '' ? '' : " of `{$this->source}`";
-            $rendered = "- {$this->label} (CAPTURED OUTPUT{$from} — recorded verbatim, not written by the step):\n{$this->value}";
+            // the derived outcome rides along, so a critic reads the runtime's grading, not only raw text
+            $graded = $this->status === '' ? '' : ", {$this->status}" . ($this->summary !== '' ? ": {$this->summary}" : '');
+            $rendered = "- {$this->label} (CAPTURED OUTPUT{$from}{$graded} — recorded verbatim, not written by the step):\n{$this->value}";
 
             return $this->note === ''
                 ? $rendered
