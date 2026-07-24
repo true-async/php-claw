@@ -3,6 +3,53 @@
 Ordered by value, not by effort. An entry leaves this file when it lands in
 [`DECISIONS.md`](DECISIONS.md) or turns out to be wrong.
 
+## 0. The knowledge base becomes visible — wiki, artifacts, notifications
+
+Ordered first because the retrieval half landed on 2026-07-22 and every project now gets a `kb/`
+folder, so for the first time there is something to look at and nowhere to look at it.
+
+**The single entry point landed first** — `KnowledgeBaseInterface`, see
+[`DECISIONS.md`](DECISIONS.md) 2026-07-22. Everything below is a caller of it and must not reach past
+it; the wiki is not a second reader of the storage.
+
+**There is no writing action.** Three of the four items below describe a *write*, and the tool offers
+`search`, `about`, `read`, `tags` and nothing else, deliberately
+([`design/knowledge-base-next.md`](design/knowledge-base-next.md) feature 8 argues the shape, and item
+4 records what is still undecided about it). The write action is a piece of work in its own right, not
+an assumption underneath the other three.
+
+### 0a. A wiki in the dashboard
+
+The whole base as a browsable thing: the note tree, one note rendered, its tags, what it links to and
+what links back. Every part is already stored — `notes`, `chunks(path, heading, ord)` for an outline,
+`tags`, `links` both ways (the `links_target` index is built and queried by nothing), `refs` for
+"what mentions this file".
+
+A caller of the one entry point, not a second reader of the storage. What still needs deciding is
+only the transport — REST beside the existing project routes, or a room on the WebSocket the board
+already uses.
+
+### 0b. A write to the base is a step artifact
+
+When a run edits the base, that edit becomes an artifact of the step, listed like any other and
+readable afterwards. This is what makes a write reviewable without a human gate in front of it —
+the same argument as feature 8's constraint 3, one layer up: the artifact is the review surface.
+`Artifact::file()` already carries a path relative to the project and the dashboard fetches the body
+lazily, so a note written under `kb/` fits the existing shape with nothing new underneath.
+
+### 0c. A write rings the bell
+
+Base edits appear in the dashboard's notification bell. Cheap once 0b exists — the artifact is
+already an event on the run's trace, so this is a filter and a label rather than a new channel.
+
+### 0d. Then, and only then, a survey of what else is worth having
+
+Deliberately last. [`design/knowledge-base-next.md`](design/knowledge-base-next.md) already holds
+nine features with sources and a rejected list with numbers; a new survey should argue with that file
+rather than restart it, and it should wait until the base has been filled by real runs, because the
+last round of reasoning about an empty base cost a session and was wrong in every direction
+([`POSTMORTEM.md`](POSTMORTEM.md), 2026-07-22).
+
 ## 1. The WebSocket channel
 
 `/api/ws` is meant to be *the* live transport — one connection, rooms for topics, SSE kept

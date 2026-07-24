@@ -7,6 +7,7 @@ namespace Tests\Knowledge;
 use Claw\Http\HttpResponse;
 use Claw\Knowledge\EmbedderInterface;
 use Claw\Knowledge\Indexer;
+use Claw\Knowledge\KnowledgeBase;
 use Claw\Knowledge\KnowledgeIndex;
 use Claw\Knowledge\NoteParser;
 use Claw\Knowledge\OpenAiEmbedder;
@@ -54,6 +55,45 @@ final class KnowledgeBaseTest
         // The graph and the code references come out as edges, not as text to be searched fuzzily.
         Assert::same($note['links'], ['incident-log']);
         Assert::same($note['refs'], [['file' => 'src/Deploy/Runner.php', 'line' => 88]]);
+    }
+
+    /**
+     * A note that is not written in English survives chunking intact.
+     *
+     * This is a regression test with a specific corpse behind it. The chunker split on `/\R/` with no
+     * `/u`, so PCRE read the note as bytes — and in byte mode `\R` also matches 0x85, the Unicode NEL.
+     * 0x85 is the second byte of `х` (U+0445), so every Russian note was cut through the middle of a
+     * letter. The malformed chunk then reached `json_encode(..., JSON_THROW_ON_ERROR)` in the embedder
+     * and the `JsonException` — which is not a `ClawException`, so nothing caught it — ended the whole
+     * indexing pass. One common letter made the knowledge base unusable.
+     */
+    #[Test]
+    public function aNoteInAnotherLanguageIsNotCutThroughTheMiddleOfALetter(): void
+    {
+        $note = NoteParser::parse('design/pool.md', <<<'MD'
+            ---
+            tags: [pool]
+            ---
+            # Пул соединений
+
+            Техника простая: соединение закрепляется за корутиной.
+
+            ## Хранение
+
+            Хранилище держит одно соединение на проект.
+            MD);
+
+        Assert::same($note['title'], 'Пул соединений');
+
+        foreach ($note['chunks'] as $chunk) {
+            Assert::true(mb_check_encoding($chunk['text'], 'UTF-8'), 'a chunk was cut mid-character');
+            Assert::true(mb_check_encoding($chunk['heading'], 'UTF-8'), 'a heading was cut mid-character');
+        }
+
+        // The paragraph must arrive whole, not as two halves either side of a letter.
+        $texts = array_column($note['chunks'], 'text');
+        Assert::true(str_contains(implode("\n", $texts), 'Техника простая'));
+        Assert::same(array_column($note['chunks'], 'heading'), ['Пул соединений', 'Пул соединений / Хранение']);
     }
 
     /**
@@ -114,9 +154,7 @@ final class KnowledgeBaseTest
             file_put_contents($dir . '/kb/deploy.md', "# Deploying\n\nPush the tag, then watch src/Deploy/Runner.php:88.\n");
             file_put_contents($dir . '/kb/style.md', "# Style\n\nBlank line after a closing brace.\n");
 
-            $embedder = new KeywordEmbedder();
-            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
-            $tool = new KnowledgeTool($index, $embedder, $dir . '/kb');
+            $tool = new KnowledgeTool(self::baseAt($dir));
 
             $found = $tool->handle(['action' => 'search', 'query' => 'how do we deploy']);
             Assert::true(str_contains($found, 'Push the tag'));
@@ -128,7 +166,13 @@ final class KnowledgeBaseTest
             Assert::true(str_contains($about, 'line 88'));
 
             Assert::true(str_contains($tool->handle(['action' => 'about', 'file' => 'src/Nothing.php']), 'says nothing'));
-            Assert::true(str_contains($tool->handle(['action' => 'read', 'path' => 'style.md']), 'closing brace'));
+            Assert::true(str_contains($tool->handle(['action' => 'read', 'note' => 'style.md']), 'closing brace'));
+
+            // The sections of a note, so a caller can ask about one part instead of pulling it all in.
+            Assert::true(str_contains($tool->handle(['action' => 'outline', 'note' => 'deploy.md']), 'Deploying'));
+
+            // And the project's own rules, which is how a model learns them without a copy in its prompt.
+            Assert::true(str_contains($tool->handle(['action' => 'conventions']), 'Knowledge base'));
         } finally {
             self::rmrf($dir);
         }
@@ -148,11 +192,11 @@ final class KnowledgeBaseTest
             file_put_contents($dir . '/secret.txt', 'not for the model');
             file_put_contents($dir . '/kb/ok.md', "# Ok\n\nfine\n");
 
-            $tool = new KnowledgeTool(new KnowledgeIndex(new \PDO('sqlite::memory:')), new KeywordEmbedder(), $dir . '/kb');
+            $tool = new KnowledgeTool(self::baseAt($dir));
             $threw = false;
 
             try {
-                $tool->handle(['action' => 'read', 'path' => '../secret.txt']);
+                $tool->handle(['action' => 'read', 'note' => '../secret.txt']);
             } catch (\Claw\Exceptions\ToolException) {
                 $threw = true;
             }
@@ -196,8 +240,7 @@ final class KnowledgeBaseTest
             file_put_contents($dir . '/kb/deploy.md', "---\ntags: [ops]\n---\n# Deploying\n\nPush the tag.\n");
             file_put_contents($dir . '/kb/style.md', "---\ntags: [style]\n---\n# Style\n\nDeploy a blank line after a brace.\n");
 
-            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
-            $tool = new KnowledgeTool($index, new KeywordEmbedder(), $dir . '/kb');
+            $tool = new KnowledgeTool(self::baseAt($dir));
 
             // The base can say what it is filed under, so a model narrows with a real tag not a guess.
             $tags = $tool->handle(['action' => 'tags']);
@@ -218,6 +261,126 @@ final class KnowledgeBaseTest
         } finally {
             self::rmrf($dir);
         }
+    }
+
+    /**
+     * The lexical half finds what the vectors lose: an identifier quoted inside an ordinary sentence.
+     *
+     * This is the whole case for a second ranker. Measured on a real 346-chunk base built from this
+     * repository's own documents, the vectors and the full-text index are within noise of each other on
+     * questions phrased in ordinary words — but a spelled-out token has to come back exactly, and 256
+     * dimensions smear it. The embedder here is deliberately blind to the identifier, which is what a
+     * narrow real embedding does to a token it has never seen.
+     */
+    #[Test]
+    public function anIdentifierInsideASentenceIsFoundByTheLexicalHalf(): void
+    {
+        $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
+        $embedder = new KeywordEmbedder();
+
+        $index->replaceNote('design/pool.md', 'Pool', 1, 1, 'a', [
+            ['heading' => 'Sizing', 'text' => 'The pool is capped by ATTR_POOL_MAX, raised to eight.', 'embedding' => $embedder->embed(['deploy'])[0]],
+        ], [], [], []);
+        $index->replaceNote('design/other.md', 'Other', 1, 1, 'b', [
+            ['heading' => 'Prose', 'text' => 'Deploying is done by pushing a tag, and the release notes follow.', 'embedding' => $embedder->embed(['deploy deploy'])[0]],
+        ], [], [], []);
+
+        // The query's vector points at the OTHER note — the dense half is actively wrong here, exactly
+        // as it is when a 256-dim vector meets a token it has no room for.
+        $vector = $embedder->embed(['deploy deploy'])[0];
+        $hits = $index->search('what does ATTR_POOL_MAX do and why was it raised', $vector, 5);
+
+        Assert::same($hits[0]['path'], 'design/pool.md');
+
+        // With no vector at all the base is still searchable — the lexical half answers alone.
+        $lexicalOnly = $index->search('ATTR_POOL_MAX', [], 5);
+        Assert::same($lexicalOnly[0]['path'], 'design/pool.md');
+    }
+
+    /**
+     * A model writes the query, so the query is arbitrary text — and arbitrary text is not FTS5 syntax.
+     *
+     * `SQLSTATE[HY000] [2002]` handed to MATCH unquoted is a syntax error near `[`, not a search, and
+     * every one of these shapes reaches the tool in normal use. None of them may throw, and a query with
+     * nothing exact in it must fall back to the vectors rather than failing.
+     */
+    #[Test]
+    public function anArbitraryQueryNeverBreaksTheFullTextHalf(): void
+    {
+        $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
+        $embedder = new KeywordEmbedder();
+
+        $index->replaceNote('ops/errors.md', 'Errors', 1, 1, 'a', [
+            ['heading' => 'Sockets', 'text' => 'The driver reports SQLSTATE[HY000] [2002] Connection refused.', 'embedding' => $embedder->embed(['deploy'])[0]],
+        ], [], [], []);
+
+        $vector = $embedder->embed(['deploy'])[0];
+
+        foreach (['SQLSTATE[HY000] [2002] Connection refused', '--- [] ( ) ***', 'AND OR NOT NEAR', '"unbalanced', 'что решили про пул', ''] as $query) {
+            $index->search($query, $vector, 5);   // must not throw
+        }
+
+        // The one that carries something spelled exactly still finds it.
+        $hits = $index->search('why do we see SQLSTATE[HY000] [2002] in the log', [], 5);
+        Assert::same($hits[0]['path'], 'ops/errors.md');
+    }
+
+    /**
+     * Reindexing and deleting a note leave nothing of it behind in the full-text index.
+     *
+     * External-content FTS5 is kept in step by triggers alone, and an index that drifts from its content
+     * table does not fail — it answers, with rows that are no longer there. That is the failure mode
+     * worth a test.
+     */
+    #[Test]
+    public function theFullTextIndexFollowsTheChunksItMirrors(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $index = new KnowledgeIndex($pdo);
+        $embedder = new KeywordEmbedder();
+        $vector = $embedder->embed(['deploy'])[0];
+
+        $index->replaceNote('a.md', 'A', 1, 1, 'v1', [
+            ['heading' => 'H', 'text' => 'The flag is CLAW_FIRST_VALUE here.', 'embedding' => $vector],
+        ], [], [], []);
+        Assert::same(\count($index->search('CLAW_FIRST_VALUE', [], 5)), 1);
+
+        // Reindexed with different content: the old text must not still be findable.
+        $index->replaceNote('a.md', 'A', 2, 2, 'v2', [
+            ['heading' => 'H', 'text' => 'The flag is CLAW_SECOND_VALUE now.', 'embedding' => $vector],
+        ], [], [], []);
+        Assert::same($index->search('CLAW_FIRST_VALUE', [], 5), []);
+        Assert::same(\count($index->search('CLAW_SECOND_VALUE', [], 5)), 1);
+
+        // And a forgotten note leaves nothing at all.
+        $index->forget('a.md');
+        Assert::same($index->search('CLAW_SECOND_VALUE', [], 5), []);
+    }
+
+    /**
+     * A full-text index built over a base that already has chunks is backfilled, not left empty.
+     *
+     * The silent version of this bug is the dangerous one: an empty external-content index answers
+     * `SELECT count(*)` from the CONTENT table, so it reports the right number of rows while matching
+     * none of them, and `integrity-check` passes. Every search would quietly lose its lexical half.
+     */
+    #[Test]
+    public function anIndexAddedToAPopulatedBaseIsBackfilled(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $embedder = new KeywordEmbedder();
+
+        new KnowledgeIndex($pdo)->replaceNote('a.md', 'A', 1, 1, 'v1', [
+            ['heading' => 'H', 'text' => 'The constant is CLAW_BACKFILL_ME today.', 'embedding' => $embedder->embed(['deploy'])[0]],
+        ], [], [], []);
+
+        // Drop the lexical half, as an older base that predates it would be.
+        $pdo->exec('DROP TRIGGER chunks_fts_insert');
+        $pdo->exec('DROP TRIGGER chunks_fts_delete');
+        $pdo->exec('DROP TABLE chunks_fts');
+
+        $reopened = new KnowledgeIndex($pdo);
+        Assert::same(\count($reopened->search('CLAW_BACKFILL_ME', [], 5)), 1);
     }
 
     /**
@@ -275,24 +438,60 @@ final class KnowledgeBaseTest
         try {
             $project = new \Claw\Project\Project('p1', 'Demo', $dir);
             $workspace = new \Claw\Tool\Workspace($dir);
-            $index = new KnowledgeIndex(new \PDO('sqlite::memory:'));
-            $embedder = new KeywordEmbedder();
+            $store = self::tempDir();
 
-            // No kb/ folder yet: nothing to search, so nothing is offered.
-            $bare = \Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, $embedder);
-            Assert::false($bare->has('knowledge'));
+            // No embedder: nothing could turn a question into a search, so there is NO BASE — the
+            // decision is the module's, and the factory only asks whether it got one.
+            Assert::same(KnowledgeBase::forProject($project, $store, null), null);
+            Assert::false(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, null)->has('knowledge'));
+            Assert::false(is_dir($dir . '/kb'));   // and nothing was created on the way
 
-            mkdir($dir . '/kb');
-            file_put_contents($dir . '/kb/one.md', "# One\n\nA note.\n");
+            // A MISSING FOLDER IS NOT A REASON TO WITHHOLD IT — it is made, seeded, and offered.
+            // This assertion used to be the opposite, and that inverted contract is why the knowledge
+            // base was never once used: the tool appeared only for a project that already had kb/,
+            // and nothing anywhere created kb/.
+            $base = KnowledgeBase::forProject($project, $store, new KeywordEmbedder());
 
-            // Notes but no embedder: every call would fail identically, so still nothing.
-            Assert::false(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, null)->has('knowledge'));
+            if ($base === null) {
+                throw new \RuntimeException('a writable project with an embedder must have a base');
+            }
 
-            // Both present — the run gets it.
-            Assert::true(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $index, $embedder)->has('knowledge'));
+            Assert::true(\Claw\Tool\ToolFactory::forRun($project, $workspace, null, $base)->has('knowledge'));
+
+            // The base reports where notes go; the caller never assembles that path.
+            Assert::same($base->location(), $dir . \DIRECTORY_SEPARATOR . 'kb');
+            Assert::true(str_contains($base->conventions(), 'decisions/'));
+
+            // A project that has rewritten its own rules keeps them: creating never overwrites.
+            file_put_contents($dir . '/kb/README.md', '# Ours');
+            KnowledgeBase::create($dir);
+            Assert::same(file_get_contents($dir . '/kb/README.md'), '# Ours');
+            self::rmrf($store);
         } finally {
             self::rmrf($dir);
         }
+    }
+
+    /** A real base over a temp project folder — the tool's only dependency. */
+    private static function baseAt(string $projectDir): \Claw\Knowledge\KnowledgeBaseInterface
+    {
+        $store = $projectDir . '/state';
+
+        if (!is_dir($store)) {
+            mkdir($store, 0o775, true);
+        }
+
+        $base = KnowledgeBase::forProject(
+            new \Claw\Project\Project('p', 'P', $projectDir),
+            $store,
+            new KeywordEmbedder(),
+        );
+
+        if ($base === null) {
+            throw new \RuntimeException('the test could not build a knowledge base');
+        }
+
+        return $base;
     }
 
     private static function tempDir(): string

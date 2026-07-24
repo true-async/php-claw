@@ -304,7 +304,7 @@ final class WorkflowStore
 
         $lines = [];
 
-        foreach (preg_split('/\R/', $doc) ?: [] as $line) {
+        foreach (preg_split('/\R/u', $doc) ?: [] as $line) {
             $line = trim((string) preg_replace('#^\s*(/\*\*+|\*+/|\*)#', '', $line));
 
             if (str_starts_with($line, '@')) {

@@ -16,17 +16,83 @@ namespace Claw\Knowledge;
  * and two machines indexing one checkout would conflict over bytes neither author typed. In the index
  * there is one store and one truth, and removing the file is a complete reset.
  *
- * Search is a brute-force cosine scan over packed float32. Measured before it was chosen: at 256
- * dimensions, 10 000 chunks scan in about 218 ms — a fifth of a second inside a tool call that is
- * already waiting on a model, against `sqlite-vec` becoming a platform-specific build dependency for a
- * speed nobody's own notes need. `dev/design/knowledge-base.md` has the numbers.
+ * Search has two halves over the same chunks — a brute-force cosine scan and a full-text index — fused
+ * by rank in {@see search()}, which is where the reasoning for that lives.
+ *
+ * The dense half is a full scan over packed float32. Measured before it was chosen: at 256 dimensions,
+ * 10 000 chunks scan in about 218 ms — a fifth of a second inside a tool call that is already waiting on
+ * a model, against `sqlite-vec` becoming a platform-specific build dependency for a speed nobody's own
+ * notes need. On a real 346-chunk base the scan measures 12 ms. `dev/design/knowledge-base.md` has the
+ * numbers; the lexical half costs no new dependency, since this build has FTS5 with `bm25()` compiled in.
+ *
+ * @internal to {@see KnowledgeBase}. Nothing outside this namespace may name this class: it is where the
+ *           base happens to be SQLite today, and that is exactly the fact the module exists to hide.
  */
 final class KnowledgeIndex
 {
+    /**
+     * Rank fusion constants, MEASURED on this project's own corpus (346 chunks) rather than imported.
+     *
+     * Cormack's k=60 comes from TREC-scale runs and is degenerate here: at depth 50 over 346 chunks the
+     * weights of rank 1 and rank 50 differ by 1.8x, so fusion stops ordering and becomes a vote on which
+     * documents appear in both lists. Measured on the eval set, k=60/depth=50 costs 6 points of semantic
+     * recall and 13 points of exact-string recall against these. Revisit both past a few thousand chunks.
+     */
+    private const int RRF_K = 5;
+    private const int RRF_DEPTH = 10;
+
     public function __construct(private readonly \PDO $pdo)
     {
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
         self::ensureTables($pdo);
+    }
+
+    /**
+     * Open a project's knowledge database with the settings it needs to survive a second writer.
+     *
+     * The same reasoning as {@see \Claw\Project\ProjectStore::open()}, and for the same reason it lives
+     * with the class that owns the file rather than at the call site: two runs of ONE project are started
+     * concurrently by design, and both construct an index over this file. `ensureTables()` runs from the
+     * constructor and takes a write lock for its DDL, so without a busy timeout the second run dies with
+     * "database is locked" before it has read anything.
+     */
+    public static function openAt(string $path): self
+    {
+        // NO ATTR_TIMEOUT. Measured on this build: pdo_sqlite's default busy timeout is 60000 ms, so
+        // the `ATTR_TIMEOUT => 4` that used to be here LOWERED it fifteen-fold while its comment
+        // claimed to be raising it.
+        $pdo = new \PDO('sqlite:' . $path, null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+
+        // WAL is persisted in the database header, so it needs setting once — not on every open. That
+        // matters because the CONVERSION takes an exclusive lock: measured, setting it on a database
+        // that is already WAL is a harmless no-op even while another connection reads, but converting
+        // a fresh rollback-journal database while another connection has it open throws "database is
+        // locked". Two runs of one project opening a brand-new base is exactly that race, so the
+        // conversion is attempted only when it is needed and a loss is survivable — the other
+        // connection is converting it, and both end up in WAL either way.
+        $mode = $pdo->query('PRAGMA journal_mode');
+        $already = $mode !== false && $mode->fetchColumn() === 'wal';
+
+        // Release the cursor before anything opens a transaction. A PDOStatement still holding a
+        // result keeps the connection "busy", and SQLite then refuses the COMMIT that ensureTables()
+        // runs inside the constructor below with "cannot commit transaction - SQL statements in
+        // progress". Nothing in the tests caught this: they build the index over an in-memory PDO and
+        // never come through here.
+        if ($mode !== false) {
+            $mode->closeCursor();
+        }
+
+        unset($mode);
+
+        if (!$already) {
+            try {
+                $pdo->exec('PRAGMA journal_mode=WAL');
+            } catch (\PDOException) {
+                // someone else is converting it right now; their result is the one that counts
+            }
+        }
+
+        return new self($pdo);
     }
 
     public static function ensureTables(\PDO $pdo): void
@@ -69,6 +135,65 @@ final class KnowledgeIndex
         // with its content for relevance, which is why tags are stored here and never embedded.
         $pdo->exec('CREATE TABLE IF NOT EXISTS tags (path TEXT NOT NULL, tag TEXT NOT NULL)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS tags_tag ON tags (tag)');
+
+        self::ensureFullText($pdo);
+    }
+
+    /**
+     * The lexical half: full text over the same chunks the vectors cover.
+     *
+     * External content, so the text is stored once — the FTS index reads it back through `chunks.id`.
+     * The two triggers are the whole of the bookkeeping: a note is reindexed by deleting its chunks and
+     * inserting them again, never by updating one in place, so insert and delete cover every write.
+     *
+     * ALL OF IT IN ONE TRANSACTION, which is not tidiness. Creating the table and populating it are
+     * separate statements, and a process that died between them would leave an empty index that nothing
+     * detects — `SELECT count(*)` reads the content table, not the index, so it answers correctly while
+     * every search silently loses its lexical half. Rolled back together, the next open simply rebuilds.
+     */
+    private static function ensureFullText(\PDO $pdo): void
+    {
+        $exists = $pdo->query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'");
+        $built = $exists !== false && $exists->fetchColumn() !== false;
+
+        if ($exists !== false) {
+            $exists->closeCursor();   // see openAt(): an open cursor blocks the COMMIT below
+        }
+
+        unset($exists);
+
+        if ($built) {
+            return;
+        }
+
+        self::writing($pdo);
+
+        try {
+            $pdo->exec(
+                "CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                    text, heading, content='chunks', content_rowid='id', tokenize='porter unicode61'
+                )",
+            );
+            $pdo->exec(
+                'CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                    INSERT INTO chunks_fts (rowid, text, heading) VALUES (new.id, new.text, new.heading);
+                END',
+            );
+            $pdo->exec(
+                "CREATE TRIGGER chunks_fts_delete AFTER DELETE ON chunks BEGIN
+                    INSERT INTO chunks_fts (chunks_fts, rowid, text, heading)
+                    VALUES ('delete', old.id, old.text, old.heading);
+                END",
+            );
+            // An index built over chunks that are already there starts empty; 'rebuild' fills it. On a
+            // fresh database this is a no-op.
+            $pdo->exec("INSERT INTO chunks_fts (chunks_fts) VALUES ('rebuild')");
+            $pdo->exec('COMMIT');
+        } catch (\Exception $e) {
+            $pdo->exec('ROLLBACK');
+
+            throw $e;
+        }
     }
 
     /**
@@ -122,7 +247,7 @@ final class KnowledgeIndex
         array $refs,
         array $tags = [],
     ): void {
-        $this->pdo->beginTransaction();
+        self::writing($this->pdo);
 
         try {
             $this->forgetContentOf($path);
@@ -164,12 +289,28 @@ final class KnowledgeIndex
                  VALUES (:p, :ti, :m, :s, :sha, :at)',
             )->execute(['p' => $path, 'ti' => $title, 'm' => $mtime, 's' => $size, 'sha' => $sha256, 'at' => time()]);
 
-            $this->pdo->commit();
+            $this->pdo->exec('COMMIT');
         } catch (\Throwable $e) {
-            $this->pdo->rollBack();
+            $this->pdo->exec('ROLLBACK');
 
             throw $e;
         }
+    }
+
+    /**
+     * Open a transaction that INTENDS to write, taking the write lock up front.
+     *
+     * `BEGIN IMMEDIATE`, not PDO's `beginTransaction()` — which issues a plain `BEGIN`, i.e. DEFERRED.
+     * A deferred transaction becomes a reader on its first SELECT and then has to UPGRADE to a writer,
+     * and SQLite refuses to make that upgrade wait: two readers both upgrading would deadlock, so it
+     * returns "database is locked" instantly and the busy handler is never consulted. Measured across
+     * two processes with a five-second busy timeout: deferred fails after 0 ms, immediate waits 636 ms
+     * for the other writer and succeeds. No timeout value fixes the deferred case, which is why the
+     * one that used to be set here looked like it did nothing — it did nothing.
+     */
+    private static function writing(\PDO $pdo): void
+    {
+        $pdo->exec('BEGIN IMMEDIATE');
     }
 
     /** Drop a note entirely — it is gone from the folder, so it must go from the index. */
@@ -192,29 +333,69 @@ final class KnowledgeIndex
     }
 
     /**
-     * The $limit closest chunks to $query, best first, with what each one links to.
+     * The $limit best chunks for a query, best first, with what each one links to.
      *
-     * A full scan. See the class docblock for why that is the right shape here and where the seam is if
-     * it ever stops being.
+     * TWO RANKERS OVER THE SAME CHUNKS, fused by rank. They fail on different questions, which is the
+     * only reason to pay for both: measured on this project's corpus, the vectors and the full-text index
+     * are within noise of each other on questions phrased in ordinary words, while an identifier quoted
+     * inside a sentence — `ATTR_POOL_MAX`, `SQLSTATE[HY000]`, a file path — is found by the lexical half
+     * and missed by the dense one often enough to matter. Fusing beats either alone; see
+     * dev/design/knowledge-base-next.md for the numbers and for what was refuted on the way.
      *
-     * $tag narrows the scan to notes filed under it — the cheap half of retrieval doing the work the
+     * Reciprocal Rank Fusion, so only positions are compared. No score normalisation, and the sign
+     * convention of SQLite's `bm25()` (negative, best first) never enters the arithmetic.
+     *
+     * $tag narrows BOTH halves to notes filed under it — the cheap half of retrieval doing the work the
      * expensive half would do worse. "What did we decide about deployment" is a tag and a query, not a
      * query that has to out-rank every other note in the base.
      *
-     * @param list<float> $query
+     * @param string      $text   the query as written, for the lexical half
+     * @param list<float> $vector the same query embedded, for the dense half; [] searches lexically only
      *
      * @return list<array{path: string, heading: string, text: string, score: float, links: list<string>, tags: list<string>}>
      */
-    public function nearest(array $query, int $limit = 5, string $tag = ''): array
+    public function search(string $text, array $vector, int $limit = 5, string $tag = ''): array
     {
+        $tag = strtolower(trim($tag));   // ONCE, for both halves: tags are stored lowercased
+        $fused = [];
+
+        foreach ([$this->densely($vector, $tag), $this->lexically($text, $tag)] as $ranking) {
+            foreach ($ranking as $position => $id) {
+                $fused[$id] = ($fused[$id] ?? 0.0) + 1 / (self::RRF_K + $position + 1);
+            }
+        }
+
+        if ($fused === []) {
+            return [];
+        }
+
+        arsort($fused);
+        $top = \array_slice(array_keys($fused), 0, max(1, $limit));
+
+        return $this->rowsOf($top, $fused);
+    }
+
+    /**
+     * The nearest chunk ids by cosine, best first. A full scan — see the class docblock for why that is
+     * the right shape here, and where the seam is if it ever stops being.
+     *
+     * @param list<float> $query
+     *
+     * @return list<int>
+     */
+    private function densely(array $query, string $tag): array
+    {
+        if ($query === []) {
+            return [];   // nothing to compare against: the lexical half answers alone
+        }
+
         if ($tag === '') {
-            $stmt = $this->pdo->query('SELECT path, heading, text, embedding FROM chunks');
+            $stmt = $this->pdo->query('SELECT id, embedding FROM chunks');
         } else {
             $stmt = $this->pdo->prepare(
-                'SELECT c.path, c.heading, c.text, c.embedding FROM chunks c
-                 JOIN tags t ON t.path = c.path WHERE t.tag = :tag',
+                'SELECT c.id, c.embedding FROM chunks c JOIN tags t ON t.path = c.path WHERE t.tag = :tag',
             );
-            $stmt->execute(['tag' => strtolower($tag)]);
+            $stmt->execute(['tag' => $tag]);
         }
 
         if ($stmt === false) {
@@ -231,25 +412,129 @@ final class KnowledgeIndex
                 continue;   // a chunk embedded by a different model: not comparable, and not an error here
             }
 
-            $scored[] = [
-                'path' => (string) $row['path'],
+            $scored[(int) $row['id']] = self::cosine($query, $vector, $norm);
+        }
+
+        arsort($scored);
+
+        return \array_slice(array_keys($scored), 0, self::RRF_DEPTH);
+    }
+
+    /**
+     * The best-matching chunk ids by BM25, best first.
+     *
+     * ONLY IDENTIFIER-SHAPED WORDS ARE ASKED FOR, and that restriction is what makes this half useful
+     * rather than harmful. FTS5 has no stopword list, so putting a whole question to it ranks documents
+     * on `what`, `the` and `about`; measured, that drowns the one rare token the caller actually cares
+     * about and leaves this half ranking worse than the vectors it is meant to complement. A word
+     * carrying a digit, an underscore, a slash, a dot, a colon or an internal capital is the shape of
+     * something spelled exactly — and spelled-exactly is the only thing the vectors reliably lose.
+     *
+     * @return list<int>
+     */
+    private function lexically(string $text, string $tag): array
+    {
+        $match = self::matchExpression($text);
+
+        if ($match === '') {
+            return [];   // an ordinary sentence with nothing exact in it: the dense half answers alone
+        }
+
+        $sql = 'SELECT chunks_fts.rowid AS id FROM chunks_fts';
+
+        if ($tag !== '') {
+            // The FTS table cannot be aliased — `f MATCH ...` is "no such column: f" — so it stays
+            // unaliased here and the joined tables take the aliases.
+            $sql .= ' JOIN chunks c ON c.id = chunks_fts.rowid JOIN tags t ON t.path = c.path';
+        }
+
+        $sql .= ' WHERE chunks_fts MATCH :q' . ($tag === '' ? '' : ' AND t.tag = :tag')
+            . ' ORDER BY bm25(chunks_fts) LIMIT ' . self::RRF_DEPTH;
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($tag === '' ? ['q' => $match] : ['q' => $match, 'tag' => $tag]);
+
+        return array_values(array_map(intval(...), $stmt->fetchAll(\PDO::FETCH_COLUMN)));
+    }
+
+    /**
+     * A caller's words as an FTS5 MATCH expression, or '' when there is nothing exact to look for.
+     *
+     * The query is written by a model, so it is arbitrary text, and arbitrary text is not FTS5 syntax:
+     * `SQLSTATE[HY000] [2002]` passed through raw is a syntax error near `[`, not a search. Every term is
+     * therefore quoted as a phrase, which both neutralises the operators (`AND`, `NOT`, `*`) and keeps
+     * stemming.
+     *
+     * SPLIT ON WHITESPACE ONLY. The tokenizer already breaks `ATTR_POOL_MAX` into `attr`, `pool`, `max`,
+     * so splitting the query the same way would ask for three common words; keeping the term whole asks
+     * for those three ADJACENT, which is the exactness this half exists for.
+     */
+    private static function matchExpression(string $text): string
+    {
+        $terms = [];
+
+        foreach (preg_split('/\s+/u', trim($text)) ?: [] as $word) {
+            // `\p{L}\p{N}` and not `A-Za-z0-9`: the notes are not necessarily written in English, and an
+            // ASCII test would drop every term of a Russian question and search for nothing.
+            if (preg_match('/[\p{L}\p{N}]/u', $word) !== 1 || !self::spelledExactly($word)) {
+                continue;
+            }
+
+            $terms['"' . str_replace('"', '""', $word) . '"'] = true;
+        }
+
+        return implode(' OR ', \array_slice(array_keys($terms), 0, 32));
+    }
+
+    /** Is this the shape of something a person spells out rather than a word they merely say? */
+    private static function spelledExactly(string $word): bool
+    {
+        return preg_match('/[\d_\/:\\\\]|\p{Ll}\p{Lu}|\w\.\w/u', $word) === 1;
+    }
+
+    /**
+     * Load the chunks behind a fused ranking, in the ranking's order.
+     *
+     * @param list<int>          $ids
+     * @param array<int, float>  $scores
+     *
+     * @return list<array{path: string, heading: string, text: string, score: float, links: list<string>, tags: list<string>}>
+     */
+    private function rowsOf(array $ids, array $scores): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, path, heading, text FROM chunks WHERE id IN ('
+            . implode(', ', array_fill(0, \count($ids), '?')) . ')',
+        );
+        $stmt->execute($ids);
+
+        $byId = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $byId[(int) $row['id']] = $row;
+        }
+
+        $hits = [];
+
+        foreach ($ids as $id) {
+            $row = $byId[$id] ?? null;
+
+            if ($row === null) {
+                continue;   // deleted between the ranking and the read
+            }
+
+            $path = (string) $row['path'];
+            $hits[] = [
+                'path' => $path,
                 'heading' => (string) $row['heading'],
                 'text' => (string) $row['text'],
-                'score' => self::cosine($query, $vector, $norm),
-                'links' => [],
-                'tags' => [],
+                'score' => $scores[$id] ?? 0.0,
+                'links' => $this->linksOf($path),
+                'tags' => $this->tagsOf($path),
             ];
         }
 
-        usort($scored, static fn (array $a, array $b): int => $b['score'] <=> $a['score']);
-        $top = \array_slice($scored, 0, max(1, $limit));
-
-        foreach ($top as $i => $hit) {
-            $top[$i]['links'] = $this->linksOf($hit['path']);
-            $top[$i]['tags'] = $this->tagsOf($hit['path']);
-        }
-
-        return $top;
+        return $hits;
     }
 
     /**
@@ -258,17 +543,24 @@ final class KnowledgeIndex
      * The exact half of the base. "What do we know about src/Foo.php" has a right answer that costs one
      * indexed lookup; asking it of a vector scan would be slower and only approximately right.
      *
-     * @return list<array{path: string, line: int}>
+     * @return list<array{note: string, title: string, line: int}>
      */
     public function about(string $file): array
     {
-        $stmt = $this->pdo->prepare('SELECT path, line FROM refs WHERE file = :f ORDER BY path, line');
+        $stmt = $this->pdo->prepare(
+            'SELECT r.path, r.line, COALESCE(n.title, r.path) title FROM refs r
+             LEFT JOIN notes n ON n.path = r.path WHERE r.file = :f ORDER BY r.path, r.line',
+        );
         $stmt->execute(['f' => $file]);
 
         $found = [];
 
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
-            $found[] = ['path' => (string) $row['path'], 'line' => (int) $row['line']];
+            $found[] = [
+                'note' => (string) $row['path'],
+                'title' => (string) $row['title'],
+                'line' => (int) $row['line'],
+            ];
         }
 
         return $found;
@@ -295,6 +587,71 @@ final class KnowledgeIndex
         }
 
         return $counts;
+    }
+
+    /**
+     * Every note with its title and how it is filed — the browsable view of the base.
+     *
+     * @return list<array{note: string, title: string, tags: list<string>}>
+     */
+    public function notes(): array
+    {
+        $stmt = $this->pdo->query('SELECT path, title FROM notes ORDER BY path');
+
+        if ($stmt === false) {
+            return [];
+        }
+
+        $notes = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $path = (string) $row['path'];
+            $notes[] = ['note' => $path, 'title' => (string) $row['title'], 'tags' => $this->tagsOf($path)];
+        }
+
+        return $notes;
+    }
+
+    /**
+     * One note's sections in the order they are written.
+     *
+     * Needs no new indexing: the headings were parsed and stored when the note was indexed, so an
+     * outline is one ordered select over a column that already carries an index.
+     *
+     * @return list<array{section: string, text: string}>
+     */
+    public function sectionsOf(string $path): array
+    {
+        $stmt = $this->pdo->prepare('SELECT heading, text FROM chunks WHERE path = :p ORDER BY ord');
+        $stmt->execute(['p' => $path]);
+
+        $sections = [];
+
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $sections[] = ['section' => (string) $row['heading'], 'text' => (string) $row['text']];
+        }
+
+        return $sections;
+    }
+
+    /**
+     * What a note links to, and what links back to it.
+     *
+     * The second half is what `links_target` was built for. The index has existed since the base was
+     * first written and nothing has ever queried it — "what points HERE" is usually the more useful
+     * question, because it finds where else a subject is discussed without inventing a second search.
+     *
+     * @return array{out: list<string>, in: list<string>}
+     */
+    public function linksBothWays(string $path): array
+    {
+        $stmt = $this->pdo->prepare('SELECT DISTINCT path FROM links WHERE target = :t ORDER BY path');
+        $stmt->execute(['t' => $path]);
+
+        return [
+            'out' => $this->linksOf($path),
+            'in' => array_values(array_map(strval(...), $stmt->fetchAll(\PDO::FETCH_COLUMN))),
+        ];
     }
 
     /** @return list<string> */

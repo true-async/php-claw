@@ -8,6 +8,7 @@ use Claw\Agent\AgentFactory;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
+use Claw\Knowledge\KnowledgeBase;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
@@ -110,6 +111,10 @@ final class WorkflowMode
      * the first non-flag argument, defaulting to the current directory. This is the one command
      * that does not resolve an existing project — it creates one.
      *
+     * `--no-kb` declines the knowledge base. It is a flag to REFUSE rather than one to ask for,
+     * because the folder is what makes the tool exist at all and a base nobody can start filling is
+     * how this subsystem went unused; the person who does not want a folder in their tree says so.
+     *
      * @param list<string> $args
      */
     private function createProject(array $args): int
@@ -122,8 +127,10 @@ final class WorkflowMode
             return 1;
         }
 
+        $withKnowledgeBase = !\in_array('--no-kb', $args, true);
+
         try {
-            $project = ProjectStore::init($this->projectsDir(), $target);
+            $project = ProjectStore::init($this->projectsDir(), $target, '', $withKnowledgeBase);
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw -c: ' . $e->getMessage() . "\n");
 
@@ -133,6 +140,12 @@ final class WorkflowMode
         fwrite(STDOUT, "Project '{$project->name}' initialized.\n");
         fwrite(STDOUT, "  folder: {$project->path}\n");
         fwrite(STDOUT, '  state:  ' . $this->projectsDir() . '/' . $project->id . ".db\n");
+
+        $notes = $withKnowledgeBase ? KnowledgeBase::create($project->path) : null;
+
+        if ($notes !== null) {
+            fwrite(STDOUT, "  notes:  {$notes}/\n");
+        }
 
         return 0;
     }

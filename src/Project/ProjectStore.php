@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw\Project;
 
 use Claw\Exceptions\ClawException;
+use Claw\Knowledge\KnowledgeBase;
 
 /**
  * One opened project's state. A "project" is an EXTERNAL working tree (a folder, possibly a
@@ -45,10 +46,21 @@ final class ProjectStore implements ProjectStoreInterface
      * to make. Throws if it is already initialized. This is the registry's only write; it
      * returns metadata rather than a handle because `claw -c` just records the project.
      *
+     * ONE EXCEPTION to "not ours to make", and it is deliberate: unless $withKnowledgeBase is turned
+     * off, a `kb/` folder is created inside the project with the page that explains what it is for.
+     * That is a write into somebody's working tree, so it is a decision the caller makes explicitly —
+     * the dashboard offers it as a checkbox and `claw -c` as a flag. A base nobody can start filling
+     * is the reason this subsystem sat unused: the folder had to exist before the tool would appear,
+     * and nothing ever created the folder.
+     *
      * @throws ClawException
      */
-    public static function init(string $projectsDir, string $projectPath, string $description = ''): Project
-    {
+    public static function init(
+        string $projectsDir,
+        string $projectPath,
+        string $description = '',
+        bool $withKnowledgeBase = true,
+    ): Project {
         $abs = realpath($projectPath);
 
         if ($abs === false || !is_dir($abs)) {
@@ -87,6 +99,10 @@ final class ProjectStore implements ProjectStoreInterface
             @unlink($dbPath);
 
             throw new ClawException("ProjectStore: cannot create {$dbPath}: " . $e->getMessage(), 0, $e);
+        }
+
+        if ($withKnowledgeBase) {
+            KnowledgeBase::create($abs);
         }
 
         return new Project($id, $name, $abs, $description);
