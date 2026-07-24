@@ -117,4 +117,19 @@ final class ArtifactTest
         Assert::false(Artifact::looksLikeToolOutput('I decided to use a bubble sort because...'));
         Assert::false(Artifact::looksLikeToolOutput('The tests are described in docs/testing.md'));
     }
+
+    #[Test]
+    public function semanticTypeIsDeclaredOrDerivedNeverGuessedFromTheName(): void
+    {
+        // declared by the producer that knows it — the generator marks its draft a solver
+        Assert::same(Artifact::text('solver-class', '<?php ...', 'php', 'solver')->type, 'solver');
+        Assert::same(Artifact::text('anything', 'prose')->type, '');
+
+        // derived from the tool's own report for evidence
+        $tests = Artifact::evidence('t', 'OK (3 tests)', 'phpunit x', '', new ToolResultMeta('ok', 'phpunit', 'OK (3 tests)'));
+
+        Assert::same($tests->type, 'test-report');
+        Assert::same(Artifact::evidence('l', 'fine', 'php -l x', '', new ToolResultMeta('ok', 'php-lint'))->type, 'analysis');
+        Assert::same(Artifact::evidence('r', 'out', 'my.sh', '', new ToolResultMeta('ok'))->type, '');
+    }
 }

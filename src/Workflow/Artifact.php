@@ -67,23 +67,29 @@ final class Artifact
         public readonly string $status = '',   // evidence only: 'ok' | 'fail' — from the command's exit
         public readonly string $tool = '',     // evidence only: recognized producer, e.g. 'phpunit'
         public readonly string $summary = '',  // evidence only: the producer's own verdict line, parsed
+        public readonly string $type = '',     // SEMANTIC type: what this artifact IS, not how it is stored
     ) {
     }
 
-    /** Inline text. The extension is taken from $ext if given, otherwise sniffed from the content. */
-    public static function text(string $label, string $text, string $ext = ''): self
+    /**
+     * Inline text. The extension is taken from $ext if given, otherwise sniffed from the content.
+     * $type is the SEMANTIC kind, declared by the producer that knows it — e.g. the workflow
+     * generator marks its drafted class 'solver'; a viewer keys its rendering off this, never off
+     * the artifact's name.
+     */
+    public static function text(string $label, string $text, string $ext = '', string $type = ''): self
     {
         $ext = $ext !== '' ? self::normalizeExt($ext) : self::sniff($text);
 
-        return new self($label, 'text', $text, $ext, self::mimeFor($ext));
+        return new self($label, 'text', $text, $ext, self::mimeFor($ext), type: $type);
     }
 
     /** A file the step wrote (its path). The extension/MIME come from the path. */
-    public static function file(string $label, string $path): self
+    public static function file(string $label, string $path, string $type = ''): self
     {
         $ext = self::normalizeExt(pathinfo($path, PATHINFO_EXTENSION));
 
-        return new self($label, 'file', $path, $ext, self::mimeFor($ext));
+        return new self($label, 'file', $path, $ext, self::mimeFor($ext), type: $type);
     }
 
     /**
@@ -116,7 +122,19 @@ final class Artifact
             $meta->status ?? '',
             $meta->producer ?? '',
             $meta->summary ?? '',
+            self::typeOf($meta->producer ?? ''),
         );
+    }
+
+    /** The semantic type a recognized producer's output IS — a test report, an analysis, a build log. */
+    private static function typeOf(string $producer): string
+    {
+        return match ($producer) {
+            'phpunit' => 'test-report',
+            'php-lint', 'phpstan' => 'analysis',
+            'composer' => 'build',
+            default => '',
+        };
     }
 
     /**
