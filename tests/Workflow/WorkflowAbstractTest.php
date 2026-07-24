@@ -1827,6 +1827,233 @@ final class WorkflowAbstractTest
         Assert::false(str_contains($text, 'REVIEWER'));
     }
 
+    #[Test]
+    public function aFileTheModelWritesBecomesAFileArtifactWithoutBeingRecordedByHand(): void
+    {
+        // The deliverable — the file the step wrote — is now a visible result on its own. Before, a
+        // step could write src/Stats.php and record nothing, leaving the panel unable to say where
+        // the result was.
+        $write = $this->toolUse('write_file', ['path' => 'src/Stats.php', 'content' => '<?php class Stats {}']);
+        $worker = new ScriptedAgent(
+            $write,
+            $this->answer('wrote the class'),
+        );
+        $registry = new Registry();
+        $registry->add($this->cannedTool('write_file', 'Wrote 21 bytes to src/Stats.php'));
+
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'w';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                $this->ai('write it');
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($this->fileArtifacts($sink), ['src/Stats.php']);
+    }
+
+    #[Test]
+    public function writtenFilesAreDedupedByPathAndAFailedWriteLeavesNoArtifact(): void
+    {
+        // Two writes to one path show it once (last wins, same path either way); a write that ERRORED
+        // is not a deliverable and leaves nothing behind.
+        $ok1 = new ToolUseBlock('t1', 'write_file', ['path' => 'a.txt', 'content' => 'one']);
+        $ok2 = new ToolUseBlock('t2', 'write_file', ['path' => 'a.txt', 'content' => 'two']);
+        $bad = new ToolUseBlock('t3', 'write_file', ['path' => 'nope/b.txt', 'content' => 'x']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$ok1, $ok2, $bad], [$ok1, $ok2, $bad], StopReason::ToolUse, new Usage()),
+            $this->answer('done'),
+        );
+
+        // A write_file whose handle() throws for the third path — the executor turns it into an error result.
+        $registry = new Registry();
+        $registry->add(new class () implements ToolInterface {
+            public function name(): string
+            {
+                return 'write_file';
+            }
+
+            public function description(): string
+            {
+                return 'writes';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Mutating;
+            }
+
+            public function handle(array $input): string
+            {
+                if (($input['path'] ?? '') === 'nope/b.txt') {
+                    throw new \Claw\Exceptions\ToolException('cannot write nope/b.txt');
+                }
+
+                return 'Wrote';
+            }
+        });
+
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'w';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                $this->ai('write them');
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($this->fileArtifacts($sink), ['a.txt']);   // deduped to one; the failed write is absent
+    }
+
+    #[Test]
+    public function aHandRecordedFileIsNotDoubledByTheAutoArtifact(): void
+    {
+        // The step records the file it wrote through the artifact tool AND the auto-capture sees the
+        // same write — the path must appear once, not twice.
+        $write = $this->toolUse('write_file', ['path' => 'src/Calc.php', 'content' => '<?php']);
+        $worker = new ScriptedAgent(
+            $write,
+            $this->answer('done'),
+        );
+        $registry = new Registry();
+        $registry->add($this->cannedTool('write_file', 'Wrote'));
+
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'w';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                $this->ai('write it');
+                $this->artifact('the calculator', file: 'src/Calc.php');   // recorded by hand too
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($this->fileArtifacts($sink), ['src/Calc.php']);   // one file artifact for the path, not two
+    }
+
+    #[Test]
+    public function aWrittenFileIsAttributedToTheStepThatWroteItNotTheNextOne(): void
+    {
+        // Handoff formation continues the PREVIOUS step's conversation — which still holds its
+        // write_file calls. Recording must not run there, or the first step's file is re-attributed
+        // to the second: the file must appear once, under the step that actually wrote it.
+        $write = $this->toolUse('write_file', ['path' => 'src/A.php', 'content' => '<?php']);
+        $worker = new ScriptedAgent(
+            $write,                        // step A: writes the file
+            $this->answer('wrote A'),      // step A: finishes
+            $this->answer('the handoff'),  // handoff formation (continues A's history) — must record nothing
+            $this->answer('reasoned'),     // step B: makes an ai() call but writes nothing
+        );
+        $registry = new Registry();
+        $registry->add($this->cannedTool('write_file', 'Wrote'));
+
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ab';
+            }
+
+            #[Step]
+            public function alpha(): void
+            {
+                $this->ai('write A');
+            }
+
+            #[Step]
+            public function beta(): void
+            {
+                $this->ai('carry on');   // its first ai() forms alpha's handoff first
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($this->fileArtifacts($sink), ['src/A.php']);   // once, not doubled under beta
+    }
+
+    #[Test]
+    public function filesWrittenAcrossSeveralAiCallsInOneStepAllBecomeArtifacts(): void
+    {
+        $writeA = $this->toolUse('write_file', ['path' => 'a.php', 'content' => '1']);
+        $writeB = $this->toolUse('write_file', ['path' => 'b.php', 'content' => '2']);
+        $worker = new ScriptedAgent(
+            $writeA,
+            $this->answer('a done'),   // first ai() ends
+            $writeB,
+            $this->answer('b done'),   // second ai() ends
+        );
+        $registry = new Registry();
+        $registry->add($this->cannedTool('write_file', 'Wrote'));
+
+        $sink = new ArrayTraceSink();
+        $wf = new class ($this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'w';
+            }
+
+            #[Step]
+            public function make(): void
+            {
+                $this->ai('write a');
+                $this->ai('write b');   // a fresh exchange; its writes must accumulate onto the first's
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($this->fileArtifacts($sink), ['a.php', 'b.php']);
+    }
+
+    /**
+     * The values of every `file` artifact recorded in the run's journal, in order — how the
+     * auto-capture's effect is asserted.
+     *
+     * @return list<string>
+     */
+    private function fileArtifacts(ArrayTraceSink $sink): array
+    {
+        $files = [];
+
+        foreach ($sink->records as $record) {
+            $event = $record->event();
+
+            if ($event->type === 'artifact' && ($event->data['kind'] ?? '') === 'file') {
+                $files[] = (string) $event->data['value'];
+            }
+        }
+
+        return $files;
+    }
+
     /** A two-step relay workflow whose steps each make one ai() call — for handoff/resume cases. */
     private function relay(Environment $env): WorkflowAbstract
     {

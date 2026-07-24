@@ -9,6 +9,7 @@ use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\ToolResultBlock;
+use Claw\Agent\ToolUseBlock;
 use Claw\Agent\TurnLoopInterface;
 use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
@@ -87,6 +88,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /** The verdict the critic recorded through the `verdict` tool during the current review; transient. */
     private ?Verdict $verdict = null;
+
+    /**
+     * Paths the model wrote during the current step attempt, collected from each ai() exchange and
+     * turned into `file` artifacts once the step body is done — so the step's own recording wins and a
+     * path is not doubled. Reset per attempt; see {@see recordWrittenFiles()}. Transient.
+     *
+     * @var array<string, true>
+     */
+    private array $writtenPaths = [];
 
     /**
      * The handoff fed into the current step's model context — what the previous step handed on. Formed
@@ -339,9 +349,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
                 $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
+                $this->writtenPaths = [];       // and re-collects which files it wrote (see recordWrittenFiles)
                 $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
 
                 $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
+                $this->emitWrittenFileArtifacts();   // the files it wrote become artifacts, after its own recording so a path is not doubled
                 $workHistory = $this->lastHistory;   // the work exchange — its handoff continues THIS context
 
                 if ($rubric === null) {
@@ -777,7 +789,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $prior = $this->env->findStore()->loadExchange($this->runId, $this->currentStep);
         }
 
-        return $this->runTurns($prompt, $tools, $agent, $prior);
+        $text = $this->runTurns($prompt, $tools, $agent, $prior);
+
+        // Collect what this WORK exchange wrote, HERE and not in runTurns: handoff formation also drives
+        // runTurns, but continuing the PREVIOUS step's conversation — which still holds that step's
+        // write_file calls — so recording there would re-attribute the prior step's files to this one.
+        // Going through ai() only sees the exchanges a step actually runs as work; a re-run continuing a
+        // prior attempt re-collects its writes, which is right — those files are still on disk.
+        $this->recordWrittenFiles($this->lastHistory);
+
+        return $text;
     }
 
     /**
@@ -828,6 +849,72 @@ abstract class WorkflowAbstract implements WorkflowInterface
         } finally {
             $this->activeScope = $previousScope;
             $tracer?->exit($span);
+        }
+    }
+
+    /**
+     * Collect the paths a work exchange WROTE — the successful `write_file` targets — for the step to
+     * turn into artifacts once its body is done. Called from {@see ai()}, deliberately not from
+     * runTurns (which handoff formation also drives, over the previous step's history). Not emitted
+     * here: a step often records the file it wrote by hand right after the ai() call that wrote it,
+     * and emitting mid-exchange would double the path. A write that ERRORED contributes nothing — the
+     * call is paired with its result and dropped on failure. Skipped while REVIEWING: a critic does
+     * not write, and its exchange is not the step's (the same reason its history is never persisted).
+     *
+     * @param list<Message> $history
+     */
+    private function recordWrittenFiles(array $history): void
+    {
+        if ($this->reviewing) {
+            return;
+        }
+
+        $failed = [];
+
+        foreach ($history as $message) {
+            foreach ($message->content as $block) {
+                if ($block instanceof ToolResultBlock && $block->isError) {
+                    $failed[$block->toolUseId] = true;
+                }
+            }
+        }
+
+        foreach ($history as $message) {
+            foreach ($message->content as $block) {
+                if (!$block instanceof ToolUseBlock || $block->name !== 'write_file' || isset($failed[$block->id])) {
+                    continue;
+                }
+
+                $path = \is_string($block->input['path'] ?? null) ? trim($block->input['path']) : '';
+
+                if ($path !== '') {
+                    $this->writtenPaths[$path] = true;
+                }
+            }
+        }
+    }
+
+    /**
+     * Turn the step's written files into `file` artifacts, so the run's real deliverable becomes a
+     * visible result — before this, a step could write src/Foo.php and record nothing, leaving the
+     * panel with no answer to "where is the result" and the critic nothing to open. Run once at the
+     * end of the step body, AFTER its own artifact() calls, and deduped by path against them: a path
+     * the step already recorded by hand, or one written more than once, appears exactly once.
+     */
+    private function emitWrittenFileArtifacts(): void
+    {
+        $already = [];
+
+        foreach ($this->artifacts[$this->currentStep] ?? [] as $artifact) {
+            if ($artifact->kind === 'file') {
+                $already[$artifact->value] = true;
+            }
+        }
+
+        foreach (array_keys($this->writtenPaths) as $path) {
+            if (!isset($already[$path])) {
+                $this->artifact($path, file: $path);
+            }
         }
     }
 
