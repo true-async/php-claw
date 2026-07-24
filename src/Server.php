@@ -59,6 +59,8 @@ use TrueAsync\WebSocketUpgrade;
  *   GET  /api/projects/{key}/runs/{runId}/trace?since=<seq>   (poll fallback for the run stream)
  *   GET  /api/projects/{key}/runs/{runId}/artifacts
  *   GET  /api/projects/{key}/runs/{runId}/artifacts/{n}       (one artifact's body, fetched on open)
+ *   POST /api/projects                                       (register a folder; created if inside the workspace)
+ *   POST /api/projects/{key}/issues                          (add an issue)
  *   POST /api/projects/{key}/issues/{id}/start               (launch the solver, 202)
  *   POST /api/projects/{key}/issues/{id}/answer              (reply to the run's open gate)
  *   POST /api/projects/{key}/description                     (rewrite the project's Markdown brief)
@@ -100,10 +102,15 @@ final class Server
     /** @var array<string, TraceReader> trace readers over the read handles, cached so a stream re-uses one. */
     private array $readers = [];
 
-    /** @param string $root the install root: anchors the app home so a run can load its {@see Config}. */
+    /**
+     * @param string $root      the install root: anchors the app home so a run can load its {@see Config}.
+     * @param string $workspace the app home (claw's own folder) — the one area where
+     *                          {@see self::createProject} may create a project folder that does not exist yet.
+     */
     public function __construct(
         private readonly string $projectsDir,
         private readonly string $root,
+        private readonly string $workspace,
     ) {
     }
 
@@ -127,6 +134,7 @@ final class Server
 
         echo "claw dashboard API → http://{$host}:{$port}\n";
         echo "  projects: {$this->projectsDir}\n";
+        echo "  workspace: {$this->workspace}\n";
 
         $this->adoptOrphanedRuns();
 
@@ -395,9 +403,11 @@ final class Server
     }
 
     /**
-     * POST /api/projects — register an existing folder as a project (the dashboard's equivalent of
-     * `claw -c <folder>`): it creates the project's state db, it does not create the folder. The folder
-     * must already exist on the server's filesystem; an unknown/duplicate path is a 400 with the reason.
+     * POST /api/projects — register a folder as a project (the dashboard's equivalent of
+     * `claw -c <folder>`). An existing folder anywhere on the server's filesystem is registered
+     * as-is. A folder that does not exist yet is CREATED first — but only inside the workspace
+     * ({@see self::creatableProjectFolder} for how a typed path is anchored there); anywhere else
+     * the 400 names the workspace, so the refusal teaches the rule it enforces.
      */
     private function createProject(HttpRequest $request, HttpResponse $response): void
     {
@@ -414,8 +424,27 @@ final class Server
             return;
         }
 
+        $target = \str_starts_with($folder, '/') && \is_dir($folder)
+            ? $folder
+            : self::creatableProjectFolder($folder, $this->root, $this->workspace, $this->projectsDir);
+
+        if ($target === null) {
+            $response->json(
+                ['error' => "project folder does not exist: {$folder} — a new folder is created only inside the workspace ({$this->workspace})"],
+                400,
+            );
+
+            return;
+        }
+
+        if (!\is_dir($target) && !\mkdir($target, 0o775, true) && !\is_dir($target)) {
+            $response->json(['error' => "cannot create project folder: {$target}"], 400);
+
+            return;
+        }
+
         try {
-            $project = ProjectStore::init($this->projectsDir, $folder, $description, $withKnowledgeBase);
+            $project = ProjectStore::init($this->projectsDir, $target, $description, $withKnowledgeBase);
             // Where a person should write notes, as the base itself reports it — the server does not
             // assemble that path, and does not know what it is made of.
             $notesFolder = $withKnowledgeBase ? KnowledgeBase::create($project->path) : null;
@@ -435,6 +464,69 @@ final class Server
             'description' => $project->description,
             'knowledgeBase' => $notesFolder,
         ], 201);
+    }
+
+    /**
+     * Where a project folder the dashboard asked for may be created — or null for "nowhere".
+     *
+     * The picker takes a typed path, and a folder that did not exist used to be a dead end.
+     * A folder inside claw's own workspace is claw's to make; anywhere else stays
+     * register-only, because the server must not mkdir over an arbitrary filesystem on a
+     * browser's word. The requested path is tried literally, then anchored to the install
+     * root, then to the workspace — so with the default layout "/workspace/demo",
+     * "workspace/demo" and "demo" all land on <workspace>/demo. Comparison is lexical
+     * (the folder does not exist yet, so realpath cannot be used), and the state area
+     * (project dbs) plus the workspace itself are never handed out.
+     */
+    public static function creatableProjectFolder(string $requested, string $root, string $workspace, string $projectsDir): ?string
+    {
+        $area = self::lexicalPath($workspace);
+        $state = self::lexicalPath($projectsDir);
+
+        $candidates = \str_starts_with($requested, '/')
+            ? [$requested, $root . $requested]
+            : [$root . '/' . $requested, $workspace . '/' . $requested];
+
+        foreach ($candidates as $candidate) {
+            $folder = self::lexicalPath($candidate);
+
+            if (!\str_starts_with($folder, $area . '/')) {
+                continue;   // this reading is outside — try the next anchoring
+            }
+
+            // The first reading that lands inside the workspace is what the caller meant. If that
+            // spot is reserved — the state area holding the project dbs — refuse outright rather
+            // than silently relocating the folder under a different reading of the same path.
+            if ($folder === $state || \str_starts_with($folder, $state . '/')) {
+                return null;
+            }
+
+            return $folder;
+        }
+
+        return null;
+    }
+
+    /** Lexical canonical form of an absolute path — no filesystem, so it works for folders not made yet. */
+    private static function lexicalPath(string $path): string
+    {
+        $parts = [];
+
+        foreach (\explode('/', $path) as $part) {
+            if ($part === '' || $part === '.') {
+                continue;
+            }
+
+            if ($part === '..') {
+                \array_pop($parts);
+
+                continue;
+            }
+
+            $parts[] = $part;
+        }
+
+        return '/' . \implode('/', $parts);
     }
 
     /**
