@@ -101,7 +101,7 @@ final class WorkflowMode
             return 1;
         }
 
-        new Server($this->projectsDir(), $this->root)->run($host, $port);
+        new Server($this->projectsDir(), $this->root, $this->appHome())->run($host, $port);
 
         return 0;
     }
