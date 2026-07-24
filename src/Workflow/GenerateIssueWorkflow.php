@@ -193,6 +193,12 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
                 . "- Few steps. One step that implements and verifies is the intended shape for a small task.\n"
                 . "- Boilerplate: namespace, strict_types, the class declaration. Rejected at save if wrong.\n\n"
                 . "REJECT when any of these hold — and say which:\n"
+                . '- a step is too SIMPLE to earn its own existence. This is a judgement, not a count: read '
+                . 'each step and ask "if it does this little, is it a step at all, or ceremony?". A step '
+                . 'whose prompt carves out only a sliver — a lookup, a restatement, one trivial action a '
+                . 'neighbour would absorb without noticing — should be FOLDED into that neighbour. A step '
+                . 'must justify its own fresh context; a workflow that spends one on a triviality is badly '
+                . "split. (Having FEW steps is not the fault — a lone meaty step is ideal; a thin step is);\n"
                 . "- a step is a true placeholder: no ai()/tool() call at all;\n"
                 . '- the class builds the change as a PHP string and writes it (str_replace/preg_replace '
                 . 'surgery on source, a heredoc of the new file). It cannot see or fix its own mistakes '

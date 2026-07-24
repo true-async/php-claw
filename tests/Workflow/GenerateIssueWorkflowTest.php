@@ -164,6 +164,29 @@ final class GenerateIssueWorkflowTest
     }
 
     /**
+     * A too-simple step is a decomposition defect the reviewer must catch — the "make meaty steps"
+     * rule lives in the generator prompt, which the model can ignore; the gate is the critic. It is an
+     * EVALUATION, not a turn count: read each step and ask whether one this small earns being a step.
+     */
+    #[Test]
+    public function theSolverReviewRejectsAStepTooSimpleToJustifyItself(): void
+    {
+        $dir = self::tempDir();
+
+        try {
+            $agent = self::generate($dir, 'Issue13Solver', 'simple');
+            $review = self::textOf($agent, 5);   // the critic's prompt
+
+            Assert::true(str_contains($review, 'too SIMPLE to earn its own existence'));
+            Assert::true(str_contains($review, 'is it a step at all, or ceremony?'));
+            // and the judgement is not mistaken for "too few steps" — a lone meaty step stays ideal
+            Assert::true(str_contains($review, 'a lone meaty step is ideal'));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
      * A chosen approach reaches the model that writes the solver, and sits BESIDE the general recipe
      * rather than replacing it.
      *
