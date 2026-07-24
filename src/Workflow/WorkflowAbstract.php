@@ -324,6 +324,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $maxRounds = $this->maxRounds($step);
             $workHistory = [];
             $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
+            $priorAttempt = null;   // fingerprint of the previous attempt's artifacts — see the identical-attempt stop
 
             if ($this->reentryStep === $name) {
                 $resume = $this->stepHistory[$name] ?? [];   // a back() into this step continues its prior conversation
@@ -349,12 +350,30 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 // Deterministic guard: a critic'd step that did NOTHING — no model/tool work AND no artifact
                 // — produced no result. We see that without spending an AI critic (which would only probe the
                 // journal in circles). Report it straight instead.
+                //
+                // Second deterministic guard, for the churn two real runs paid for: a re-run whose artifacts
+                // are byte-identical to the previous attempt's. The guidance changed NOTHING, so re-judging
+                // is re-buying the same verdict and re-running is re-buying the same work — hand the
+                // supervisor the fact instead and let it settle the round (accept, redirect, or stop).
+                // Byte-exact on purpose: evidence that legitimately varies (timings) simply never matches,
+                // and the guard stays out of the way.
+                $attempt = array_map(
+                    static fn (Artifact $a): array => [$a->label, $a->kind, $a->value],
+                    $this->artifacts[$name],
+                );
+
                 if ($workHistory === [] && $this->artifacts[$name] === []) {
                     $findings = "step '{$name}' produced nothing: no model/tool work and no artifact. A step "
                         . 'must do real work and leave a result; if it needs no review, it should carry no critic.';
+                } elseif ($priorAttempt !== null && $attempt === $priorAttempt) {
+                    $findings = 'the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
+                        . 'guidance changed nothing about the work. Another round cannot help: either the '
+                        . 'finding is wrong, or this step needs different guidance or a person.';
                 } else {
                     $findings = $this->critic($name, $rubric, $artifacts);
                 }
+
+                $priorAttempt = $attempt;
 
                 if ($findings === null) {
                     break;   // the critic is satisfied
@@ -1080,19 +1099,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
             }
         }
 
-        // Whatever the project's own base says about checking work here. Absent base or silent
-        // base → no section; the critic still has the recorded commands and the task.
-        $known = $this->tool('knowledge', [
-            'action' => 'search',
-            'query' => 'how to verify work in this project: run tests, lint, static analysis, build',
-            'limit' => 3,
-        ]);
-
-        if (!str_starts_with($known, "tool 'knowledge' failed:") && trim($known) !== '') {
-            $sections[] = "What the project's knowledge base says about verifying work here:\n"
-                . self::clip($known, 1_200);
-        }
-
+        // Deliberately NO knowledge-base lookup here: a per-judge search was tried and it cost an
+        // embedding call and a traced tool event per critic round against bases that are empty
+        // today. If the base ever carries a verification page, inject it ONCE per run from the
+        // runner — never from inside every review.
         return $sections === [] ? '' : "Your verification toolbox:\n\n" . implode("\n\n", $sections) . "\n\n";
     }
 

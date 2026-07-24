@@ -164,6 +164,7 @@ final class ProjectManagerToolTest
                 'issue' => '1',
                 'type' => 'feature',
                 'strategy' => 'generate',
+                'why_not_direct' => 'multi-stage build',
                 'reason' => 'foundational',
                 'requires_approval' => true,
             ]);
@@ -191,6 +192,7 @@ final class ProjectManagerToolTest
                 'issue' => '1',
                 'type' => 'feature',
                 'strategy' => 'decompose',
+                'why_not_direct' => 'several independent parts',
                 'reason' => 'too big for one run',
                 'needs_human' => true,
             ]);
@@ -242,7 +244,7 @@ final class ProjectManagerToolTest
             Assert::same($attempts[0]['outcomeReason'], 'needs a real parser');
 
             // A second verdict is appended, so the history a retry escalates from survives.
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'direct failed']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'direct failed', 'why_not_direct' => 'direct already failed here']);
             $attempts = $store->strategyAttempts('1');
             Assert::count($attempts, 2);
             Assert::same($attempts[0]['strategy'], Strategy::Direct);
@@ -277,11 +279,11 @@ final class ProjectManagerToolTest
         $this->withStore(function (ProjectStore $store): void {
             $tool = new ProjectManagerTool($store);
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'generate', 'reason' => 'bespoke']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'generate', 'reason' => 'bespoke', 'why_not_direct' => 'multi-stage build']);
             $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'the solver kept crashing']);
 
             // The same strategy again, and a cheaper one, are both refused...
-            $again = $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'generate', 'reason' => 'one more go']);
+            $again = $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'generate', 'reason' => 'one more go', 'why_not_direct' => 'multi-stage build']);
             Assert::true(str_contains($again, 'does not escalate past'));
             Assert::true(str_contains($again, 'the solver kept crashing'));   // says what broke last time
 
@@ -291,7 +293,7 @@ final class ProjectManagerToolTest
             ));
 
             // ...and only a strategy that does MORE is accepted.
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'decompose', 'reason' => 'split it']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'decompose', 'reason' => 'split it', 'why_not_direct' => 'several independent parts']);
             $current = $store->currentStrategy('1');
             Assert::true($current !== null);
             Assert::same($current['strategy'], Strategy::Decompose);
@@ -306,7 +308,7 @@ final class ProjectManagerToolTest
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
             $tool->handle([
-                'action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'decompose',
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => 'decompose', 'why_not_direct' => 'several independent parts',
                 'reason' => 'too big', 'needs_human' => true,
             ]);
 
@@ -328,14 +330,14 @@ final class ProjectManagerToolTest
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
             foreach (['direct', 'generate', 'decompose'] as $strategy) {
-                $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => $strategy, 'reason' => 'next rung']);
+                $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => $strategy, 'reason' => 'next rung', 'why_not_direct' => 'the rung below already failed']);
                 $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => "{$strategy} did not work"]);
             }
 
             // Every rung is now spent — nothing escalates past decompose, including decompose itself.
             foreach (['direct', 'library', 'generate', 'decompose'] as $strategy) {
                 Assert::true(str_contains(
-                    $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => $strategy, 'reason' => 'again']),
+                    $this->refusal($tool, ['action' => 'set_strategy', 'issue' => '1', 'type' => 'feature', 'strategy' => $strategy, 'reason' => 'again', 'why_not_direct' => 'every rung is spent']),
                     'does not escalate past',
                 ));
             }
@@ -382,7 +384,7 @@ final class ProjectManagerToolTest
 
             // and omitting it defaults to false
             $tool->handle([
-                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'bigger',
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'bigger', 'why_not_direct' => 'outgrew one sitting',
             ]);
             $current = $store->currentStrategy('1');
             Assert::true($current !== null);
@@ -506,6 +508,42 @@ final class ProjectManagerToolTest
      * once came to quietly generate a bespoke solver, which is the expense it existed to avoid.
      */
     #[Test]
+    public function aVerdictCostlierThanDirectMustAnswerTheDirectTest(): void
+    {
+        $this->withStore(function (ProjectStore $store): void {
+            $tool = new ProjectManagerTool($store, []);
+            $tool->handle(['action' => 'create_issue', 'title' => 'sort some numbers']);
+
+            // two real tickets in a row bought a generated workflow because the verdict pattern-matched
+            // "feature" and never faced the cheapest question — the tool now asks it itself
+            $refusal = $this->refusal($tool, [
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'feature',
+                'strategy' => 'generate', 'reason' => 'it is a new feature',
+            ]);
+            Assert::true(str_contains($refusal, 'why_not_direct'));
+
+            // answered — accepted, and the answer is kept with the reason for the failure review
+            $tool->handle([
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'feature',
+                'strategy' => 'generate', 'reason' => 'no shelf entry fits',
+                'why_not_direct' => 'cannot name the files: the input pipeline is undiscovered',
+            ]);
+            $verdict = $store->currentStrategy('1');
+            Assert::same($verdict['strategy'] ?? null, \Claw\Project\Strategy::Generate);
+            // the reason stays the model's own words — the direct answer lives in the traced call
+            Assert::same($verdict['reason'], 'no shelf entry fits');
+
+            // `direct` needs no essay — the cheap path stays frictionless
+            $tool->handle(['action' => 'create_issue', 'title' => 'another']);
+            $tool->handle([
+                'action' => 'set_strategy', 'issue' => '2', 'type' => 'feature',
+                'strategy' => 'direct', 'reason' => 'one file, one sentence',
+            ]);
+            Assert::same($store->currentStrategy('2')['strategy'] ?? null, \Claw\Project\Strategy::Direct);
+        });
+    }
+
+    #[Test]
     public function anApproachVerdictNamesAStrategyAndRefusesAWorkflow(): void
     {
         $this->withStore(function (ProjectStore $store): void {
@@ -517,7 +555,7 @@ final class ProjectManagerToolTest
                 $tool = new ProjectManagerTool($store, [WorkflowStore::library($library)]);
                 $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
-                $verdict = ['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'reason' => 'a known shape'];
+                $verdict = ['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'reason' => 'a known shape', 'why_not_direct' => 'multi-stage: the shelf shape applies'];
 
                 // A workflow named under `approach` is a near miss: it is real, it just belongs to the
                 // other verdict — and the refusal says which, rather than only that this one is wrong.
@@ -557,7 +595,7 @@ final class ProjectManagerToolTest
                 $tool = new ProjectManagerTool($store, [WorkflowStore::library($library)]);
                 $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
 
-                $verdict = ['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'reason' => 'a known shape'];
+                $verdict = ['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'reason' => 'a known shape', 'why_not_direct' => 'multi-stage: the shelf shape applies'];
 
                 // Naming nothing: the verdict means a SPECIFIC workflow fits, so it cannot be anonymous.
                 $refusal = $this->refusal($tool, [...$verdict, 'strategy' => 'library']);
@@ -601,11 +639,11 @@ final class ProjectManagerToolTest
         $this->withStore(function (ProjectStore $store): void {
             $tool = new ProjectManagerTool($store);
             $tool->handle(['action' => 'create_issue', 'title' => 'a task']);
-            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'bespoke']);
+            $tool->handle(['action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'generate', 'reason' => 'bespoke', 'why_not_direct' => 'multi-stage build']);
             $tool->handle(['action' => 'report_failure', 'issue' => '1', 'reason' => 'the solver crashed']);
 
             $refusal = $this->refusal($tool, [
-                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'library',
+                'action' => 'set_strategy', 'issue' => '1', 'type' => 'bug', 'strategy' => 'library', 'why_not_direct' => 'multi-stage: past one sitting',
                 'workflow' => 'Whatever', 'reason' => 'try the shelf',
             ]);
 

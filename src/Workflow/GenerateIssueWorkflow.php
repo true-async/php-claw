@@ -27,6 +27,14 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
      * (validate/design/…) even for a one-file change — the dominant source of wasted steps and cost.
      */
     private const string RECIPE = <<<'RECIPE'
+        WHAT A WORKFLOW IS. A workflow is a SCRIPT that drives several AGENT WORK CYCLES. Each step
+        runs one full agent sitting — a model with tools that reads, writes files, runs commands until
+        that cycle's job is done. A workflow is NOT the algorithm of the solution written as phases:
+        never split by what the CODE will do (parse the input / sort the numbers / print the result —
+        that is the agent's business inside one sitting). Split by CYCLES OF DEVELOPMENT, the way a
+        person works: write the code; write the tests; verify the whole. If your steps read like a
+        description of the solution instead of a description of the WORK, you are splitting wrong.
+
         HOW TO DECIDE THE STEPS — read this carefully; it is the part solvers get wrong.
 
         WHAT A STEP IS FOR. A step is NOT a ritual phase. It is a unit of FOCUSED ATTENTION: each step's
@@ -36,8 +44,11 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
           - artifact — a named result, visible to every later step and to a critic;
           - handoff — a short note to the VERY NEXT step;
           - param — a concrete value a later step reads in CODE.
-        A step may carry a critic (a review sub-step) that judges its result — use it ONLY where a result
-        genuinely needs an independent check (e.g. proving the tests are green), never on every step.
+        A step may carry a critic (a review sub-step) that judges its result. Critic discipline, by
+        cycle: a WRITE-CODE cycle's critic READS the code and judges it as code — it never runs the
+        tests (they may not exist yet, and a failed run there proves nothing). Running and judging the
+        tests belongs to the FINAL verify cycle — one critic at the end proves the whole green. Use a
+        critic ONLY where a result genuinely needs that independent check, never on every step.
 
         THE PRINCIPLE — the FEWEST steps, no wasted motion:
           1. First decide whether the task needs splitting AT ALL. Most small tasks do NOT: a simple task
