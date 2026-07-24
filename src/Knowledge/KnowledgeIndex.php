@@ -290,7 +290,11 @@ final class KnowledgeIndex
             )->execute(['p' => $path, 'ti' => $title, 'm' => $mtime, 's' => $size, 'sha' => $sha256, 'at' => time()]);
 
             $this->pdo->exec('COMMIT');
-        } catch (\Throwable $e) {
+        } catch (\Cancellation $e) {
+            $this->pdo->exec('ROLLBACK');
+
+            throw $e;
+        } catch (\Exception $e) {
             $this->pdo->exec('ROLLBACK');
 
             throw $e;
