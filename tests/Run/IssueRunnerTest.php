@@ -196,6 +196,14 @@ final class IssueRunnerTest
             Assert::true($frontend->reported('failed'));
             Assert::false($frontend->reported('repairing'));
             Assert::same($store->loadIssue($issue->id)->status, IssueStatus::Open);   // handed back, not stuck
+
+            // The reason is JOURNALED, not only shown: the server frontend has no console, so a
+            // failure that skips the trace is invisible on dashboard runs — seen live with a rate
+            // limit whose only written record was the strategy ledger.
+            $run = $store->runsFor($issue->id)[0] ?? null;
+            Assert::true($run !== null);
+            $trace = new TraceReader($store->pdo())->render((string) $run['id']);
+            Assert::true(str_contains($trace, 'run-failed'));
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($projectFolder);
