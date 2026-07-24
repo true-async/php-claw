@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw\Tool;
 
 use Claw\Knowledge\KnowledgeBaseInterface;
+use Claw\Knowledge\KnowledgeWriterInterface;
 use Claw\Project\Project;
 use Claw\Workflow\WorkflowStore;
 use Claw\Workflow\WorkflowValidator;
@@ -27,6 +28,7 @@ final class ToolFactory
         Workspace $workspace,
         ?Secrets $secrets = null,
         ?KnowledgeBaseInterface $knowledge = null,
+        ?KnowledgeWriterInterface $knowledgeWriter = null,
         int $timeoutMs = 0,
     ): Registry {
         $registry = new Registry();
@@ -40,9 +42,10 @@ final class ToolFactory
 
         // The knowledge base, when the project has a usable one. Offered rather than required: a base
         // that cannot answer would be a tool a model spends turns interrogating before believing it.
-        // Whether one is usable is the base's own judgement — see KnowledgeBase::forProject().
+        // Whether one is usable is the base's own judgement — see KnowledgeBase::forProject(). The
+        // writer arrives separately (its own interface), so a palette can be read-only by omission.
         if ($knowledge !== null) {
-            $registry->add(new KnowledgeTool($knowledge));
+            $registry->add(new KnowledgeTool($knowledge, $knowledgeWriter));
         }
 
         return $registry;

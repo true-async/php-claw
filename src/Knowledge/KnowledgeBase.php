@@ -17,8 +17,18 @@ use Claw\Project\Project;
  * *policy* that used to be spread across five callers: where things live, and when the index is
  * brought up to date.
  */
-final class KnowledgeBase implements KnowledgeBaseInterface
+final class KnowledgeBase implements KnowledgeBaseInterface, KnowledgeWriterInterface
 {
+    /**
+     * kind → the folder it files into. The kinds are the questions the README teaches; the folders
+     * are its filing scheme. Living here because "where things live" is exactly this class's policy.
+     */
+    private const array KIND_FOLDERS = [
+        'decision' => 'decisions',
+        'postmortem' => 'postmortems',
+        'design' => 'design',
+    ];
+
     /** Has this instance brought the index up to date yet? See {@see fresh()}. */
     private bool $synced = false;
 
@@ -167,6 +177,92 @@ final class KnowledgeBase implements KnowledgeBaseInterface
     public function location(): string
     {
         return $this->folder;
+    }
+
+    public function record(string $kind, string $title, string $body, array $tags = []): string
+    {
+        $folder = self::KIND_FOLDERS[trim($kind)]
+            ?? throw new ClawException("knowledge: unknown kind '{$kind}' — use " . implode(', ', array_keys(self::KIND_FOLDERS)));
+
+        $title = trim($title);
+        $body = trim($body);
+
+        if ($title === '' || $body === '') {
+            throw new ClawException('knowledge: a note needs both a title and a body');
+        }
+
+        $dir = $this->folder . \DIRECTORY_SEPARATOR . $folder;
+
+        if (!is_dir($dir) && !@mkdir($dir, 0o775, true) && !is_dir($dir)) {
+            throw new ClawException("knowledge: cannot create {$folder}/ in the notes folder");
+        }
+
+        // The slug admits only [a-z0-9-], so the handle cannot escape the folder by construction —
+        // no path check needed on the way OUT, unlike resolve() on the way in.
+        $slug = self::slugOf($title);
+        $content = self::compose($title, $body, $tags);
+
+        // Claim the handle with an EXCLUSIVE create, not is_file-then-write: two runs of one project
+        // are started concurrently by design (see fresh()), and both recording the same title would
+        // resolve to the same handle and clobber one another. `x` fails atomically when the file
+        // already exists — so a collision falls through to the next number instead of overwriting,
+        // and the "never overwritten" the interface promises actually holds under that race.
+        for ($n = 1; ; $n++) {
+            $note = $n === 1 ? "{$folder}/{$slug}.md" : "{$folder}/{$slug}-{$n}.md";
+            $handle = @fopen($this->folder . \DIRECTORY_SEPARATOR . $note, 'x');
+
+            if ($handle !== false) {
+                break;
+            }
+
+            if (!is_file($this->folder . \DIRECTORY_SEPARATOR . $note)) {
+                throw new ClawException("knowledge: cannot write {$note}");   // not a collision — the folder is unwritable
+            }
+        }
+
+        $written = fwrite($handle, $content);
+        fclose($handle);
+
+        if ($written === false) {
+            throw new ClawException("knowledge: cannot write {$note}");
+        }
+
+        return $note;
+    }
+
+    /** @param list<string> $tags */
+    private static function compose(string $title, string $body, array $tags): string
+    {
+        $clean = [];
+
+        foreach ($tags as $tag) {
+            // A tag is one filing token; the characters that delimit the `tags: [a, b]` list —
+            // comma, brackets, newline — are stripped so a stray one cannot mis-file the note it
+            // is meant to file (the parser reads this frontmatter by splitting on those, see
+            // NoteParser::tags). Nothing is smuggled either way; this only keeps a tag readable.
+            $tag = trim((string) preg_replace('/[\[\],\r\n]+/', ' ', $tag));
+
+            if ($tag !== '') {
+                $clean[] = $tag;
+            }
+        }
+
+        $front = $clean === [] ? '' : "---\ntags: [" . implode(', ', $clean) . "]\n---\n\n";
+        // A body that opens with its OWN H1 keeps it — the parser reads the first H1 as the title,
+        // so prepending ours would leave two. Only an H1 (`# `) counts: a body opening with `## X`
+        // or a `#tag` has no title of its own, and there ours must go or the parser falls back to
+        // the filename slug (which then rides into every embedded chunk).
+        $heading = preg_match('/^#\s/', $body) === 1 ? '' : "# {$title}\n\n";
+
+        return $front . $heading . $body . "\n";
+    }
+
+    private static function slugOf(string $title): string
+    {
+        $slug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', $title));
+        $slug = trim(substr($slug, 0, 60), '-');
+
+        return $slug === '' ? 'note' : $slug;
     }
 
     /**
