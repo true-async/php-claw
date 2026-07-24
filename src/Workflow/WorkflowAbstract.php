@@ -1227,6 +1227,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /**
      * The traced dispatch behind {@see tool()}, returning the whole envelope — for the callers that
      * need more than the text, like the evidence recorder reading the tool's own result report.
+     *
+     * @param array<string, mixed> $params
      */
     private function dispatchTool(string $name, array $params): ToolResultBlock
     {

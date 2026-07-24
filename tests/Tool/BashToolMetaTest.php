@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Tool;
 
 use Claw\Tool\BashTool;
+use Claw\Tool\ToolResultMeta;
 use Testo\Assert;
 use Testo\Test;
 
@@ -20,15 +21,22 @@ final class BashToolMetaTest
         return new BashTool(sys_get_temp_dir());
     }
 
+    /** The report, with a loud sentinel instead of null — an absent report fails the assert readably. */
+    private function metaOf(BashTool $tool): ToolResultMeta
+    {
+        return $tool->resultMeta() ?? new ToolResultMeta('no report was recorded');
+    }
+
     #[Test]
     public function reportsAZeroExitAsOk(): void
     {
         $tool = $this->tool();
         $tool->handle(['command' => 'true']);
+        $meta = $this->metaOf($tool);
 
-        Assert::same($tool->resultMeta()?->status, 'ok');
-        Assert::same($tool->resultMeta()?->producer, '');
-        Assert::same($tool->resultMeta()?->summary, '');
+        Assert::same($meta->status, 'ok');
+        Assert::same($meta->producer, '');
+        Assert::same($meta->summary, '');
     }
 
     #[Test]
@@ -37,7 +45,7 @@ final class BashToolMetaTest
         $tool = $this->tool();
         $tool->handle(['command' => 'exit 3']);
 
-        Assert::same($tool->resultMeta()?->status, 'fail');
+        Assert::same($this->metaOf($tool)->status, 'fail');
     }
 
     #[Test]
@@ -46,10 +54,11 @@ final class BashToolMetaTest
         $tool = $this->tool();
         // the command line names phpunit; the printed verdict is what a person would scan for
         $tool->handle(['command' => 'echo "OK (3 tests, 5 assertions)" # phpunit']);
+        $meta = $this->metaOf($tool);
 
-        Assert::same($tool->resultMeta()?->status, 'ok');
-        Assert::same($tool->resultMeta()?->producer, 'phpunit');
-        Assert::same($tool->resultMeta()?->summary, 'OK (3 tests, 5 assertions)');
+        Assert::same($meta->status, 'ok');
+        Assert::same($meta->producer, 'phpunit');
+        Assert::same($meta->summary, 'OK (3 tests, 5 assertions)');
     }
 
     #[Test]
@@ -59,6 +68,6 @@ final class BashToolMetaTest
         $tool->handle(['command' => 'exit 1']);
         $tool->handle(['command' => 'true']);
 
-        Assert::same($tool->resultMeta()?->status, 'ok');
+        Assert::same($this->metaOf($tool)->status, 'ok');
     }
 }
