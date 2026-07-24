@@ -8,12 +8,12 @@ use Claw\Agent\Budget;
 use Claw\Agent\DefaultTurnLoop;
 use Claw\Agent\Message;
 use Claw\Agent\SpeakerInterface;
+use Claw\Agent\ToolResultBlock;
 use Claw\Agent\TurnLoopInterface;
 use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
-use Claw\Agent\ToolResultBlock;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
@@ -1227,6 +1227,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /**
      * The traced dispatch behind {@see tool()}, returning the whole envelope — for the callers that
      * need more than the text, like the evidence recorder reading the tool's own result report.
+     *
+     * @param array<string, mixed> $params
      */
     private function dispatchTool(string $name, array $params): ToolResultBlock
     {
