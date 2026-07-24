@@ -64,6 +64,7 @@ final class WorkflowValidator
         $this->assertExtendsWorkflowAbstract($code);
         $this->assertHasAtLeastOneStep($code);
         $this->assertCriticNamesResolve($code);
+        $this->assertRulesHaveConsumers($code);
 
         if ($expectedClass !== null) {
             $this->assertDeclaresExpectedClass($code, $expectedClass);
@@ -167,6 +168,44 @@ final class WorkflowValidator
         foreach ($used[1] as $name) {
             if (!\in_array($name, $declared[1], true)) {
                 throw new WorkflowException("workflow uses critic '{$name}' but criticRules() has no rules for it");
+            }
+        }
+    }
+
+    /**
+     * The mirror image of {@see assertCriticNamesResolve}: every criticRules() entry must be USED by
+     * some `#[Step(critic: 'x')]`.
+     *
+     * Orphaned rules are how a generated solver LOOKS reviewed while nothing reviews it: the first
+     * live run under the cycle recipe produced exactly that — rules written for all three steps, zero
+     * `critic:` markers, so no review ran and no evidence was recorded. Whoever writes a rule means a
+     * gate; a rule nobody consumes is a review that silently never happens, and that is decidable
+     * right here at save time.
+     *
+     * @throws WorkflowException
+     */
+    private function assertRulesHaveConsumers(string $code): void
+    {
+        $start = strpos($code, 'function criticRules');
+
+        if ($start === false) {
+            return;
+        }
+
+        // Bound the key scan to this method's body — cut at the next `function` — so a later
+        // method's quoted keys cannot read as rules and manufacture a false orphan.
+        $end = strpos($code, 'function ', $start + 1);
+        $body = $end === false ? substr($code, $start) : substr($code, $start, $end - $start);
+        preg_match_all('/[\'"]([^\'"]+)[\'"]\s*=>/', $body, $declared);
+
+        preg_match_all('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b[^\]]*\bcritic\s*:\s*[\'"]([^\'"]+)[\'"]/', $code, $used);
+
+        foreach ($declared[1] as $name) {
+            if (!\in_array($name, $used[1], true)) {
+                throw new WorkflowException(
+                    "criticRules() declares '{$name}' but no step is marked #[Step(critic: '{$name}')] — "
+                    . 'a review you wrote that never runs; mark the step that produces what these rules judge, or drop the rule',
+                );
             }
         }
     }
