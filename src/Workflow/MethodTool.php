@@ -56,6 +56,12 @@ final class MethodTool implements ToolInterface
         return Risk::Safe;
     }
 
+    /** Whether this tool exists only while a critic reviews — see {@see Tool::$reviewOnly}. */
+    public function reviewOnly(): bool
+    {
+        return $this->meta->reviewOnly;
+    }
+
     public function handle(array $input): string
     {
         $args = [];

@@ -36,7 +36,7 @@ final class AgentErrors
             ? (string) $data['error']['message']
             : "HTTP {$response->status}";
 
-        return self::classify($response->status, $errorType, $message, self::retryAfterMs($response->headers));
+        return self::classify($response->status, $errorType, $message, self::retryAfterMs($response->headers, $message));
     }
 
     public static function classify(int $status, ?string $errorType, string $message, int $retryAfterMs): AgentException
@@ -90,12 +90,48 @@ final class AgentErrors
     }
 
     /**
-     * @param array<string, string> $headers
+     * Resume time, most precise source first: the `retry-after-ms` header
+     * (Azure), then the error message — OpenAI's TPM 429 states its sub-second
+     * delay only there («Please try again in 1.434s») — then the whole-second
+     * `retry-after` header (Anthropic).
+     *
+     * @param array<string, string> $headers lowercased header names
      */
-    private static function retryAfterMs(array $headers): int
+    private static function retryAfterMs(array $headers, string $message): int
     {
-        $value = $headers['retry-after'] ?? '';
+        $ms = $headers['retry-after-ms'] ?? '';
 
-        return ctype_digit($value) ? ((int) $value) * 1000 : 0;
+        if (ctype_digit($ms)) {
+            return (int) $ms;
+        }
+
+        if (preg_match('/try again in ((?:\d+(?:\.\d+)?(?:ms|[hms]))+)/i', $message, $match)) {
+            return self::durationToMs($match[1]);
+        }
+
+        $seconds = $headers['retry-after'] ?? '';
+
+        return ctype_digit($seconds) ? ((int) $seconds) * 1000 : 0;
+    }
+
+    /**
+     * Go-style duration («1.434s», «20ms», «6m0s») to milliseconds, rounded up.
+     */
+    private static function durationToMs(string $duration): int
+    {
+        preg_match_all('/(\d+(?:\.\d+)?)(ms|[hms])/', $duration, $matches, PREG_SET_ORDER);
+
+        $ms = 0.0;
+
+        foreach ($matches as [, $value, $unit]) {
+            $ms += (float) $value * match ($unit) {
+                'ms' => 1,
+                's' => 1_000,
+                'm' => 60_000,
+                default => 3_600_000,   // 'h' — the regex admits no other unit
+            };
+        }
+
+        return (int) ceil($ms);
     }
 }

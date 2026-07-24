@@ -62,7 +62,7 @@ final class Artifact
         public readonly string $value,  // the text itself, the file path, or the captured output
         public readonly string $ext,    // content extension, e.g. 'php' (no dot)
         public readonly string $mime,   // content MIME, e.g. 'text/x-php'
-        public readonly string $source = '',   // evidence only: what produced it, e.g. 'bash'
+        public readonly string $source = '',   // evidence only: the command that produced it — replayable
         public readonly string $note = '',     // evidence only: the step's own summary, kept apart
         public readonly string $status = '',   // evidence only: 'ok' | 'fail' — from the command's exit
         public readonly string $tool = '',     // evidence only: recognized producer, e.g. 'phpunit'

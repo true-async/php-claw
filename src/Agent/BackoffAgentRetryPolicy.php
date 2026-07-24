@@ -20,22 +20,34 @@ final class BackoffAgentRetryPolicy implements AgentRetryPolicyInterface
         private readonly int $baseDelayMs = 500,
         private readonly int $maxDelayMs = 30_000,
         private readonly int $rateLimitWaitCeilingMs = 60_000,
+        private readonly int $rateLimitMaxAttempts = 8,
     ) {
     }
 
     public function delayBeforeRetry(AgentException $error, int $attempt): ?int
     {
-        if ($attempt >= $this->maxAttempts) {
-            return null;   // exhausted
-        }
-
         if (!($error instanceof TransientErrorInterface)) {
             return null;   // permanent (auth, bad request, unknown)
         }
 
+        // A rate limit gets a larger budget: each wait honors the server's own
+        // delay, and under parallel-run contention the limit recurs a few times
+        // before capacity frees up — maxAttempts-sized patience kills the run.
+        $budget = $error instanceof RateLimitException ? $this->rateLimitMaxAttempts : $this->maxAttempts;
+
+        if ($attempt >= $budget) {
+            return null;   // exhausted
+        }
+
         if ($error instanceof RateLimitException && $error->retryAfterMs > 0) {
             // Resume time too far away: do not block — let the caller report it.
-            return $error->retryAfterMs > $this->rateLimitWaitCeilingMs ? null : $error->retryAfterMs;
+            if ($error->retryAfterMs > $this->rateLimitWaitCeilingMs) {
+                return null;
+            }
+
+            // Pad the server's estimate: it is approximate, and parallel runs
+            // told the same resume time must not retry at the same instant.
+            return $error->retryAfterMs + random_int(100, 500 + intdiv($error->retryAfterMs, 4));
         }
 
         $delay = min($this->baseDelayMs * (2 ** ($attempt - 1)), $this->maxDelayMs);
