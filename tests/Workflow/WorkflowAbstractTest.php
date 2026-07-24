@@ -42,6 +42,9 @@ use Tests\Support\ScriptedAgent;
 
 final class WorkflowAbstractTest
 {
+    /** Monotonic id for {@see toolUse()} blocks, so calls in one exchange never collide. */
+    private int $toolUseId = 0;
+
     #[Test]
     public function runDrivesStepMethodsInDeclarationOrder(): void
     {
@@ -574,8 +577,13 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function aCriticIsAnOrdinaryAiThatGetsEveryToolToVerifyWith(): void
+    public function theCriticsPaletteReplacesComposedCommandsWithRecordedEvidence(): void
     {
+        // The critic reads whatever it needs, but the compose-a-command channels are deliberately
+        // absent from its palette: it executes only through `rerun_evidence` (replaying commands the
+        // reviewed step recorded) and it answers through `verdict`. Bare bash burned real review
+        // rounds on invented invocations, and `artifact` would record onto the very step under
+        // review. The review-only tools, in turn, must not exist for the working step.
         $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
         $registry = new Registry();
         $registry->add($this->echoTool('read'));
@@ -594,17 +602,359 @@ final class WorkflowAbstractTest
             #[Step(critic: 'ok')]
             public function make(): string
             {
-                return $this->ai('do it', []);   // the step itself takes no tools
+                return $this->ai('do it');   // the step works on the full palette
             }
         };
 
         $wf->run();
 
-        // request 0 = the step's own ai() ([] -> no tools); request 1 = the critic, which must see all —
-        // the two the run registered, plus `artifact`, which every workflow carries.
-        $names = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[1]->tools);
-        sort($names);
-        Assert::same($names, ['artifact', 'bash', 'read']);
+        // request 0 = the step: the run's tools plus `artifact`; the review-only tools do not exist here.
+        $step = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[0]->tools);
+        sort($step);
+        Assert::same($step, ['artifact', 'bash', 'read']);
+
+        // request 1 = the critic: bash and artifact are gone; rerun_evidence and verdict arrived.
+        $critic = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[1]->tools);
+        sort($critic);
+        Assert::same($critic, ['read', 'rerun_evidence', 'verdict']);
+    }
+
+    #[Test]
+    public function theCriticRerunsRecordedEvidenceVerbatimAndAcceptsThroughTheVerdictTool(): void
+    {
+        // `bash` is absent from the review palette, yet the replay must still run — on the run's own
+        // scope, because the command comes from the step's record, not from the model. And the final
+        // text is deliberately NOT 'OK': the verdict tool, not prose, is what accepts the step.
+        $bash = new class () implements ToolInterface {
+            /** @var list<string> */
+            public array $commands = [];
+
+            public function name(): string
+            {
+                return 'bash';
+            }
+
+            public function description(): string
+            {
+                return 'shell';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function handle(array $input): string
+            {
+                $this->commands[] = \is_string($input['command'] ?? null) ? $input['command'] : '';
+
+                return 'OK (3 tests, 5 assertions)';
+            }
+        };
+        $registry = new Registry();
+        $registry->add($bash);
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),                                // the step
+            $this->toolUse('rerun_evidence', ['label' => 'tests']),   // the critic replays the record
+            $this->toolUse('verdict', ['decision' => 'accept']),      // and accepts through the tool
+            $this->answer('reviewed, all good'),                      // closing prose — not 'OK'
+        );
+        $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('tests', evidence: 'OK (3 tests, 5 assertions)', from: 'vendor/bin/phpunit --testdox');
+            }
+        };
+
+        $wf->run();   // completes: the tool-recorded accept is the verdict
+
+        Assert::same($bash->commands, ['vendor/bin/phpunit --testdox']);   // the recorded command, verbatim
+    }
+
+    #[Test]
+    public function rerunEvidenceRefusesAnUnknownLabelAndNamesTheRecordedOnes(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),
+            $this->toolUse('rerun_evidence', ['label' => 'test']),   // no such label — 'tests' exists
+            $this->answer('OK'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('tests', evidence: 'OK', from: 'vendor/bin/phpunit');
+            }
+        };
+
+        $wf->run();
+
+        $refusal = $this->toolResults($worker);
+        Assert::true(str_contains($refusal, "no evidence labeled 'test'"));
+        Assert::true(str_contains($refusal, "'tests'"));   // the wrong label is answered with the right ones
+    }
+
+    #[Test]
+    public function aRejectWithoutACitedRubricItemAndFactIsRefusedAtTheCall(): void
+    {
+        // The citation is a parameter, not an exhortation: a reject that names no broken rule and no
+        // observed fact is not expressible — the call is refused and the reviewer must try again.
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),
+            $this->toolUse('verdict', ['decision' => 'reject']),
+            $this->answer('OK'),   // the reviewer concedes: nothing concrete to cite
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['ok' => 'must be fine'];
+            }
+
+            #[Step(critic: 'ok')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('work', 'the work');
+            }
+        };
+
+        $wf->run();
+
+        Assert::true(str_contains($this->toolResults($worker), 'must cite both'));
+    }
+
+    #[Test]
+    public function aRejectVerdictCarriesTheRubricItemAndTheFactToTheSupervisor(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('v1'),   // make() #1
+            $this->toolUse('verdict', [
+                'decision' => 'reject',
+                'rubric_item' => 'the work must include a test',
+                'fact' => 'the artifact contains no test at all',
+            ]),
+            $this->answer('rejected'),   // closes the critic's exchange
+            $this->answer('v2'),         // make() #2, on the guidance
+            $this->answer('OK'),         // critic #2 approves
+        );
+        $supervisor = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'add the missing test';
+            }
+        };
+        $wf = new CriticStepWorkflow($this->config(worker: $worker)->set(EnvKey::Ask, $supervisor), 'r1');
+
+        $wf->run();
+
+        Assert::same($wf->runs, 2);
+        Assert::true(str_contains((string) $supervisor->heard, 'Rubric item violated: the work must include a test'));
+        Assert::true(str_contains((string) $supervisor->heard, 'Observed: the artifact contains no test at all'));
+    }
+
+    #[Test]
+    public function aCannotVerifyVerdictEscalatesAsAVerificationFailureNotAFault(): void
+    {
+        // v1 had no such lane: "I could not check this" was findings, findings meant rework, and the
+        // rework churned on work nobody had faulted. The supervisor now hears what actually happened
+        // and settles it — here by accepting, so the step runs exactly once.
+        $worker = new ScriptedAgent(
+            $this->answer('v1'),
+            $this->toolUse('verdict', ['decision' => 'cannot_verify', 'reason' => 'no runnable evidence was recorded']),
+            $this->answer('recorded'),
+        );
+        $supervisor = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'accept';
+            }
+        };
+        $wf = new CriticStepWorkflow($this->config(worker: $worker)->set(EnvKey::Ask, $supervisor), 'r1');
+
+        $wf->run();
+
+        Assert::same($wf->runs, 1);   // accepted as-is; no rework was bought
+        Assert::true(str_contains((string) $supervisor->heard, 'COULD NOT VERIFY'));
+        Assert::true(str_contains((string) $supervisor->heard, 'no runnable evidence was recorded'));
+        Assert::false(str_contains((string) $supervisor->heard, 'did not pass review'));
+    }
+
+    #[Test]
+    public function aCannotVerifyWithNoSupervisorReRunsTheStepOnTheReason(): void
+    {
+        // Alone, the productive fix is the step's own: re-run and record the evidence the critic was
+        // missing. The reason is the guidance, so the re-run knows exactly what to record.
+        $worker = new ScriptedAgent(
+            $this->answer('v1'),
+            $this->toolUse('verdict', ['decision' => 'cannot_verify', 'reason' => 'record the test run as evidence']),
+            $this->answer('recorded'),
+            $this->answer('v2'),   // the re-run
+            $this->answer('OK'),   // critic #2 approves
+        );
+        $wf = new CriticStepWorkflow($this->config(worker: $worker), 'r1');
+
+        $wf->run();
+
+        Assert::same($wf->runs, 2);
+        Assert::same($wf->sawCritique, 'record the test run as evidence');
+    }
+
+    #[Test]
+    public function rerunEvidenceOnAStepWithNoRunnableEvidencePointsAtCannotVerify(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),
+            $this->toolUse('rerun_evidence', ['label' => 'tests']),   // nothing runnable was recorded
+            $this->answer('OK'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('claim', text: 'I ran the tests, trust me');   // a claim, not evidence
+            }
+        };
+
+        $wf->run();
+
+        $refusal = $this->toolResults($worker);
+        Assert::true(str_contains($refusal, 'recorded no runnable evidence'));
+        Assert::true(str_contains($refusal, 'cannot_verify'));
+    }
+
+    #[Test]
+    public function theVerdictToolRefusesEveryMalformedDecisionAtTheCall(): void
+    {
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),
+            $this->toolUse('verdict', ['decision' => 'maybe']),            // not a decision
+            $this->toolUse('verdict', ['decision' => 'cannot_verify']),    // no reason
+            $this->toolUse('verdict', ['decision' => 'accept']),
+            $this->answer('done'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['ok' => 'must be fine'];
+            }
+
+            #[Step(critic: 'ok')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('work', 'the work');
+            }
+        };
+
+        $wf->run();   // completes: the third call is a well-formed accept
+
+        $refusals = $this->toolResults($worker);
+        Assert::true(str_contains($refusals, "unknown decision 'maybe'"));
+        Assert::true(str_contains($refusals, 'must say in `reason`'));
+    }
+
+    #[Test]
+    public function aReplayThatFailsToStartIsAToolingProblemNotEvidenceAgainstTheWork(): void
+    {
+        // No `bash` in the run registry at all — the replay cannot start. The critic must be told
+        // this settles nothing about the work, and where that leads: cannot_verify.
+        $worker = new ScriptedAgent(
+            $this->answer('the work'),
+            $this->toolUse('rerun_evidence', ['label' => 'tests']),
+            $this->answer('OK'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'crt';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['gate' => 'the tests must be green'];
+            }
+
+            #[Step(critic: 'gate')]
+            public function make(): void
+            {
+                $this->ai('do it', []);
+                $this->artifact('tests', evidence: 'OK (3 tests)', from: 'vendor/bin/phpunit');
+            }
+        };
+
+        $wf->run();
+
+        $result = $this->toolResults($worker);
+        Assert::true(str_contains($result, 'could not re-run `vendor/bin/phpunit`'));
+        Assert::true(str_contains($result, 'tooling problem'));
+        Assert::true(str_contains($result, 'cannot_verify'));
     }
 
     #[Test]
@@ -1566,6 +1916,36 @@ final class WorkflowAbstractTest
     private function answer(string $text): AgentResponse
     {
         return new AgentResponse([new TextBlock($text)], [], StopReason::EndTurn, new Usage(), $text);
+    }
+
+    /**
+     * A model turn that calls one tool — id'd uniquely so several can share one exchange.
+     *
+     * @param array<string, mixed> $params
+     */
+    private function toolUse(string $name, array $params): AgentResponse
+    {
+        $call = new ToolUseBlock('t' . ++$this->toolUseId, $name, $params);
+
+        return new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage());
+    }
+
+    /** Every tool result the agent was ever shown, concatenated — how a tool refusal is asserted on. */
+    private function toolResults(ScriptedAgent $worker): string
+    {
+        $text = '';
+
+        foreach ($worker->requests as $request) {
+            foreach ($request->messages as $message) {
+                foreach ($message->content as $block) {
+                    if ($block instanceof ToolResultBlock) {
+                        $text .= $block->content . "\n";
+                    }
+                }
+            }
+        }
+
+        return $text;
     }
 
     /** A tool that echoes its 'x' input — lets a call's result and params be asserted. */

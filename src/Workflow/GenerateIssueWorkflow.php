@@ -44,11 +44,15 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
           - artifact — a named result, visible to every later step and to a critic;
           - handoff — a short note to the VERY NEXT step;
           - param — a concrete value a later step reads in CODE.
-        A step may carry a critic (a review sub-step) that judges its result. Critic discipline, by
-        cycle: a WRITE-CODE cycle's critic READS the code and judges it as code — it never runs the
-        tests (they may not exist yet, and a failed run there proves nothing). Running and judging the
-        tests belongs to the FINAL verify cycle — one critic at the end proves the whole green. Use a
-        critic ONLY where a result genuinely needs that independent check, never on every step.
+        A step may carry a critic (a review sub-step) that judges its result. A critic can execute
+        ONLY the commands the step itself recorded as evidence (the artifact tool's `command`
+        channel) — it cannot compose its own; so a step whose rubric turns on a command's outcome
+        (tests, lint) MUST record that run as evidence, or its critic cannot verify it. Critic
+        discipline, by cycle: a WRITE-CODE cycle's critic READS the code and judges it as code — it
+        never runs the tests (they may not exist yet, and a failed run there proves nothing). Running
+        and judging the tests belongs to the FINAL verify cycle — one critic at the end proves the
+        whole green. Use a critic ONLY where a result genuinely needs that independent check, never
+        on every step.
 
         THE PRINCIPLE — the FEWEST steps, no wasted motion:
           1. First decide whether the task needs splitting AT ALL. Most small tasks do NOT: a simple task

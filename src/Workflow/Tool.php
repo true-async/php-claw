@@ -23,10 +23,12 @@ final class Tool
     /**
      * @param string  $description what the tool does — shown to the model, so be concrete
      * @param ?string $name        the tool name the model calls; defaults to the method name in snake_case
+     * @param bool    $reviewOnly  exists only in a critic's exchange — the working steps never see it
      */
     public function __construct(
         public string $description,
         public ?string $name = null,
+        public bool $reviewOnly = false,
     ) {
     }
 }

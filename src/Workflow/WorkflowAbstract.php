@@ -85,6 +85,9 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private bool $reviewing = false;
 
+    /** The verdict the critic recorded through the `verdict` tool during the current review; transient. */
+    private ?Verdict $verdict = null;
+
     /**
      * The handoff fed into the current step's model context — what the previous step handed on. Formed
      * lazily from {@see $pendingHandoff} on the first ai() call of a step, and persisted as it is formed
@@ -161,7 +164,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /**
      * This workflow's own #[Tool] methods, wrapped as tools — discovered once by reflection, then cached.
      *
-     * @var ?list<ToolInterface>
+     * @var ?list<MethodTool>
      */
     private ?array $localTools = null;
 
@@ -363,23 +366,23 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 );
 
                 if ($workHistory === [] && $this->artifacts[$name] === []) {
-                    $findings = "step '{$name}' produced nothing: no model/tool work and no artifact. A step "
-                        . 'must do real work and leave a result; if it needs no review, it should carry no critic.';
+                    $verdict = Verdict::reject("step '{$name}' produced nothing: no model/tool work and no artifact. A step "
+                        . 'must do real work and leave a result; if it needs no review, it should carry no critic.');
                 } elseif ($priorAttempt !== null && $attempt === $priorAttempt) {
-                    $findings = 'the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
+                    $verdict = Verdict::reject('the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
                         . 'guidance changed nothing about the work. Another round cannot help: either the '
-                        . 'finding is wrong, or this step needs different guidance or a person.';
+                        . 'finding is wrong, or this step needs different guidance or a person.');
                 } else {
-                    $findings = $this->critic($name, $rubric, $artifacts);
+                    $verdict = $this->critic($name, $rubric, $artifacts);
                 }
 
                 $priorAttempt = $attempt;
 
-                if ($findings === null) {
+                if ($verdict->passes()) {
                     break;   // the critic is satisfied
                 }
 
-                $guidance = $this->superviseStep($name, $artifacts, $findings, ++$round, $maxRounds);
+                $guidance = $this->superviseStep($name, $artifacts, $verdict, ++$round, $maxRounds);
 
                 if ($guidance === null) {
                     break;   // the supervisor accepted the work as-is
@@ -465,12 +468,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
      *
      * Three channels, and the choice is about WHO WROTE THE CONTENT:
      *
-     *  - $evidence — the VERBATIM output of a tool the step ran, with $from naming the tool. Use this
-     *    whenever the rubric turns on a fact a command can settle: `$out = $this->tool('bash', [...]);
-     *    $this->artifact('tests', evidence: $out, from: 'bash')`. It is the only channel a step cannot
-     *    compose, which is exactly why it exists — a step once recorded "All tests passed." while the
-     *    suite was erroring, and the run closed the issue. Pass $text alongside it to add the step's
-     *    own reading of that output; it is kept and shown separately, as the step's claim.
+     *  - $evidence — the VERBATIM output of a command the step ran, with $from carrying THE COMMAND
+     *    ITSELF (not a tool name: the critic replays $from via rerun_evidence, so `from: 'bash'`
+     *    would replay the literal word). Use this whenever the rubric turns on a fact a command can
+     *    settle: `$out = $this->tool('bash', ['command' => $cmd]); $this->artifact('tests',
+     *    evidence: $out, from: $cmd)`. It is the only channel a step cannot compose, which is
+     *    exactly why it exists — a step once recorded "All tests passed." while the suite was
+     *    erroring, and the run closed the issue. Pass $text alongside it to add the step's own
+     *    reading of that output; it is kept and shown separately, as the step's claim.
      *  - $file — a path (relative to the project) the step wrote; the critic opens it itself.
      *  - $text — the step's own words. Fine for a decision or generated source; not proof of anything.
      *
@@ -611,6 +616,100 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $file !== '' ? $this->artifact($label, file: $file) : $this->artifact($label, text: $text);
 
         return "recorded '{$label}'.";
+    }
+
+    /**
+     * Where the reviewer's re-runs come from: ONLY commands the reviewed step itself recorded as
+     * evidence. The critic used to hold bare bash for this and burned review rounds inventing its
+     * own invocations (a phpunit call the project never had, failed on its own typo, three identical
+     * rounds); with the label as the sole input, a made-up command is not expressible — the worst
+     * possible input is a wrong label, and the refusal lists the right ones.
+     *
+     * Deliberately dispatched on the RUN's scope, not the review exchange's palette (which withholds
+     * `bash` — see {@see judge()}): the model chose only WHICH record to replay; the command text
+     * comes from the artifact, so this is not the shell-by-indirection hole the palette closes.
+     */
+    #[Tool(name: 'rerun_evidence', reviewOnly: true, description: 'Re-run a command the reviewed step '
+        . 'recorded as evidence, EXACTLY as recorded, and see its fresh output. Pass `label` — the '
+        . 'label of the evidence artifact. This is your only way to execute anything: verification '
+        . 'here means replaying recorded evidence, never composing commands of your own.')]
+    protected function rerunEvidence(string $label): string
+    {
+        $runnable = $this->runnableEvidence($this->currentStep);
+        $evidence = $runnable[$label] ?? null;
+
+        if ($evidence === null) {
+            throw new ToolException($runnable === []
+                ? "rerun_evidence: step '{$this->currentStep}' recorded no runnable evidence. If the rubric "
+                    . 'makes a claim only a command can settle, your verdict is cannot_verify.'
+                : "rerun_evidence: no evidence labeled '{$label}'. Recorded: '"
+                    . implode("', '", array_keys($runnable)) . "'.");
+        }
+
+        $result = $this->dispatchTool('bash', ['command' => $evidence->source], $this->env);
+
+        if ($result->isError) {
+            return "could not re-run `{$evidence->source}`: {$result->content}\nA re-run that failed to start "
+                . 'is a tooling problem, never evidence against the work — if no other recorded evidence '
+                . 'settles the claim, your verdict is cannot_verify.';
+        }
+
+        $exit = $result->meta === null ? '' : " (exit: {$result->meta->status})";
+
+        return "re-ran `{$evidence->source}`{$exit}. Its output was:\n" . self::clip($result->content);
+    }
+
+    /**
+     * A step's evidence artifacts that can actually be replayed (their source carries the command),
+     * keyed by label — the single predicate behind what {@see verificationToolbox()} advertises and
+     * what {@see rerunEvidence()} accepts, so the toolbox can never list a label the replay refuses.
+     *
+     * @return array<string, Artifact>
+     */
+    private function runnableEvidence(string $step): array
+    {
+        $runnable = [];
+
+        foreach ($this->artifacts[$step] ?? [] as $artifact) {
+            if ($artifact->kind === 'evidence' && $artifact->source !== '') {
+                $runnable[$artifact->label] = $artifact;
+            }
+        }
+
+        return $runnable;
+    }
+
+    /**
+     * The verdict is a TOOL, not a control word: the reply used to be matched against 'OK', so the
+     * difference between "accepted", "cannot check this", and findings lived in prose and was
+     * routinely lost. Here the decisions are enumerated and their required citations are parameters —
+     * a reject without the rubric item and the observed fact is refused at the call, not discovered
+     * in a rework round.
+     */
+    #[Tool(name: 'verdict', reviewOnly: true, description: 'Record your verdict on the reviewed step — '
+        . 'call this exactly once, as your final act of the review. `decision` is one of: accept (the '
+        . 'rubric is satisfied), reject (it is not — cite `rubric_item`, the rubric requirement '
+        . 'violated, and `fact`, the concrete thing YOU observed that shows it), or cannot_verify (a '
+        . 'checkable claim you could not establish with the tools you have — say why in `reason`).')]
+    protected function recordVerdict(string $decision, string $rubric_item = '', string $fact = '', string $reason = ''): string
+    {
+        if ($decision === Verdict::REJECT && (trim($rubric_item) === '' || trim($fact) === '')) {
+            throw new ToolException('verdict: a reject must cite both `rubric_item` (which rubric '
+                . 'requirement is violated) and `fact` (the concrete thing you observed that shows it)');
+        }
+
+        if ($decision === Verdict::CANNOT_VERIFY && trim($reason) === '') {
+            throw new ToolException('verdict: cannot_verify must say in `reason` what you could not establish and why');
+        }
+
+        $this->verdict = match ($decision) {
+            Verdict::ACCEPT => Verdict::accept(),
+            Verdict::REJECT => Verdict::reject("Rubric item violated: {$rubric_item}\nObserved: {$fact}"),
+            Verdict::CANNOT_VERIFY => Verdict::cannotVerify($reason),
+            default => throw new ToolException("verdict: unknown decision '{$decision}' — use accept, reject or cannot_verify"),
+        };
+
+        return "verdict recorded: {$decision}.";
     }
 
     /**
@@ -862,6 +961,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         foreach ($local as $tool) {
+            if ($tool->reviewOnly() && !$this->reviewing) {
+                continue;   // a review-only tool does not exist outside a critic's exchange
+            }
+
             $combined->add($tool);
         }
 
@@ -872,7 +975,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * This workflow's {@see Tool}-marked methods, each wrapped as a {@see MethodTool}. Discovered once
      * by reflection and cached; empty for a workflow that declares no local tools.
      *
-     * @return list<ToolInterface>
+     * @return list<MethodTool>
      */
     private function localTools(): array
     {
@@ -1043,13 +1146,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Judge a step's work against its rubric on the reviewer role: null = it passes, else the findings.
-     * The critic is an ORDINARY ai — it gets every tool, so it can actually verify (read the files the
-     * step wrote, run `php -l` or the tests) rather than judge a blurb. Its standing role, prepended
-     * here, is to REVIEW only: inspect and report, never do or fix the work itself. It judges the step's
-     * reviewable output — its rendered artifacts (`$output`, see {@see renderArtifacts()}).
+     * Judge a step's work against its rubric on the reviewer role. The critic is an ai on a REVIEW
+     * palette: it reads whatever it needs, but it executes only through `rerun_evidence` (replaying
+     * commands the step recorded) and it answers only through the `verdict` tool. Its standing role,
+     * prepended here, is to REVIEW only: inspect and report, never do or fix the work itself. It
+     * judges the step's reviewable output — its rendered artifacts (see {@see renderArtifacts()}).
      */
-    private function critic(string $name, string $rubric, string $artifacts): ?string
+    private function critic(string $name, string $rubric, string $artifacts): Verdict
     {
         $this->reviewing = true;
 
@@ -1074,17 +1177,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $sections = [];
         $commands = [];
 
-        foreach ($this->artifacts[$name] ?? [] as $artifact) {
-            if ($artifact->kind === 'evidence' && $artifact->source !== '') {
-                $graded = $artifact->status === ''
-                    ? ''
-                    : " → {$artifact->status}" . ($artifact->summary === '' ? '' : ": {$artifact->summary}");
-                $commands[] = "- `{$artifact->source}`{$graded}";
-            }
+        foreach ($this->runnableEvidence($name) as $artifact) {
+            $graded = $artifact->status === ''
+                ? ''
+                : " → {$artifact->status}" . ($artifact->summary === '' ? '' : ": {$artifact->summary}");
+            $commands[] = "- '{$artifact->label}': `{$artifact->source}`{$graded}";
         }
 
         if ($commands !== []) {
-            $sections[] = "Commands the step already ran as evidence (re-run THESE, verbatim):\n"
+            $sections[] = "Commands the step already ran as evidence — replay one with rerun_evidence(label):\n"
                 . implode("\n", $commands);
         }
 
@@ -1106,9 +1207,26 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return $sections === [] ? '' : "Your verification toolbox:\n\n" . implode("\n\n", $sections) . "\n\n";
     }
 
-    private function judge(string $name, string $rubric, string $artifacts): ?string
+    private function judge(string $name, string $rubric, string $artifacts): Verdict
     {
-        $verdict = trim($this->ai(
+        // The review palette, by subtraction so a tool added to the run later reaches the critic
+        // without a revisit here. What goes: every channel that composes a check or ACTS — `bash`
+        // and `php_eval` (a critic replays recorded evidence, it does not invent commands),
+        // `write_file` (a reviewer reports, it never fixes), `artifact` (recording would land on
+        // the step under review and pollute the very record being judged), and `define_workflow` /
+        // `project_manager` / `schedule` (on the authoring path the reviewer would otherwise hold
+        // the tool that overwrites the very solver it is judging). What arrives instead: the
+        // review-only `rerun_evidence` and `verdict`, present because {@see $reviewing} is set.
+        $registry = $this->withLocalTools($this->env->findRegistry());
+        $names = array_map(static fn (ToolInterface $t): string => $t->name(), $registry->all());
+        $toolNames = array_values(array_diff(
+            $names,
+            ['bash', 'php_eval', 'write_file', 'artifact', 'define_workflow', 'project_manager', 'schedule'],
+        ));
+
+        $this->verdict = null;
+
+        $reply = trim($this->ai(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
@@ -1120,26 +1238,50 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'while the suite was erroring, and was believed. So when the step CLAIMS to have ALREADY '
             . 'achieved something checkable — the tests pass, the lint is clean, a file now contains '
             . 'something, a command succeeded — you MUST establish it yourself with a tool and judge the '
-            . 'OUTPUT YOU SAW, never the summary. Replying OK on a claim you did not check is the one '
+            . 'OUTPUT YOU SAW, never the summary. Accepting a claim you did not check is the one '
             . "failure this review cannot have.\n\n"
             . 'The RUBRIC decides what counts, and it OUTRANKS this instruction. In particular: if it tells '
             . 'you the artifact is code or a plan that has NOT run yet, the project as it stands is not '
             . 'evidence about it. Judge it on its own terms and do NOT hold the current state of the files, '
             . "or a red test suite, against work that was never supposed to have happened yet.\n\n"
-            . 'Where verification does apply, verify against the PROJECT — and use the toolbox above: '
-            . 're-run the recorded commands VERBATIM rather than composing your own variant. A check that '
-            . 'itself failed to run (command not found, wrong path) is YOUR tooling problem, not evidence '
-            . 'against the work — fix the invocation or say plainly that you could not verify; never '
-            . 'reject for it. Do NOT go spelunking the journal: '
+            . 'Where verification does apply, your only executor is rerun_evidence: it replays a command '
+            . 'the step itself recorded, and you judge the output YOU see. You cannot compose commands '
+            . 'here — that is deliberate. A checkable claim that no recorded evidence and no tool of '
+            . 'yours can settle is a cannot_verify verdict: never reject because YOU could not check, '
+            . 'and never accept a bare claim. Do NOT go spelunking the journal: '
             . "recall(what='step', name='{$name}') is available ONCE if you need to see what the step did, "
             . "and not beyond that.\n\n"
-            . 'If it satisfies the rubric, reply with exactly: OK. Otherwise reply with the concrete problems '
-            . 'that must be fixed.',
-            null,   // every tool — a critic is a normal AI and must be able to verify, not just read
+            . 'When you have judged, CALL the `verdict` tool: accept if the rubric is satisfied; reject, '
+            . 'citing the rubric item violated and the concrete fact you observed; or cannot_verify with '
+            . 'the reason. The tool call is the verdict — prose alone is not one.',
+            $toolNames,
             'reviewer',
         ));
 
-        return strtoupper($verdict) === 'OK' ? null : $verdict;
+        $verdict = $this->takeVerdict();
+
+        if ($verdict !== null) {
+            return $verdict;
+        }
+
+        // The reviewer answered in prose instead of calling `verdict` — read the reply the way the
+        // old contract did, so a wayward model still lands the round somewhere sane.
+        return strtoupper($reply) === 'OK'
+            ? Verdict::accept()
+            : Verdict::reject($reply === '' ? 'the critic recorded no verdict and returned no findings' : $reply);
+    }
+
+    /**
+     * The verdict the review exchange recorded, taken and cleared — null when the `verdict` tool was
+     * never called. A method rather than an inline read: the field is written by {@see recordVerdict}
+     * through the tool executor mid-exchange, which no static view of {@see judge()} can see.
+     */
+    private function takeVerdict(): ?Verdict
+    {
+        $verdict = $this->verdict;
+        $this->verdict = null;
+
+        return $verdict;
     }
 
     /**
@@ -1174,12 +1316,11 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private function renderArtifacts(array $artifacts): string
     {
-        // No artifact does NOT mean "nothing to review": the critic is a real AI with every tool, so it
-        // verifies the step's effect by inspecting the project (reading the files it changed, running
-        // `php -l`/the tests). A genuinely empty step is for the critic to judge against the rubric, not
-        // for the engine to pre-fail.
+        // No artifact does NOT mean "nothing to review": the critic still reads the project, and a
+        // genuinely empty step is for it to judge against the rubric, not for the engine to pre-fail.
         return $artifacts === []
-            ? '(this step recorded no artifact — verify its effect yourself: read the files it changed and run `php -l` / the tests)'
+            ? '(this step recorded no artifact — inspect its effect yourself: read the files it touched; '
+                . 'a claim only a command could settle is cannot_verify, since nothing was recorded to re-run)'
             : implode("\n", array_map(static fn (Artifact $a): string => $a->render(), $artifacts));
     }
 
@@ -1187,19 +1328,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * The standing role prepended to every critic call — what the reviewer IS and may do. The default
      * casts it as a verify-only reviewer (inspect and report, never do or fix the work). A workflow
      * overrides this when its review needs a different stance; the engine still appends the rubric,
-     * the step's result, its artifacts, and the OK/findings protocol.
+     * the step's result, its artifacts, and the verdict protocol.
      */
     protected function criticRole(): string
     {
         return 'You are a REVIEWER of a workflow step. Your ONLY job is to verify the work against the '
-            . 'rubric: read the files the step touched and run the linters/tests yourself, then report on '
+            . 'rubric: read the files the step touched, replay its recorded evidence, and report on '
             . 'what you actually observed. Assume nothing from a summary — the step wrote that summary. '
             . 'Do NOT implement, edit, or fix anything yourself: you judge and list findings, nothing more.';
     }
 
     /**
-     * The critic rejected the step — consult the supervisor (the ask channel; behind it a supervisor
-     * agent, then a human). Returns guidance for a re-run, or null to accept the work as-is.
+     * The critic did not pass the step — consult the supervisor (the ask channel; behind it a
+     * supervisor agent, then a human). Returns guidance for a re-run, or null to accept the work as-is.
      *
      * Below the step's round cap ($maxRounds, default {@see DEFAULT_MAX_ROUNDS}) this self-corrects on
      * the critic's findings when no one is on the channel (the normal autonomous case). At/after the cap
@@ -1207,21 +1348,30 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * so it asks the supervisor whether to accept, retry, or stop — and if there is no one to ask, it
      * stops the step rather than churn the same rework forever.
      *
+     * A cannot-verify verdict is put to the supervisor as what it is — a verification failure, not a
+     * fault in the work — so the ladder settles it (accept / stop / say how to produce evidence)
+     * instead of the findings driving a rework of work nobody faulted. It still counts as a round:
+     * a critic that cannot verify attempt after attempt is churn like any other.
+     *
      * @throws WorkflowException when the supervisor says to stop, or the cap is hit with no one to ask
      */
-    private function superviseStep(string $name, string $work, string $findings, int $round, int $maxRounds): ?string
+    private function superviseStep(string $name, string $work, Verdict $verdict, int $round, int $maxRounds): ?string
     {
         $stuck = $round >= $maxRounds;
+        $findings = $verdict->findings;
         $channel = $this->env->find(EnvKey::Ask);
 
         if (!$channel instanceof SpeakerInterface) {
             if ($stuck) {
-                throw WorkflowException::stopped(
-                    "step '{$name}' still failed review after {$round} rounds, with no supervisor to escalate to",
-                );
+                // Name the actual failure: a step that could not be CHECKED did not "fail review".
+                throw WorkflowException::stopped($verdict->decision === Verdict::CANNOT_VERIFY
+                    ? "step '{$name}' could not be verified after {$round} rounds, with no supervisor to escalate to"
+                    : "step '{$name}' still failed review after {$round} rounds, with no supervisor to escalate to");
             }
 
-            return $findings;   // no supervisor/human -> self-correct using the critic's findings
+            // Self-correct: for a reject, on the findings; for a cannot-verify, the reason tells the
+            // step what evidence it failed to record — re-running to record it is the productive fix.
+            return $findings;
         }
 
         // $work is the step's result (its artifacts) — the same context the critic had, and on the run
@@ -1233,15 +1383,24 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // The two control words are quoted so the reply can be matched EXACTLY. Anything else is
         // guidance, which is the safe default: a misread must send the step back for another attempt,
         // never close it or kill the run.
-        $prompt = $stuck
-            ? "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
+        $prompt = match (true) {
+            $verdict->decision === Verdict::CANNOT_VERIFY => "Step '{$name}' went through review, but the critic COULD NOT VERIFY it "
+                . "— the work is not judged wrong; checking it failed.\n"
+                . ($stuck ? "This is round {$round} of {$maxRounds}: verification keeps failing.\n" : '')
+                . "What could not be established:\n{$findings}\n\n"
+                . "The step's result (artifacts):\n{$work}\n\n"
+                . 'Settle it: reply with exactly `accept` to take the work as-is, exactly `stop` to abort, '
+                . 'or guidance for one more attempt (for instance, how the step should record runnable '
+                . 'evidence). Anything else is read as guidance.',
+            $stuck => "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
                 . "Latest findings:\n{$findings}\n\nThe step's result (artifacts):\n{$work}\n\n"
                 . 'Is this OK? Reply with exactly `accept` to keep it as is, exactly `stop` to abort, '
-                . 'or guidance for one more try. Anything else is read as guidance.'
-            : "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
+                . 'or guidance for one more try. Anything else is read as guidance.',
+            default => "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
                 . "The step's result (artifacts):\n{$work}\n\n"
                 . 'Reply with guidance to fix it, or exactly `accept` to keep it as is, or exactly '
-                . '`stop` to abort. Anything else is read as guidance.';
+                . '`stop` to abort. Anything else is read as guidance.',
+        };
 
         $reply = $channel->reply($prompt);
         $answer = trim($reply ?? '');
@@ -1297,17 +1456,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /**
      * The traced dispatch behind {@see tool()}, returning the whole envelope — for the callers that
      * need more than the text, like the evidence recorder reading the tool's own result report.
+     * $scope overrides the resolution scope for the one caller entitled to it ({@see rerunEvidence},
+     * which replays a RECORDED command and must reach `bash` past the review palette).
      *
      * @param array<string, mixed> $params
      */
-    private function dispatchTool(string $name, array $params): ToolResultBlock
+    private function dispatchTool(string $name, array $params, ?Environment $scope = null): ToolResultBlock
     {
         $tracer = $this->tracer();
         $tracer?->toolCall($name, $params);
 
         // The ACTIVE scope, not the run's: inside an ai() exchange this is that call's narrowed palette,
         // so a tool the step withheld cannot be resolved and comes back as an honest refusal.
-        $scope = $this->activeScope ?? $this->env;
+        $scope ??= $this->activeScope ?? $this->env;
         $result = $scope->executor()->call(new ToolCall($this->env->findStore()->nextId(), $name, $params));
 
         $tracer?->toolResult($name, $result->content, $result->isError);
