@@ -152,18 +152,20 @@ final class Tracer
         string $mime = 'text/plain',
         string $source = '',
         string $note = '',
+        string $status = '',
+        string $tool = '',
+        string $summary = '',
     ): void {
         $data = ['label' => $label, 'kind' => $kind, 'value' => $value, 'ext' => $ext, 'mime' => $mime];
 
         // Evidence-only fields. Journaled apart from the output so a reader — the dashboard, or a
         // later recall — can still tell the tool's words from the step's claim about them, which is
-        // the whole reason the kind exists.
-        if ($source !== '') {
-            $data['source'] = $source;
-        }
-
-        if ($note !== '') {
-            $data['note'] = $note;
+        // the whole reason the kind exists. status/tool/summary are the runtime's OWN reading of a
+        // command's outcome (see Artifact::evidence()) — facts, not the step's words.
+        foreach (['source' => $source, 'note' => $note, 'status' => $status, 'tool' => $tool, 'summary' => $summary] as $key => $field) {
+            if ($field !== '') {
+                $data[$key] = $field;
+            }
         }
 
         $this->event(new TraceEvent('artifact', Level::Info, $data));

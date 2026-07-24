@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Workflow;
 
+use Claw\Tool\ToolResultMeta;
 use Claw\Workflow\Artifact;
 use Testo\Assert;
 use Testo\Test;
@@ -83,5 +84,37 @@ final class ArtifactTest
         // Stored apart, so a false summary cannot be mistaken for part of the output it contradicts.
         Assert::false(str_contains($a->value, 'the suite is green'));
         Assert::true(str_contains($rendered, "the step's own summary of it, which is a claim: the suite is green"));
+    }
+
+    #[Test]
+    public function evidenceKeepsTheToolsOwnReportAndDerivesNothing(): void
+    {
+        $graded = Artifact::evidence(
+            'tests',
+            "PHPUnit 9.6.35 by Sebastian Bergmann and contributors.\n\nOK (3 tests, 5 assertions)",
+            'php vendor/bin/phpunit tests/SorterTest.php',
+            '',
+            new ToolResultMeta('ok', 'phpunit', 'OK (3 tests, 5 assertions)'),
+        );
+
+        Assert::same($graded->status, 'ok');
+        Assert::same($graded->tool, 'phpunit');
+        Assert::same($graded->summary, 'OK (3 tests, 5 assertions)');
+
+        // no report — no grading; the record never invents one from the text
+        $bare = Artifact::evidence('run', "[exit 2]\nboom", 'my-script.sh');
+
+        Assert::same($bare->status, '');
+        Assert::same($bare->tool, '');
+        Assert::same($bare->summary, '');
+    }
+
+    #[Test]
+    public function pastedToolOutputIsRecognizable(): void
+    {
+        Assert::true(Artifact::looksLikeToolOutput("PHPUnit 9.6.35 by Sebastian Bergmann and contributors.\nOK (3 tests)"));
+        Assert::true(Artifact::looksLikeToolOutput('No syntax errors detected in src/Sorter.php'));
+        Assert::false(Artifact::looksLikeToolOutput('I decided to use a bubble sort because...'));
+        Assert::false(Artifact::looksLikeToolOutput('The tests are described in docs/testing.md'));
     }
 }

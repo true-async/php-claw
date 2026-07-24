@@ -301,6 +301,10 @@ final class TraceReader
                 'size' => \strlen($value),
                 'source' => (string) ($artifact['source'] ?? ''),
                 'note' => (string) ($artifact['note'] ?? ''),
+                // evidence outcome, derived by the runtime when the artifact was recorded
+                'status' => (string) ($artifact['status'] ?? ''),
+                'tool' => (string) ($artifact['tool'] ?? ''),
+                'summary' => (string) ($artifact['summary'] ?? ''),
             ];
         }
 

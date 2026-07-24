@@ -12,6 +12,7 @@ use Claw\Exec\ChainExecutor;
 use Claw\Exec\ExecutorInterface;
 use Claw\Exec\TimeoutMiddleware;
 use Claw\Tool\Registry;
+use Claw\Tool\ReportsResultMetaInterface;
 use Claw\Tool\ToolCall;
 
 /**
@@ -133,7 +134,16 @@ final class Environment
 
         return new ChainExecutor($middlewares, static function (ToolCall $call) use ($registry): ToolResultBlock {
             try {
-                return new ToolResultBlock($call->id, $registry->get($call->name)->handle($call->input), false);
+                $tool = $registry->get($call->name);
+                $content = $tool->handle($call->input);
+
+                // Same call frame as handle(), so the report cannot belong to any other execution.
+                return new ToolResultBlock(
+                    $call->id,
+                    $content,
+                    false,
+                    $tool instanceof ReportsResultMetaInterface ? $tool->resultMeta() : null,
+                );
             } catch (ToolException $e) {
                 return new ToolResultBlock($call->id, $e->getMessage(), true);
             }

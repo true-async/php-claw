@@ -13,7 +13,7 @@ use Claw\Exceptions\ToolException;
  * proc_open's pipes are driven by libuv, so the read is non-blocking; whether a
  * given command is allowed is the permission layer's job, not this tool's.
  */
-final readonly class BashTool implements ToolInterface
+final class BashTool implements ToolInterface, ReportsResultMetaInterface
 {
     /**
      * Signal numbers rather than `SIGTERM`/`SIGKILL`, because those constants come from `pcntl` and this
@@ -24,11 +24,19 @@ final readonly class BashTool implements ToolInterface
 
     private const int SIG_KILL = 9;
 
+    /** The report of the most recent handle() — read back through {@see resultMeta()}. */
+    private ?ToolResultMeta $last = null;
+
     public function __construct(
-        private string $cwd,
-        private ?Secrets $secrets = null,
-        private int $timeoutMs = 0,
+        private readonly string $cwd,
+        private readonly ?Secrets $secrets = null,
+        private readonly int $timeoutMs = 0,
     ) {
+    }
+
+    public function resultMeta(): ?ToolResultMeta
+    {
+        return $this->last;
     }
 
     public function name(): string
@@ -128,6 +136,16 @@ final readonly class BashTool implements ToolInterface
         // sees them. The command chose what to print; this decides what leaves the tool.
         $output = ($this->secrets ?? Secrets::none())->redact(trim($stdout . ($stderr !== '' ? "\n" . $stderr : '')));
 
+        // The structured report, declared by the one party that KNOWS: the exit code is held right
+        // here, the program that ran is named by the command, and its verdict line is lifted by the
+        // tool that ran it — nobody downstream re-parses the text.
+        $producer = self::producerOf($command);
+        $this->last = new ToolResultMeta(
+            $timedOut || $exit !== 0 ? 'fail' : 'ok',
+            $producer,
+            self::verdictOf($producer, $output),
+        );
+
         if ($timedOut) {
             $seconds = round($this->timeoutMs / 1000, 1);
 
@@ -139,6 +157,42 @@ final readonly class BashTool implements ToolInterface
         }
 
         return $output === '' ? '(no output)' : $output;
+    }
+
+    /** The known program named by the command line, or '' — drives the dashboard's badge and the verdict lift. */
+    private static function producerOf(string $command): string
+    {
+        return match (true) {
+            preg_match('/\bphpunit\b/', $command) === 1 => 'phpunit',
+            preg_match('/\bphp\s+-l\b/', $command) === 1 => 'php-lint',
+            preg_match('/\bphpstan\b/', $command) === 1 => 'phpstan',
+            preg_match('/\bcomposer\b/', $command) === 1 => 'composer',
+            default => '',
+        };
+    }
+
+    /**
+     * The producer's own verdict line, lifted verbatim from output a person would scan for anyway —
+     * so a viewer can show "OK (3 tests, 5 assertions)" without opening the body. Empty when the
+     * producer is unknown or printed nothing recognizable; the status stands on its own.
+     */
+    private static function verdictOf(string $producer, string $output): string
+    {
+        $line = match ($producer) {
+            'phpunit' => self::firstMatch('/^(OK \(.+\)|OK, but .+|FAILURES!|ERRORS!|No tests executed!)$/m', $output)
+                ?? self::firstMatch('/^Tests: .+$/m', $output),
+            'php-lint' => self::firstMatch('/^No syntax errors detected.*$/m', $output)
+                ?? self::firstMatch('/^(?:PHP )?Parse error:.*$/m', $output),
+            'phpstan' => self::firstMatch('/^\s*\[(?:OK|ERROR)\].*$/m', $output),
+            default => null,
+        };
+
+        return $line === null ? '' : trim($line);
+    }
+
+    private static function firstMatch(string $pattern, string $text): ?string
+    {
+        return preg_match($pattern, $text, $m) === 1 ? $m[0] : null;
     }
 
     /**
