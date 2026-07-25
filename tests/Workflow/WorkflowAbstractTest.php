@@ -1269,6 +1269,118 @@ final class WorkflowAbstractTest
     }
 
     /**
+     * The other way to get evidence without typing it: run the thing in the ordinary course of the work,
+     * then freeze THAT run. Every tool run the model makes comes back tagged with a `[run#N]` handle, and
+     * `artifact(run: 'run#N')` records the run's verbatim output as evidence — from the runtime's own
+     * record, never re-typed, and without running the thing a second time. A bash run keeps its command as
+     * the replayable source, so the critic can still rerun_evidence it.
+     */
+    #[Test]
+    public function aRunTheModelAlreadyDidCanBeFrozenIntoEvidenceByItsHandle(): void
+    {
+        $suite = "PHPUnit 9.6.34\n\nOK (12 tests, 20 assertions)";
+        $bash = new ToolUseBlock('t1', 'bash', ['command' => 'vendor/bin/phpunit']);
+        $promote = new ToolUseBlock('t2', 'artifact', ['label' => 'tests', 'run' => 'run#1', 'note' => 'green']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$bash], [$bash], StopReason::ToolUse, new Usage()),
+            new AgentResponse([$promote], [$promote], StopReason::ToolUse, new Usage()),
+            $this->answer('done'),
+        );
+
+        $registry = new Registry();
+        $registry->add($this->cannedTool('bash', $suite));
+
+        $sink = new ArrayTraceSink();
+        $env = $this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink));
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            #[StepAI]
+            protected function make(): AiStep
+            {
+                return new AiStep('run the tests, then record that run');
+            }
+        };
+
+        $wf->run();
+
+        // The model saw a handle appended to the run it made — that is how it knew to write run#1.
+        $sawHandle = false;
+
+        foreach ($worker->requests as $request) {
+            foreach ($request->messages as $message) {
+                foreach ($message->content as $block) {
+                    if ($block instanceof ToolResultBlock && str_contains($block->content, '[run#1]')) {
+                        $sawHandle = true;
+                    }
+                }
+            }
+        }
+
+        Assert::true($sawHandle);
+
+        // The frozen run became evidence: verbatim output, the command kept as its replayable source.
+        $recorded = [];
+
+        foreach ($sink->records as $record) {
+            if ($record->event()->type === 'artifact') {
+                $recorded = $record->event()->data;
+            }
+        }
+
+        Assert::same($recorded['kind'] ?? null, 'evidence');
+        Assert::same($recorded['value'] ?? null, $suite);                  // frozen from the ledger, not re-run
+        Assert::same($recorded['source'] ?? null, 'vendor/bin/phpunit');   // a bash run stays replayable
+        Assert::same($recorded['note'] ?? null, 'green');                  // the model's claim, kept apart
+    }
+
+    /**
+     * Freezing a run that was never made comes back as a TOOL ERROR the model can read and correct, not a
+     * crash — same contract as every other bad artifact call. The refusal names what went wrong so the
+     * model can run the thing first, then record its handle.
+     */
+    #[Test]
+    public function freezingARunThatDoesNotExistIsRefusedNotFatal(): void
+    {
+        $call = new ToolUseBlock('t1', 'artifact', ['label' => 'x', 'run' => 'run#7']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage()),
+            $this->answer('understood'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            #[StepAI]
+            protected function make(): AiStep
+            {
+                return new AiStep('record something');
+            }
+        };
+
+        $wf->run();
+
+        $refusal = '';
+        $key = array_key_last($worker->requests) ?? throw new \RuntimeException('no request was made');
+
+        foreach ($worker->requests[$key]->messages as $message) {
+            foreach ($message->content as $block) {
+                if ($block instanceof ToolResultBlock) {
+                    $refusal = $block->content;
+                }
+            }
+        }
+
+        Assert::true(str_contains($refusal, "no run 'run#7'"));
+        Assert::true(str_contains($refusal, 'have not run a tool'));
+    }
+
+    /**
      * A bad channel combination comes back as a TOOL ERROR the model can read and correct. It must not
      * be the LogicException the PHP-side artifact() throws: the executor turns only ToolException into a
      * tool result, so anything else takes the whole run down — and on a generated solver that crash then

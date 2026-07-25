@@ -13,6 +13,7 @@ use Claw\Agent\ToolUseBlock;
 use Claw\Agent\TurnLoopInterface;
 use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
+use Claw\Exec\ExecutorInterface;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\DeferredToolInterface;
@@ -77,6 +78,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /** The step currently running, so {@see artifact()} attaches its outputs to the right step; transient. */
     private string $currentStep = '';
+
+    /**
+     * Every tool run of the CURRENT step's work exchange, keyed by step then by the `run#N` handle the
+     * model sees appended to that run's output. It is how {@see recordArtifact()}'s `run` channel freezes
+     * a run the model ALREADY did into evidence — the output comes from here, the runtime's own record of
+     * the execution, never re-typed by the model, so it is proof the same way {@see recordArtifact()}'s
+     * `command` channel is, without running the thing a second time. Written by {@see recordRun()} through
+     * the recording executor; read by the `run` channel. Per-step so a later step cannot cite an earlier
+     * step's run.
+     *
+     * @var array<string, array<string, array{call: ToolCall, result: ToolResultBlock}>>
+     */
+    private array $runLedger = [];
 
     /**
      * True while a CRITIC's exchange is running — which happens inside the step it is reviewing, so
@@ -747,28 +761,34 @@ abstract class WorkflowAbstract implements WorkflowInterface
     #[Tool(name: 'artifact', description: 'Record a named output of this step: what you produced, kept in '
         . 'the run journal and shown to the reviewer who judges this step. Pass EXACTLY ONE of: '
         . '`text` (your own words — a decision, a summary, generated source: useful, but it is a claim); '
-        . '`file` (the path of a file you wrote — the reviewer opens it itself); or '
-        . '`command` (a shell command to RUN NOW, whose verbatim output is recorded as evidence — use '
-        . 'this whenever the thing being judged is a fact a command settles, such as tests passing or a '
-        . 'clean lint; do not paste output you already have, name the command and it will be re-run). '
-        . '`note` is optional and only meaningful with `command`: your own reading of the output, kept '
-        . 'separate from it and shown as your claim about it, never merged into the evidence.')]
+        . '`file` (the path of a file you wrote — the reviewer opens it itself); '
+        . '`run` (the handle of a tool run you ALREADY did this step — shown as `[run#N]` after that '
+        . "tool's output — to freeze THAT run's real output as evidence: prefer this over `command` when "
+        . 'you have already run the thing, e.g. you ran the tests and they passed — no need to run them '
+        . 'again); or `command` (a shell command to RUN NOW, whose verbatim output is recorded as '
+        . 'evidence — use when you have NOT run it yet; do not paste output you already have, name the '
+        . 'command and it will be run). `note` is optional and meaningful with `command` or `run`: your '
+        . 'own reading of the output, kept separate from it and shown as your claim about it.')]
     protected function recordArtifact(
         string $label,
         string $text = '',
         string $file = '',
         string $command = '',
+        string $run = '',
         string $note = '',
     ): string {
         if (trim($label) === '') {
             throw new ToolException("artifact: 'label' is required — it is how the reviewer refers to this output");
         }
 
-        $given = array_keys(array_filter(['text' => $text, 'file' => $file, 'command' => $command], static fn (string $v): bool => trim($v) !== ''));
+        $given = array_keys(array_filter(
+            ['text' => $text, 'file' => $file, 'command' => $command, 'run' => $run],
+            static fn (string $v): bool => trim($v) !== '',
+        ));
 
         if (\count($given) !== 1) {
             throw new ToolException(
-                'artifact: pass exactly one of `text`, `file` or `command`'
+                'artifact: pass exactly one of `text`, `file`, `command` or `run`'
                 . ($given === [] ? ' — none was given' : ' — got ' . implode(' and ', $given)),
             );
         }
@@ -782,6 +802,31 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 . 'that produced it (`command: "…"`); it will be re-run here and recorded verbatim as '
                 . 'evidence, with its real exit status.',
             );
+        }
+
+        if ($run !== '') {
+            $record = $this->runLedger[$this->currentStep][$run] ?? null;
+
+            if ($record === null) {
+                $handles = array_keys($this->runLedger[$this->currentStep] ?? []);
+
+                throw new ToolException($handles === []
+                    ? "artifact: no run '{$run}' — you have not run a tool this step whose output can be frozen. "
+                        . 'Run the command first, then record its `[run#N]`; or use `command` to run and record in one go.'
+                    : "artifact: no run '{$run}'. Runs you can freeze this step: '" . implode("', '", $handles) . "'.");
+            }
+
+            // The output comes from the ledger — the runtime's verbatim record of a real execution, not text
+            // the model typed — so this is evidence exactly as the `command` channel is, without a second run.
+            // `from` carries the shell command for a bash run so the reviewer can replay it (rerun_evidence);
+            // for any other tool there is nothing bash can replay, so it stays captured-but-not-replayable.
+            $call = $record['call'];
+            $out = self::clip($record['result']->content);
+            $source = $call->name === 'bash' ? (string) ($call->input['command'] ?? '') : '';
+            $this->artifact($label, text: $note !== '' ? $note : null, evidence: $out, from: $source, meta: $record['result']->meta);
+
+            return "recorded '{$label}' as evidence — the frozen output of {$run}"
+                . ($source !== '' ? " (`{$source}`)." : " ({$call->name}).");
         }
 
         if ($command !== '') {
@@ -1104,9 +1149,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private function makeTurnLoop(Environment $scope, string $system, ?SpeakerInterface $ask): TurnLoopInterface
     {
+        // The work exchange's runs are ledgered so the model can later freeze one into an artifact by its
+        // handle (see {@see $runLedger}). A critic's or an extraction's exchange is not the step's work —
+        // it never records artifacts — so it runs on the raw executor, unledgered.
+        $executor = ($this->reviewing || $this->extracting)
+            ? $scope->executor()
+            : $this->recordingExecutor($scope->executor());
+
         return new DefaultTurnLoop(
             $scope->findWorker(),
-            $scope->executor(),
+            $executor,
             $scope->findModelId(),
             $system,
             $scope->findRegistry(),
@@ -1127,6 +1179,49 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $this->env->findStore()->saveExchange($this->runId, $this->currentStep, $history);
             },
         );
+    }
+
+    /**
+     * Wrap the exchange's executor so every tool run the model makes is ledgered and comes back tagged
+     * with a `run#N` handle the model can later hand to `artifact(run:)`. The wrapping is one anonymous
+     * {@see ExecutorInterface} — a thin passthrough that reports each result to {@see recordRun()} — so
+     * the tool-running middleware chain underneath is untouched.
+     */
+    private function recordingExecutor(ExecutorInterface $inner): ExecutorInterface
+    {
+        return new class ($inner, $this->recordRun(...)) implements ExecutorInterface {
+            /** @param \Closure(ToolCall, ToolResultBlock): ToolResultBlock $onResult */
+            public function __construct(
+                private readonly ExecutorInterface $inner,
+                private readonly \Closure $onResult,
+            ) {
+            }
+
+            public function call(ToolCall $call): ToolResultBlock
+            {
+                return ($this->onResult)($call, $this->inner->call($call));
+            }
+        };
+    }
+
+    /**
+     * Ledger one run of the current step's work exchange and hand the model its handle. A handle is the
+     * ONLY way to later freeze this run into evidence, so it is appended to the output the model reads —
+     * `[run#3]` — and the run (its call and verbatim result) is kept for {@see recordArtifact()}'s `run`
+     * channel. Two kinds of run get NO handle, because promoting them is meaningless: a run that ERRORED
+     * (there is no real output to freeze), and the meta-tools whose output is not the step's work —
+     * `artifact` itself (freezing a recording of a recording) and `search_tools` (a palette lookup).
+     */
+    private function recordRun(ToolCall $call, ToolResultBlock $result): ToolResultBlock
+    {
+        if ($result->isError || \in_array($call->name, ['artifact', 'search_tools'], true)) {
+            return $result;
+        }
+
+        $handle = 'run#' . (\count($this->runLedger[$this->currentStep] ?? []) + 1);
+        $this->runLedger[$this->currentStep][$handle] = ['call' => $call, 'result' => $result];
+
+        return new ToolResultBlock($result->toolUseId, $result->content . "\n[{$handle}]", $result->isError, $result->meta);
     }
 
     /**
