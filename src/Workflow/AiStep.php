@@ -17,15 +17,18 @@ namespace Claw\Workflow;
 final readonly class AiStep
 {
     /**
-     * @param ?list<string> $tools null = every tool (default); a list = only those; [] = none — the same
-     *                             contract {@see WorkflowAbstract::ai()} already used
-     * @param ?string       $agent a named agent role (worker/reviewer/planner/…) whose model runs this
-     *                             exchange, or null for the run's default
+     * @param ?list<string>      $tools  null = every tool (default); a list = only those; [] = none — the
+     *                                   same contract {@see WorkflowAbstract::ai()} already used
+     * @param ?string            $agent  a named agent role (worker/reviewer/planner/…) whose model runs
+     *                                   this exchange, or null for the run's default
+     * @param list<ParamRequest> $params machine-readable values a later CODE step needs — extracted from
+     *                                   this exchange's accepted answer and delivered via setParam()
      */
     public function __construct(
         public string $prompt,
         public ?array $tools = null,
         public ?string $agent = null,
+        public array $params = [],
     ) {
     }
 }

@@ -86,6 +86,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private bool $reviewing = false;
 
+    /**
+     * True while an engine-internal continuation (param extraction) is running. Like {@see $reviewing} it
+     * suppresses the exchange checkpoint: extraction continues the step's OWN conversation, so without it a
+     * crash mid-extraction would leave the step's exchange row holding the extraction Q&A, which a resume
+     * would then replay as the step's work.
+     */
+    private bool $extracting = false;
+
     /** The verdict the critic recorded through the `verdict` tool during the current review; transient. */
     private ?Verdict $verdict = null;
 
@@ -476,6 +484,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
             $this->formPendingHandoff();   // form the PREVIOUS step's handoff before this one's exchange runs
             $workHistory = $this->reviewedExchange($name, $declaration, $rubric, $maxRounds);
+            $this->extractParams($declaration, $workHistory);   // hand any declared machine-readable values to later steps
         } finally {
             $this->critique = null;
             $this->currentStep = $previousStep;
@@ -557,6 +566,39 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         return $workHistory;
+    }
+
+    /**
+     * Deliver a {@see StepAI}'s machine-readable outputs. For each declared {@see ParamRequest}, CONTINUE
+     * the accepted work conversation with a dedicated request for exactly that value and pin it with
+     * {@see setParam()} for the target step — the same mechanism {@see formPendingHandoff()} uses for the
+     * prose handoff, addressed to a named step instead of the next one automatically. Runs under
+     * {@see $extracting} so its own turns are not checkpointed into the step's exchange row.
+     *
+     * @param list<Message> $workHistory
+     */
+    private function extractParams(AiStep $step, array $workHistory): void
+    {
+        if ($step->params === [] || $workHistory === []) {
+            return;
+        }
+
+        $this->extracting = true;
+
+        try {
+            foreach ($step->params as $request) {
+                $value = trim($this->runTurns(
+                    "Before this step ends, answer EXACTLY this and nothing else: {$request->instruction}\n\n"
+                    . 'Reply with only the value — no prose, no explanation, no quotes.',
+                    [],
+                    'extract',
+                    $workHistory,
+                ));
+                $this->setParam($request->forStep, $request->name, $value);
+            }
+        } finally {
+            $this->extracting = false;
+        }
     }
 
     /**
@@ -1132,8 +1174,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // has no idea what a step is; it only knows a turn has landed.
             /** @param list<Message> $history */
             function (array $history): void {
-                if ($this->reviewing) {
-                    return;   // a critic's conversation is not the step's; see $reviewing
+                if ($this->reviewing || $this->extracting) {
+                    return;   // a critic's or an extraction's conversation is not the step's work
                 }
 
                 $this->env->findStore()->saveExchange($this->runId, $this->currentStep, $history);

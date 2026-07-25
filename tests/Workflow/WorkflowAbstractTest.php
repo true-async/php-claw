@@ -32,6 +32,7 @@ use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\InMemoryStateStore;
+use Claw\Workflow\ParamRequest;
 use Claw\Workflow\Step;
 use Claw\Workflow\StepAI;
 use Claw\Workflow\Tool;
@@ -363,6 +364,46 @@ final class WorkflowAbstractTest
         Assert::true(str_contains((string) $supervisor->heard, 'Observed: the work has no test'));
         Assert::same($store->load('r1')['done'], ['work']);   // the step completed after the accepted re-run
         Assert::true(\count($worker->requests) >= 4);         // attempt, critic, re-run, critic — a re-run happened
+    }
+
+    #[Test]
+    public function anAiStepExtractsAParamForALaterCodeStep(): void
+    {
+        // A #[StepAI] hands a machine-readable value to a later CODE step: after the work settles the base
+        // asks the model for exactly that value and pins it; the code step reads it with param().
+        $worker = new ScriptedAgent(
+            $this->answer('I read the ticket; the change is localized'),   // the work exchange
+            $this->answer('simple'),                                       // the extraction: only the value
+        );
+        $store = new InMemoryStateStore();
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            public string $seen = '';
+
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function assess(): AiStep
+            {
+                return new AiStep('assess the size of the change', params: [
+                    new ParamRequest(forStep: 'route', name: 'size', instruction: 'One word: simple or complex.'),
+                ]);
+            }
+
+            #[Step]
+            protected function route(): void
+            {
+                $this->seen = (string) $this->param('size');
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($wf->seen, 'simple');                              // the code step read the extracted value
+        Assert::same($store->load('r1')['done'], ['assess', 'route']);  // both steps ran, in order
+        Assert::count($worker->requests, 2);                           // the work exchange plus one extraction call
     }
 
     #[Test]
