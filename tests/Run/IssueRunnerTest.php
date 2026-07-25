@@ -701,7 +701,8 @@ final class IssueRunnerTest
 
             namespace {$namespace};
 
-            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\AiStep;
+            use Claw\\Workflow\\StepAI;
             use Claw\\Workflow\\WorkflowAbstract;
 
             final class {$class} extends WorkflowAbstract
@@ -711,10 +712,10 @@ final class IssueRunnerTest
                     return 'talking-solver';
                 }
 
-                #[Step]
-                protected function implement(): void
+                #[StepAI]
+                protected function implement(): AiStep
                 {
-                    \$this->ai('do the thing');
+                    return new AiStep('do the thing');
                 }
             }
 
