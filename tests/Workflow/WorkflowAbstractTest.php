@@ -302,6 +302,70 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function anAiStepUnderACriticReRunsOnTheSupervisorsGuidance(): void
+    {
+        // A #[StepAI] carries its critic on the attribute. The critic rejects the first attempt; the
+        // supervisor's guidance drives a re-run that CONTINUES the exchange; the second attempt passes —
+        // the same review loop the imperative path uses, over a declared exchange instead of a body.
+        $worker = new ScriptedAgent(
+            $this->toolUse('artifact', ['label' => 'work', 'text' => 'first attempt']),   // attempt 1 records its output
+            $this->answer('done'),                                                        // attempt 1 finishes
+            $this->toolUse('verdict', [                                                   // critic 1 rejects
+                'decision' => 'reject',
+                'rubric_item' => 'the work must be tested',
+                'fact' => 'the work has no test',
+            ]),
+            $this->answer('reviewed'),                                                    // closes critic 1's exchange
+            $this->toolUse('artifact', ['label' => 'work', 'text' => 'second attempt']),  // attempt 2 records a different output
+            $this->answer('done'),                                                        // attempt 2 finishes on the guidance
+            $this->answer('OK'),                                                          // critic 2 accepts
+        );
+        $supervisor = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'add the missing test';
+            }
+        };
+
+        $store = new InMemoryStateStore();
+        $env = $this->config(worker: $worker, store: $store)->set(EnvKey::Ask, $supervisor);
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['reviewed' => 'the work must be tested'];
+            }
+
+            #[StepAI(critic: 'reviewed')]
+            protected function work(): AiStep
+            {
+                return new AiStep('do the work');
+            }
+        };
+
+        $wf->run();
+
+        // the reject reached the supervisor with the rubric item and the observed fact
+        Assert::true(str_contains((string) $supervisor->heard, 'Rubric item violated: the work must be tested'));
+        Assert::true(str_contains((string) $supervisor->heard, 'Observed: the work has no test'));
+        Assert::same($store->load('r1')['done'], ['work']);   // the step completed after the accepted re-run
+        Assert::true(\count($worker->requests) >= 4);         // attempt, critic, re-run, critic — a re-run happened
+    }
+
+    #[Test]
     public function toolResolvesThroughTheRegistryAndReturnsItsContent(): void
     {
         $registry = new Registry();

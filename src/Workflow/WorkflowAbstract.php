@@ -332,7 +332,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         try {
             $step = $this->stepAttribute($name);   // reflect the Step attribute once, read both fields off it
-            $rubric = $this->criticRubric($step, $name);
+            $rubric = $this->criticRubric($step?->critic, $name);
             $this->critique = null;
 
             // Run the step; if it declares a critic, judge the ARTIFACTS it produced (its reviewable
@@ -340,7 +340,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // supervisor guide a re-run — until the critic passes, the supervisor accepts/stops, the
             // soft round cap escalates, or the budget runs out.
             $round = 0;
-            $maxRounds = $this->maxRounds($step);
+            $maxRounds = $this->maxRounds($step?->maxRounds);
             $workHistory = [];
             $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
             $priorAttempt = null;   // fingerprint of the previous attempt's artifacts — see the identical-attempt stop
@@ -383,17 +383,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
                     $this->artifacts[$name],
                 );
 
-                if ($workHistory === [] && $this->artifacts[$name] === []) {
-                    $verdict = Verdict::reject("step '{$name}' produced nothing: no model/tool work and no artifact. A step "
-                        . 'must do real work and leave a result; if it needs no review, it should carry no critic.');
-                } elseif ($priorAttempt !== null && $attempt === $priorAttempt) {
-                    $verdict = Verdict::reject('the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
-                        . 'guidance changed nothing about the work. Another round cannot help: either the '
-                        . 'finding is wrong, or this step needs different guidance or a person.');
-                } else {
-                    $verdict = $this->critic($name, $rubric, $artifacts);
-                }
-
+                $verdict = $this->verdictFor(
+                    $name,
+                    $rubric,
+                    $artifacts,
+                    $workHistory === [] && $this->artifacts[$name] === [],
+                    $priorAttempt !== null && $attempt === $priorAttempt,
+                );
                 $priorAttempt = $attempt;
 
                 if ($verdict->passes()) {
@@ -455,6 +451,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $span = $tracer?->enterStep($name);
         $previousStep = $this->currentStep;
         $this->currentStep = $name;
+        $this->critique = null;
+        $this->reentered[$name] = true;   // this step's exchange is base-driven; a critic's own ai() must not reload it
         $workHistory = [];
 
         // A back() into this step re-enters it fresh (its exchange was cleared when it finished); continuing
@@ -466,21 +464,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         try {
-            $this->artifacts[$name] = [];
-            $this->writtenPaths = [];
-
             $declaration = $this->{$name}();
 
             if (!$declaration instanceof AiStep) {
                 throw new \LogicException("step '{$name}' is marked #[StepAI] but did not return an AiStep declaration");
             }
 
+            $attribute = $this->aiAttribute($name);
+            $rubric = $this->criticRubric($attribute?->critic, $name);
+            $maxRounds = $this->maxRounds($attribute?->maxRounds);
+
             $this->formPendingHandoff();   // form the PREVIOUS step's handoff before this one's exchange runs
-            $this->runAiExchange($name, $declaration);
-            $workHistory = $this->lastHistory;
-            $this->recordWrittenFiles($workHistory);
-            $this->emitWrittenFileArtifacts();
+            $workHistory = $this->reviewedExchange($name, $declaration, $rubric, $maxRounds);
         } finally {
+            $this->critique = null;
             $this->currentStep = $previousStep;
             $tracer?->exit($span);
         }
@@ -490,6 +487,76 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
         $this->env->findStore()->clearExchange($this->runId, $name);
+    }
+
+    /** The {@see StepAI} attribute on $name, instantiated, or null when the method is not an AI step. */
+    private function aiAttribute(string $name): ?StepAI
+    {
+        $attributes = new \ReflectionMethod($this, $name)->getAttributes(StepAI::class);
+
+        return $attributes === [] ? null : $attributes[0]->newInstance();
+    }
+
+    /**
+     * The AI step's exchange under its critic. Round 0 runs (or resumes) the declared exchange; while the
+     * critic is unhappy the supervisor guides a re-run that CONTINUES the prior attempt with the guidance
+     * as its next turn — until the critic passes, the supervisor accepts/stops, or the cap escalates. With
+     * no rubric it is a single exchange. The judge/guard/supervise is the same the imperative path uses
+     * (via {@see verdictFor()} and {@see superviseStep()}); only PRODUCING an attempt differs — a declared
+     * exchange, not a hand-written body.
+     *
+     * @return list<Message>
+     */
+    private function reviewedExchange(string $name, AiStep $step, ?string $rubric, int $maxRounds): array
+    {
+        $round = 0;
+        $priorAttempt = null;
+        $workHistory = [];
+
+        while (true) {
+            $this->artifacts[$name] = [];
+            $this->writtenPaths = [];
+
+            if ($round === 0) {
+                $this->runAiExchange($name, $step);
+            } else {
+                $this->runTurns((string) $this->critique, $step->tools, $step->agent, $workHistory);   // continue with guidance
+            }
+
+            $workHistory = $this->lastHistory;   // capture BEFORE the critic, whose own ai() clobbers lastHistory
+            $this->recordWrittenFiles($workHistory);
+            $this->emitWrittenFileArtifacts();
+
+            if ($rubric === null) {
+                break;
+            }
+
+            $artifacts = $this->renderArtifacts($this->artifacts[$name]);
+            $attempt = array_map(static fn (Artifact $a): array => [$a->label, $a->kind, $a->value], $this->artifacts[$name]);
+            $verdict = $this->verdictFor(
+                $name,
+                $rubric,
+                $artifacts,
+                $workHistory === [] && $this->artifacts[$name] === [],
+                $priorAttempt !== null && $attempt === $priorAttempt,
+            );
+            $priorAttempt = $attempt;
+
+            if ($verdict->passes()) {
+                break;
+            }
+
+            $guidance = $this->superviseStep($name, $artifacts, $verdict, ++$round, $maxRounds);
+
+            if ($guidance === null) {
+                break;   // the supervisor accepted the work as-is
+            }
+
+            $this->critique = $guidance;
+            $this->enforceBudget();
+        }
+
+        return $workHistory;
     }
 
     /**
@@ -1301,10 +1368,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * actual rules live in {@see criticRules()}, keyed by that name. Null when the step has no critic.
      * An unknown name is a generation bug — fail loud rather than judge against an empty rubric.
      */
-    private function criticRubric(?Step $step, string $name): ?string
+    private function criticRubric(?string $critic, string $name): ?string
     {
-        $critic = $step?->critic;
-
         if ($critic === null || $critic === '') {
             return null;
         }
@@ -1318,12 +1383,31 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return $rules;
     }
 
-    /** The soft critic-round cap for a step — its `#[Step(maxRounds: N)]`, else the workflow default. */
-    private function maxRounds(?Step $step): int
+    /** The soft critic-round cap a step declared (`#[Step(maxRounds: N)]` / `#[StepAI(...)]`), else the default. */
+    private function maxRounds(?int $max): int
     {
-        $max = $step?->maxRounds;
-
         return $max !== null && $max > 0 ? $max : self::DEFAULT_MAX_ROUNDS;
+    }
+
+    /**
+     * The verdict on one attempt: the two deterministic guards first — a step that produced nothing, or a
+     * re-run byte-identical to the last, neither worth an AI critic's round — else the AI critic. Shared by
+     * both step kinds so the guards and their wording cannot drift between them.
+     */
+    private function verdictFor(string $name, string $rubric, string $artifacts, bool $producedNothing, bool $identical): Verdict
+    {
+        if ($producedNothing) {
+            return Verdict::reject("step '{$name}' produced nothing: no model/tool work and no artifact. A step "
+                . 'must do real work and leave a result; if it needs no review, it should carry no critic.');
+        }
+
+        if ($identical) {
+            return Verdict::reject('the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
+                . 'guidance changed nothing about the work. Another round cannot help: either the '
+                . 'finding is wrong, or this step needs different guidance or a person.');
+        }
+
+        return $this->critic($name, $rubric, $artifacts);
     }
 
     /**
