@@ -95,7 +95,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             'You are planning how to solve this task by writing a workflow — triage has already decided '
             . 'one is warranted, so do NOT re-litigate that. Inspect the project to ground the plan (read '
             . 'the code the ticket touches, its tests, how it is laid out), then, in a few concrete '
-            . "sentences, outline the DISTINCT STAGES the workflow should take. Describe the WORK, not the "
+            . 'sentences, outline the DISTINCT STAGES the workflow should take. Describe the WORK, not the '
             . "algorithm:\n\n" . $this->taskSummary(),
             null,   // FULL palette by default — the planner may read the project AND query the knowledge base
             'worker-smart',   // planning a whole workflow is heavy thinking — use the strong tier
@@ -200,7 +200,12 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         $plan = (string) $this->param('plan');
 
         return [
-            'solverReview' => "You are reviewing the GENERATED SOURCE of a solver class (the step's artifact). "
+            'solverReview' => 'You are reviewing the GENERATED SOURCE of a solver class. The full source is '
+                . 'ALREADY IN FRONT OF YOU — it is the `solver-class` artifact shown under "Artifacts it '
+                . 'recorded". READ IT THERE and judge it. Do NOT call recall, knowledge, list_files or any '
+                . "tool to 'find' or 'access' it — it is NOT a file and NOT a knowledge note, it is the text "
+                . "already in this prompt, and a verdict that reports the artifact 'could not be accessed' "
+                . "has simply failed to read what it was handed.\n\n"
                 . 'This code is NOT executed now — it RUNS LATER against the project. So do NOT reject it for '
                 . "'no artifacts were produced' or 'the tests were not run': there are no run artifacts at "
                 . 'generation time, and that is correct — the artifact under review IS the source itself. The '
