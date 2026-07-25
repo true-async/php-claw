@@ -97,7 +97,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             . 'workflow should take to solve this task, AND assess whether the project is mature with '
             . 'an established architecture and whether the change is foundational — this decides '
             . "whether a human must approve the design before it is implemented:\n\n" . $this->taskSummary(),
-            ['read_file', 'list_files'],
+            null,   // FULL palette by default — the planner may read the project AND query the knowledge base
             'worker-smart',   // planning a whole workflow is heavy thinking — use the strong tier
             params: [new ParamRequest(
                 forStep: 'draft',
@@ -125,7 +125,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             'Rate how hard this coding task is for an AI to solve correctly — simple, moderate or complex — '
             . 'and give one sentence of reasoning. Simple = a localized, mechanical change; complex = subtle '
             . "logic, wide blast radius, or design judgement.\n\nTask:\n{$this->taskSummary()}",
-            [],
+            null,   // FULL palette — let the rater look at the project if that sharpens its judgement
             'supervisor-smart',
             params: [new ParamRequest(
                 forStep: 'draft',
@@ -148,7 +148,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     {
         return new AiStep(
             $this->draftPrompt(),
-            ['artifact'],   // the only move the drafter needs: record the source it writes
+            null,   // FULL palette — the drafter reads the project, queries the KB, runs commands, AND records via artifact
             'worker-smart',
             params: [new ParamRequest(
                 forStep: 'save',
@@ -356,7 +356,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
                     return new AiStep(
                         'Read src/Foo.php, add the method the ticket asks for, then run `php -l` on the file '
                         . 'and fix any error before you stop. Record the finished file with the artifact tool.',
-                        ['read_file', 'write_file', 'bash', 'artifact'],
+                        null,   // null = EVERY tool (the norm). Pass a list ONLY to deliberately restrict a step.
                         '{$workerTier}',
                     );
                 }
@@ -377,19 +377,19 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - write each AI step as a `protected` method marked `#[StepAI]` returning an `AiStep` (NOT public, NOT private — the base run() drives them and the code is rejected otherwise); the default run() runs the steps in declaration order
             - the #[StepAI] method is PURE: build the prompt from the ticket, params and issue and RETURN `new AiStep(\$prompt, \$tools, \$agent, params: [...])`. Do NOT call the model, write files or record artifacts in the body — those happen inside the exchange the base runs from your declaration
             - GRANULARITY — SCALE the number of steps to the task's difficulty (assessed as **{$difficulty}**). A SIMPLE/trivial task needs only 1–3 steps — and a SINGLE step (implement-and-verify in one) is perfectly fine for it; do NOT force the full phase-by-phase recipe onto a simple task; the extra steps cost more and add failure surface for no benefit. A MODERATE task wants a handful of focused steps. Reserve the full breakdown (design / review / implement-per-method / test / deliver) for genuinely COMPLEX work. The reason to split AT ALL: each step's exchange starts with a fresh, lean context (one fat step re-sends a huge growing history — expensive), and a small step is a unit a critic can check. BUT every step must be a COHERENT unit of REAL work that produces something validatable (an artifact, a passing gate) — never a step that just asks a question or restates a plan. When in doubt, FEWER steps: prefer the smallest decomposition that still lets each piece be verified. Not one giant step, and not a parade of ceremonial ones.
-            - a step's OUTPUT rides one of THREE channels — NEVER a field of prose and NEVER a return value: (a) ARTIFACT — the GLOBAL channel, visible to every later step (via recall) AND to this step's critic. A #[StepAI] cannot record one itself (it is pure), so tell the MODEL to call the `artifact` tool in the prompt and put `'artifact'` in the step's tool list; (b) HANDOFF — the automatic prose baton to the VERY NEXT step (below), formed for you; (c) PARAM — an addressed concrete value for ONE named later step's CODE.
+            - a step's OUTPUT rides one of THREE channels — NEVER a field of prose and NEVER a return value: (a) ARTIFACT — the GLOBAL channel, visible to every later step (via recall) AND to this step's critic. A #[StepAI] cannot record one itself (it is pure), so tell the MODEL to call the `artifact` tool in the prompt (it is already in the default palette — you do NOT narrow the step to it); (b) HANDOFF — the automatic prose baton to the VERY NEXT step (below), formed for you; (c) PARAM — an addressed concrete value for ONE named later step's CODE.
             - PARAMS — declare them ON the AiStep, do not set them yourself: pass `params: [new ParamRequest(forStep: '<method>', name: '<key>', instruction: '<ask the model for exactly that value>')]`. After the step's exchange settles the base asks the model for that value and pins it FOR `<method>`, which reads it with `\$this->param('<key>')`. Use it for a concrete value a later CODE step needs deterministically — a path, a count, an id, a produced source — not prose. DURABLE (survives a resume) and OPTIONAL; most steps pass nothing this way.
             - to have a step reviewed automatically, mark it `#[StepAI(critic: '<name>')]` and have its MODEL record the result as an artifact (via the `artifact` tool) — the critic judges that artifact. On a reject the base re-runs the exchange on the supervisor's guidance; fold `\$this->critique()` (null on the first run) into your prompt IF you want the re-run to see the findings verbatim — fitting for a SOLID/design review or a test-and-accept gate
-            - the artifact the critic judges is recorded BY THE MODEL, in the exchange: tell it to call the `artifact` tool (and expose `'artifact'` in the step's tools). A critic does NOT strictly require one — it is a real reviewer AI with every tool and can verify by reading the files the step changed and running `php -l`/the tests
+            - the artifact the critic judges is recorded BY THE MODEL, in the exchange: tell it to call the `artifact` tool (already in the default palette). A critic does NOT strictly require one — it is a real reviewer AI with every tool and can verify by reading the files the step changed and running `php -l`/the tests
             - EVIDENCE — when a step's critic checks a FACT a command can settle (the tests pass, the lint is clean), the model MUST record the command's own output, not a sentence: tell it to call the `artifact` tool with `command` set to the command — it runs there and then and keeps the verbatim output with its real exit status, verifying and recording in the one exchange. A `text` artifact is a CLAIM and can say anything — one such step recorded "All tests passed." while the suite was erroring and the issue was closed on it
             - RECONCILE every step with its critic. Put `#[StepAI(critic: ...)]` on a step ONLY when its model records a JUDGEABLE artifact the rubric can check. Do NOT gate a step that produces nothing to review — that mismatch wedges a run. And for every critic name you use, you MUST define its rules in `criticRules()`
             - the critic is a REAL reviewer AI with every tool: it will OPEN the file artifacts, run `php -l`/the tests itself, and judge — it does not just read your summary. So make the work actually correct; a confident summary over a broken file will be caught
             - the critic name is just a key: for EVERY name you use you MUST define its actual rules by overriding `protected function criticRules(): array`, returning `['<name>' => '<the concrete criteria the reviewer checks>', ...]` — the reviewer is judged ONLY against this text, so spell the criteria out in full; a name with no rules makes the run fail. THE REVERSE IS ALSO REJECTED at save: a criticRules() entry no `#[StepAI(critic: ...)]` consumes is a review that silently never runs. The binding, in full — the attribute names the key, the key holds the rules:
               `#[StepAI(critic: 'testsGreen', maxRounds: 3)]`
-              `protected function verify(): AiStep { return new AiStep('Run the suite and record it via the artifact tool with command: vendor/bin/phpunit', ['artifact']); }`
+              `protected function verify(): AiStep { return new AiStep('Run the suite and record it via the artifact tool with command: vendor/bin/phpunit'); }`
               `protected function criticRules(): array { return ['testsGreen' => 'the recorded phpunit evidence shows OK (all tests pass); reject on any failure or on a claim without the evidence artifact']; }`
             - a critic step re-runs until it passes; after a SMALL soft cap of rework rounds (default 2) the run escalates to a supervisor — a critic is meant to bounce a step once or twice, not churn dozens of rounds. Tune it with `#[StepAI(critic: '<name>', maxRounds: <n>)]` — raise it only for a step that legitimately churns, keep it low elsewhere
-            - DECLARE the exchange, do not call the model: `new AiStep(string \$prompt, ?array \$tools = null, ?string \$agent = null, array \$params = [])`. `\$tools = null` exposes EVERY tool (the norm); a list restricts (e.g. `['artifact']`); `[]` is pure reasoning that cannot act. Reach tools from a CODE step with `\$this->tool(string \$name, array \$params)`
+            - TOOLS — by DEFAULT a step gets EVERY tool: omit the tools argument, or pass `null`. THAT IS THE NORM AND WHAT YOU SHOULD DO — a capable model needs its whole palette (read and write files, run commands, `http_request` the network, query the knowledge base, record artifacts). Pass a LIST only to DELIBERATELY restrict a step from a capability it must not have (rare); `[]` forbids tools entirely (a pure-reasoning call). Do NOT narrow by default — a starved step cannot solve the task. Declare it: `new AiStep(string \$prompt, ?array \$tools = null, ?string \$agent = null, array \$params = [])`; reach tools from a CODE step with `\$this->tool(string \$name, array \$params)`
             - you may give THIS workflow its own bespoke tools: mark a method `#[\\Claw\\Workflow\\Tool(description: '<what it does>')]` and it becomes a tool the model can call inside your steps (named after the method in snake_case; its typed params become the input schema). Use it to let the model check and FIX its own work in the same exchange — e.g. a `validate()` tool that runs `php -l` / the tests via `\$this->tool('bash', ...)` and returns OK or the error
             - route a step to a specialized agent role via the 3rd arg, e.g. `new AiStep(\$p, null, 'reviewer')`; roles: worker (cheap default), worker-smart (stronger model), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
             - this task was assessed as **{$difficulty}**; route the solver's own implementation/test steps to `agent: '{$workerTier}'` so the work runs on the right-sized model (keep reviewer/supervisor steps on their roles)

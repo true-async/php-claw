@@ -37,7 +37,7 @@ final class SuperviseWorkflow extends WorkflowAbstract
     {
         return new AiStep(
             $this->repairPrompt(),
-            [],
+            null,   // FULL palette — the repair model may read the project to find the real cause
             'supervisor',
             params: [new ParamRequest(
                 forStep: 'save',
