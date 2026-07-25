@@ -37,9 +37,10 @@ use Claw\Trace\Tracer;
  *  - {@see run()} is just the entry point — by default it drives the step methods in order, but
  *    the author may override it and orchestrate by hand (plain if/while), calling step() as needed.
  *
- * A critic, though, IS machinery here: a step can declare {@see Step::$critic}, and the driver judges
- * the step's RESULT (the method's return value) against it on the reviewer role; while it falls short,
- * the supervisor (the ask channel) guides a re-run — a declarative aspect, not a hand-written sub-step.
+ * A critic, though, IS machinery here: a step — imperative {@see Step} or declarative {@see StepAI} —
+ * can declare one, and the driver judges the step's recorded artifacts against it on the reviewer role;
+ * while it falls short, the supervisor (the ask channel) guides a re-run — a declarative aspect, not a
+ * hand-written sub-step.
  *
  * The critic is a gate the step cannot open from the inside, and there is no longer any way for a step
  * to open it from the inside: a worker does its work and returns, and whether the run ends is decided
@@ -54,8 +55,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * a step and let it fix itself once or twice; if two rounds do not close the findings, the problem is
      * usually a mismatch (the step's prompt vs the critic's rubric) or a task that truly needs a human, not
      * "one more try" — so we escalate rather than churn dozens of rounds burning tokens. A step that
-     * legitimately churns (e.g. a test gate) raises it per case via `#[Step(maxRounds: N)]`. A checkpoint,
-     * not a hard kill; the budget is still the ultimate backstop.
+     * legitimately churns (e.g. a test gate) raises it per case via `#[Step(maxRounds: N)]` (or
+     * `#[StepAI(maxRounds: N)]`). A checkpoint, not a hard kill; the budget is still the ultimate backstop.
      */
     private const int DEFAULT_MAX_ROUNDS = 2;
 
@@ -386,10 +387,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 // supervisor the fact instead and let it settle the round (accept, redirect, or stop).
                 // Byte-exact on purpose: evidence that legitimately varies (timings) simply never matches,
                 // and the guard stays out of the way.
-                $attempt = array_map(
-                    static fn (Artifact $a): array => [$a->label, $a->kind, $a->value],
-                    $this->artifacts[$name],
-                );
+                $attempt = $this->attemptFingerprint($name);
 
                 $verdict = $this->verdictFor(
                     $name,
@@ -438,7 +436,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     /** Whether $name is an AI step (marked {@see StepAI}) — read by reflection, without running the body. */
     private function isAiStep(string $name): bool
     {
-        return new \ReflectionMethod($this, $name)->getAttributes(StepAI::class) !== [];
+        return $this->aiAttribute($name) !== null;
     }
 
     /**
@@ -541,7 +539,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             }
 
             $artifacts = $this->renderArtifacts($this->artifacts[$name]);
-            $attempt = array_map(static fn (Artifact $a): array => [$a->label, $a->kind, $a->value], $this->artifacts[$name]);
+            $attempt = $this->attemptFingerprint($name);
             $verdict = $this->verdictFor(
                 $name,
                 $rubric,
@@ -1398,6 +1396,17 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private function maxRounds(?int $max): int
     {
         return $max !== null && $max > 0 ? $max : self::DEFAULT_MAX_ROUNDS;
+    }
+
+    /**
+     * A step attempt's fingerprint — its artifacts as [label, kind, value] triples — for the
+     * byte-identical-rerun guard. One definition so both step kinds decide "the same" the same way.
+     *
+     * @return list<array{0: string, 1: string, 2: string}>
+     */
+    private function attemptFingerprint(string $name): array
+    {
+        return array_map(static fn (Artifact $a): array => [$a->label, $a->kind, $a->value], $this->artifacts[$name]);
     }
 
     /**

@@ -334,9 +334,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
 
-            // A turn has landed and the history is whole: every tool_use answered. This is the only
-            // instant it is safe to write down, which is why the loop offers it rather than leaving the
-            // caller to guess when to snapshot.
+            // A turn has landed and the history is whole: every tool_use answered. One of the two instants
+            // it is safe to write the exchange down — the other is the [question] park above, which
+            // checkpoints before it blocks so a crash while waiting can resume from the question.
             if ($this->checkpoint !== null) {
                 ($this->checkpoint)($history);
             }
