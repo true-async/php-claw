@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Tool;
 
+use Claw\Http\CurlHttpClient;
 use Claw\Knowledge\KnowledgeBaseInterface;
 use Claw\Knowledge\KnowledgeWriterInterface;
 use Claw\Project\Project;
@@ -39,6 +40,10 @@ final class ToolFactory
         $registry->add(new ReadFileTool($workspace, secrets: $secrets));
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
+        // The network, as a first-class capability rather than a curl shelled out through bash: a step
+        // that needs external data carries `http_request` in its palette, and one that must not touch the
+        // network simply does not. Bounded by the run's tool timeout so a hung request cannot hold it open.
+        $registry->add(new HttpTool(new CurlHttpClient($timeoutMs > 0 ? $timeoutMs : 30_000)));
 
         // The knowledge base, when the project has a usable one. Offered rather than required: a base
         // that cannot answer would be a tool a model spends turns interrogating before believing it.

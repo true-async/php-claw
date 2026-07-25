@@ -718,7 +718,7 @@ final readonly class IssueRunner
             new GenerateIssueWorkflow($this->authoringEnv($ctx), $ctx->runId . '-gen', [
                 'solverName' => $ctx->solverName,
                 'solverNamespace' => $ctx->workflowStore->namespaceFor(true),
-                'solverTools' => ['read_file', 'write_file', 'list_files', 'bash'],
+                'solverTools' => ['read_file', 'write_file', 'list_files', 'bash', 'http_request'],
                 // Empty unless the verdict was `approach`, in which case this is the written strategy the
                 // ProjectManager chose off the shelf — the domain half of what the generator is told,
                 // sitting beside the general one it always carries.
