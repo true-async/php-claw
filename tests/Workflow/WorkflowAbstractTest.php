@@ -28,7 +28,6 @@ use Claw\Trace\ArrayTraceSink;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceRecordInterface;
 use Claw\Workflow\AiStep;
-use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\InMemoryStateStore;
@@ -673,12 +672,17 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function askPolicyRaisesTheBudgetAndContinuesOnATopUp(): void
+    public function anExhaustedBudgetStopsAndNeverAsksTheChannel(): void
     {
+        // Budget is not an in-run question: reacting to "no tokens" by spending tokens to ask a model is a
+        // contradiction, and on a resumed run that ask could eat a person's answer meant for the worker.
+        // So a spent budget just stops — resumably — and the ask channel, even when present, is untouched.
         $budget = new Budget(tokenLimit: 10);
         $budget->spend(10);   // already exhausted
 
         $channel = new class () implements SpeakerInterface {
+            public bool $asked = false;
+
             public function name(): SpeakerRole
             {
                 return SpeakerRole::Human;
@@ -686,38 +690,13 @@ final class WorkflowAbstractTest
 
             public function reply(string $incoming): string
             {
-                return '+100';   // grant 100 more tokens
-            }
-        };
-        $env = $this->config(worker: new ScriptedAgent($this->answer('done')))
-            ->set(EnvKey::Budget, $budget)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::Ask)
-            ->set(EnvKey::Ask, $channel);
-        $wf = new ProbeWorkflow($env, 'r1');
+                $this->asked = true;
 
-        Assert::same($wf->callAi('hi'), 'done');   // topped up, so the call proceeds
-    }
-
-    #[Test]
-    public function askPolicyStopsWhenNoTopUpIsGiven(): void
-    {
-        $budget = new Budget(tokenLimit: 10);
-        $budget->spend(10);
-
-        $channel = new class () implements SpeakerInterface {
-            public function name(): SpeakerRole
-            {
-                return SpeakerRole::Human;
-            }
-
-            public function reply(string $incoming): string
-            {
-                return '';   // decline -> stop
+                return '+100';   // a top-up the run must NOT honour any more
             }
         };
         $env = $this->config()
             ->set(EnvKey::Budget, $budget)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::Ask)
             ->set(EnvKey::Ask, $channel);
         $wf = new ProbeWorkflow($env, 'r1');
 
@@ -729,7 +708,8 @@ final class WorkflowAbstractTest
             $threw = true;
         }
 
-        Assert::true($threw);
+        Assert::true($threw);            // an exhausted budget stops the run
+        Assert::false($channel->asked);  // and it did NOT consult the ask channel
     }
 
     #[Test]

@@ -53,10 +53,6 @@ final class Config
 
     private const DEFAULT_LIMIT = 0;   // 0 = no limit, for every budget cap below
 
-    private const DEFAULT_BUDGET_POLICY = 'stop';
-
-    private const BUDGET_POLICIES = ['stop', 'ask'];
-
     /**
      * The GLOBAL library of ready-made workflows: the ones offered to every project. A path rather
      * than a folder inside the app home, because these are written and reviewed by people and belong
@@ -89,7 +85,6 @@ final class Config
         public readonly int $budgetSeconds = 0,
         public readonly int $turnTokens = 0,
         public readonly int $turnSeconds = 0,
-        public readonly string $budgetPolicy = self::DEFAULT_BUDGET_POLICY,
         public readonly string $library = self::DEFAULT_LIBRARY,
     ) {
     }
@@ -138,14 +133,6 @@ final class Config
             );
         }
 
-        $budgetPolicy = strtolower($get('CLAW_BUDGET_POLICY') ?? self::DEFAULT_BUDGET_POLICY);
-
-        if (!\in_array($budgetPolicy, self::BUDGET_POLICIES, true)) {
-            throw new ConfigException(
-                "Unknown CLAW_BUDGET_POLICY '{$budgetPolicy}', expected one of: " . implode(', ', self::BUDGET_POLICIES)
-            );
-        }
-
         $keyVar = self::API_KEY_VARS[$agent];
         $apiKey = $get($keyVar) ?? $get('CLAW_API_KEY');
 
@@ -187,7 +174,6 @@ final class Config
             turnTokens: (int) ($get('CLAW_TURN_TOKENS') ?? self::DEFAULT_LIMIT),
             turnSeconds: (int) ($get('CLAW_TURN_SECONDS') ?? self::DEFAULT_LIMIT),
             library: $get('CLAW_LIBRARY') ?? \dirname(__DIR__) . '/' . self::DEFAULT_LIBRARY,
-            budgetPolicy: $budgetPolicy,
         );
     }
 

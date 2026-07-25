@@ -32,7 +32,6 @@ use Claw\Tool\Workspace;
 use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceReader;
-use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\GenerateIssueWorkflow;
@@ -214,7 +213,6 @@ final readonly class IssueRunner
             ->set(EnvKey::Budget, new Budget($this->treeAllowance($issue), (float) $this->config->budgetSeconds))
             ->set(EnvKey::TurnTokenLimit, $this->config->turnTokens)
             ->set(EnvKey::TurnTimeLimit, (float) $this->config->turnSeconds)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::from($this->config->budgetPolicy))
             // The same cap the chat path has always put on a tool run, finally on the path that needs it
             // more: here nobody is watching, so a `bash` waiting forever on a prompt nobody will type
             // holds the run open with no clock ticking against it.

@@ -1338,10 +1338,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Act on the run's total budget when it is spent, per the {@see BudgetPolicy}:
-     *  - Stop (default): throw — a hard but resumable stop (the snapshot survives).
-     *  - Ask: ask the run's ask channel whether to continue; a typed token top-up raises the budget
-     *    and resumes, anything else (or no channel) falls back to the hard stop.
+     * Stop the run when its TOTAL budget is spent — a hard but RESUMABLE stop: the snapshot survives, so
+     * the run picks up where it left off once it is given more budget. It never asks the ask channel.
+     * Reacting to "there are no tokens left" by spending tokens to ask a model whether to continue is a
+     * contradiction, and on a resumed run that question could consume a person's answer meant for the
+     * worker. A spent budget is the operator's to settle out of band — raise the limit and resume — not an
+     * in-run prompt.
      *
      * @throws WorkflowException
      */
@@ -1353,40 +1355,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
-        if ($this->budgetPolicy() === BudgetPolicy::Ask) {
-            $channel = $this->env->find(EnvKey::Ask);
-
-            if ($channel instanceof SpeakerInterface) {
-                $extra = $this->parseExtraTokens($channel->reply(
-                    "Budget spent: {$budget->reason()}. Enter extra tokens to continue, or nothing to stop.",
-                ));
-
-                if ($extra > 0) {
-                    $budget->raise($extra);
-                    $this->tracer()?->log('budget', "raised by {$extra} tokens", [], Level::Notice);
-
-                    return;
-                }
-            }
-        }
-
         throw WorkflowException::stopped('run stopped: ' . $budget->reason());
-    }
-
-    /** The configured reaction to a spent run total — {@see BudgetPolicy::Stop} when unset. */
-    private function budgetPolicy(): BudgetPolicy
-    {
-        $policy = $this->env->find(EnvKey::BudgetPolicy);
-
-        return $policy instanceof BudgetPolicy ? $policy : BudgetPolicy::Stop;
-    }
-
-    /** A positive token top-up parsed from an ask answer (e.g. "+100000"), or 0 to stop. */
-    private function parseExtraTokens(?string $answer): int
-    {
-        $digits = ltrim(trim((string) $answer), '+');
-
-        return $digits !== '' && ctype_digit($digits) ? (int) $digits : 0;
     }
 
     /** Read a numeric environment value (a budget cap), or 0.0 when unset/non-numeric. */
