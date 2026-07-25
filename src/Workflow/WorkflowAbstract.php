@@ -317,6 +317,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
+        if ($this->isAiStep($name)) {
+            $this->runAiStep($name);   // a #[StepAI] step is driven by the base, not by an imperative body
+
+            return;
+        }
+
         $this->enforceBudget();   // don't begin a new step once the run's budget is spent
 
         $tracer = $this->tracer();
@@ -423,6 +429,101 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // The step is finished and its result is in the snapshot and the journal. The half-finished
         // conversation kept for a resume is now only a way to re-enter a step that has already left.
         $this->env->findStore()->clearExchange($this->runId, $name);
+    }
+
+    /** Whether $name is an AI step (marked {@see StepAI}) — read by reflection, without running the body. */
+    private function isAiStep(string $name): bool
+    {
+        return new \ReflectionMethod($this, $name)->getAttributes(StepAI::class) !== [];
+    }
+
+    /**
+     * Drive a {@see StepAI} step. The method itself is pure — it returns an {@see AiStep} declaration and
+     * does nothing else; the base runs the one exchange it names, records it as it happens, and on resume
+     * CONTINUES the recorded conversation rather than re-running the model from the top. The step's output
+     * is its handoff, formed from this exchange for the next step, exactly as an imperative step's is.
+     *
+     * A crash while the step was PARKED on a person's answer resumes here: {@see runAiExchange()} finds
+     * the recorded exchange ending on an unanswered [question] and continues it from the answer. The body
+     * is never re-entered after a resume and is pure anyway, so there is nothing to do twice.
+     */
+    private function runAiStep(string $name): void
+    {
+        $this->enforceBudget();
+
+        $tracer = $this->tracer();
+        $span = $tracer?->enterStep($name);
+        $previousStep = $this->currentStep;
+        $this->currentStep = $name;
+        $workHistory = [];
+
+        // A back() into this step re-enters it fresh (its exchange was cleared when it finished); continuing
+        // the prior attempt is a refinement the imperative path has and this one will grow. Clear the arming
+        // so it does not leak to a later step.
+        if ($this->reentryStep === $name) {
+            $this->reentryStep = null;
+            $this->reentryReason = '';
+        }
+
+        try {
+            $this->artifacts[$name] = [];
+            $this->writtenPaths = [];
+
+            $declaration = $this->{$name}();
+
+            if (!$declaration instanceof AiStep) {
+                throw new \LogicException("step '{$name}' is marked #[StepAI] but did not return an AiStep declaration");
+            }
+
+            $this->formPendingHandoff();   // form the PREVIOUS step's handoff before this one's exchange runs
+            $this->runAiExchange($name, $declaration);
+            $workHistory = $this->lastHistory;
+            $this->recordWrittenFiles($workHistory);
+            $this->emitWrittenFileArtifacts();
+        } finally {
+            $this->currentStep = $previousStep;
+            $tracer?->exit($span);
+        }
+
+        $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
+        $this->stepHistory[$name] = $workHistory;
+        $this->done[] = $name;
+        $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
+        $this->env->findStore()->clearExchange($this->runId, $name);
+    }
+
+    /**
+     * Run — or continue — the one exchange a {@see StepAI} declares. What the store already holds for this
+     * (run, step) decides which:
+     *
+     *  - PARKED — the recorded exchange ends on an unanswered [question]: continue it from the person's
+     *    answer, which becomes the next user turn, so the model picks up where it paused instead of being
+     *    asked the same thing again. This is the resume the two-kind model exists to make deterministic.
+     *  - otherwise (nothing recorded, or a partial non-parked tail) — open the declared prompt. A partial
+     *    tail is carried in as prior context and the in-flight turn is re-run, which is cheap and correct
+     *    since a non-parked tail was never the answer.
+     *
+     * The exchange goes through {@see runTurns()} like any other, so its palette, agent, ask channel,
+     * budget and per-turn checkpointing are exactly an imperative step's ai() call's.
+     */
+    private function runAiExchange(string $name, AiStep $step): void
+    {
+        $recorded = $this->env->findStore()->loadExchange($this->runId, $name);
+        $pending = $recorded === [] ? null : DefaultTurnLoop::pendingQuestion($recorded);
+
+        if ($pending !== null) {
+            $ask = $this->env->find(EnvKey::Ask);
+
+            if (!$ask instanceof SpeakerInterface) {
+                throw new WorkflowException("step '{$name}' paused on a person's answer, but no ask channel is configured to resume it");
+            }
+
+            $this->runTurns($ask->reply($pending) ?? '', $step->tools, $step->agent, $recorded);
+
+            return;
+        }
+
+        $this->runTurns($step->prompt, $step->tools, $step->agent, $recorded);
     }
 
     /** Read a value from the run's environment — this scope, then the parent project settings. */
@@ -1654,8 +1755,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * The workflow's step methods (those marked {@see Step}), in declaration order — what the
-     * default run() drives.
+     * The workflow's step methods (those marked {@see Step} or {@see StepAI}), in declaration order —
+     * what the default run() drives.
      *
      * @return list<string>
      */
@@ -1664,7 +1765,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $names = [];
 
         foreach (new \ReflectionClass($this)->getMethods() as $method) {
-            if ($method->getAttributes(Step::class) !== []) {
+            if ($method->getAttributes(Step::class) !== [] || $method->getAttributes(StepAI::class) !== []) {
                 $names[] = $method->getName();
             }
         }

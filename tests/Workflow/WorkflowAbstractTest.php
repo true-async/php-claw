@@ -7,6 +7,7 @@ namespace Tests\Workflow;
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\Budget;
+use Claw\Agent\Message;
 use Claw\Agent\Role;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
@@ -26,11 +27,13 @@ use Claw\Tool\ToolInterface;
 use Claw\Trace\ArrayTraceSink;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceRecordInterface;
+use Claw\Workflow\AiStep;
 use Claw\Workflow\BudgetPolicy;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\InMemoryStateStore;
 use Claw\Workflow\Step;
+use Claw\Workflow\StepAI;
 use Claw\Workflow\Tool;
 use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStateStoreInterface;
@@ -219,6 +222,83 @@ final class WorkflowAbstractTest
 
         Assert::same($wf->go(), 'done');   // the turn loop ran the local tool, then finished
         Assert::same($wf->calls, 1);       // the model's tool call reached the workflow method
+    }
+
+    #[Test]
+    public function anAiStepRunsTheDeclaredExchangeAndCompletes(): void
+    {
+        // A #[StepAI] method is PURE: it returns an AiStep and does no work. The base runs the one
+        // exchange it declares, then marks the step done — the method never touches the model itself.
+        $store = new InMemoryStateStore();
+        $worker = new ScriptedAgent($this->answer('done'));
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function work(): AiStep
+            {
+                return new AiStep('do the work');
+            }
+        };
+
+        $wf->run();
+
+        Assert::count($worker->requests, 1);                        // the base ran the declared exchange
+        Assert::same($this->lastUserText($worker), 'do the work');  // with the declared prompt
+        Assert::same($store->load('r1')['done'], ['work']);         // and recorded the step as done
+    }
+
+    #[Test]
+    public function anAiStepParkedOnAQuestionResumesFromTheAnswer(): void
+    {
+        // The prior life got as far as asking a person and parked — the recorded exchange ends on the
+        // [question]. A fresh instance must CONTINUE from the answer, not re-run the model from the top.
+        $store = new InMemoryStateStore();
+        $store->saveExchange('r1', 'work', [
+            Message::userText('do the work'),
+            new Message(Role::Assistant, [new TextBlock('[question] which file?')]),
+        ]);
+
+        $channel = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Human;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'src/Foo.php';
+            }
+        };
+
+        $worker = new ScriptedAgent($this->answer('done'));
+        $env = $this->config(worker: $worker, store: $store)->set(EnvKey::Ask, $channel);
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function work(): AiStep
+            {
+                return new AiStep('do the work');
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($channel->heard, 'which file?');               // resumed by asking the parked question
+        Assert::count($worker->requests, 1);                        // one model call — to CONTINUE, not re-ask
+        Assert::same($this->lastUserText($worker), 'src/Foo.php');  // the answer went in as the next turn
+        Assert::same($store->load('r1')['done'], ['work']);         // and the step then completed
     }
 
     #[Test]
