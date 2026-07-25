@@ -1566,31 +1566,49 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $this->verdict = null;
 
+        $handoff = $this->incomingHandoff === ''
+            ? ''
+            : "The handoff this step was given by the previous step (what it was set up to do):\n"
+                . self::clip($this->incomingHandoff, 800) . "\n\n";
+
         $reply = trim($this->runTurns(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
+            . $handoff
             . "Artifacts it recorded:\n{$artifacts}\n\n"
             . $this->renderParams($this->stepParams[$name] ?? [])
             . $this->verificationToolbox($name)
-            . 'An artifact is what the step SAYS it did. It is a claim, not evidence: a step writes its own '
-            . 'artifact text and can assert success it never achieved — one reported "All tests passed" '
-            . 'while the suite was erroring, and was believed. So when the step CLAIMS to have ALREADY '
-            . 'achieved something checkable — the tests pass, the lint is clean, a file now contains '
-            . 'something, a command succeeded — you MUST establish it yourself with a tool and judge the '
-            . 'OUTPUT YOU SAW, never the summary. Accepting a claim you did not check is the one '
-            . "failure this review cannot have.\n\n"
-            . 'The RUBRIC decides what counts, and it OUTRANKS this instruction. In particular: if it tells '
-            . 'you the artifact is code or a plan that has NOT run yet, the project as it stands is not '
-            . 'evidence about it. Judge it on its own terms and do NOT hold the current state of the files, '
-            . "or a red test suite, against work that was never supposed to have happened yet.\n\n"
-            . 'Where verification does apply, your only executor is rerun_evidence: it replays a command '
-            . 'the step itself recorded, and you judge the output YOU see. You cannot compose commands '
-            . 'here — that is deliberate. A checkable claim that no recorded evidence and no tool of '
-            . 'yours can settle is a cannot_verify verdict: never reject because YOU could not check, '
-            . 'and never accept a bare claim. Do NOT go spelunking the journal: '
-            . "recall(what='step', name='{$name}') is available ONCE if you need to see what the step did, "
-            . "and not beyond that.\n\n"
+            . 'Your materials are the step\'s artifacts, the handoff it was given, and the project itself, '
+            . 'which you can read. Fix your attention on what the step was meant to do (the rubric and the '
+            . "handoff) and on its ARTIFACTS.\n\n"
+            . "An artifact is one of two things, and that decides how far to trust it:\n"
+            . '  - THE STEP\'S OWN ANSWER — what it wrote itself. TEXT (a summary, a decision, generated '
+            . 'source) is printed IN FULL above: read it right here, no tool fetches it, and if the rubric '
+            . 'is about that text (e.g. reviewing generated source) this inline text IS your subject — do '
+            . 'not go looking for it as a file or a note. A FILE is a path it wrote: open it with read_file.'
+            . "\n"
+            . '  - THE RESULT OF A TOOL RUN — a command\'s real output, recorded verbatim by the runtime '
+            . 'with the runtime\'s own grade (ok/fail). This is not the step\'s word, it is what actually '
+            . "happened: read the outcome there.\n\n"
+            . 'If you think the result is poor, or does not solve the step\'s task, you can replay a '
+            . 'recorded run with rerun_evidence(label) and judge the fresh output. You do not compose your '
+            . "own commands — only what the step recorded can be replayed. recall(what='step', "
+            . "name='{$name}') is also available ONCE if you need to see what the step did.\n\n"
+            . 'Trust what you SEE, not a retelling: a checkable claim the step made only in its own TEXT — '
+            . '"the tests pass", "the file now contains X" — with no tool-run artifact behind it is not '
+            . 'established. Replay the evidence that settles it, or, if nothing recorded and no tool of '
+            . "yours can, return cannot_verify — never reject merely because YOU could not check.\n\n"
+            . 'And evidence proves only as much as the command behind it. A green result from a WEAK or '
+            . 'SELF-AUTHORED check — a test the step wrote so it would pass, an assertion deleted, a '
+            . 'command narrowed to the easy case — is not the step\'s job done. Look at the command that '
+            . 'produced an evidence artifact (its source), not only its output: does THAT run actually '
+            . 'establish what the rubric asks? If the oracle is weak, or the step shaped it to succeed, '
+            . "that is a reject.\n\n"
+            . 'The rubric decides what counts and it OUTRANKS all of this. If it says the artifact is code '
+            . 'or a plan that has NOT run yet, the project as it stands is not evidence about it — judge it '
+            . 'on its own terms; do not hold the current files, or a red test suite, against work that was '
+            . "never meant to have happened yet.\n\n"
             . 'When you have judged, CALL the `verdict` tool: accept if the rubric is satisfied; reject, '
             . 'citing the rubric item violated and the concrete fact you observed; or cannot_verify with '
             . 'the reason. The tool call is the verdict — prose alone is not one.',
@@ -1673,10 +1691,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     protected function criticRole(): string
     {
-        return 'You are a REVIEWER of a workflow step. Your ONLY job is to verify the work against the '
-            . 'rubric: read the files the step touched, replay its recorded evidence, and report on '
-            . 'what you actually observed. Assume nothing from a summary — the step wrote that summary. '
-            . 'Do NOT implement, edit, or fix anything yourself: you judge and list findings, nothing more.';
+        return 'You are the critic of a workflow step. A workflow moves forward one step at a time, and each '
+            . "step's work is done by an agent that then declares it is finished. You are the independent "
+            . 'check before the workflow believes that and moves on: a fresh, separate look whose one '
+            . 'purpose is to decide whether the step ACTUALLY did its job — solved what it was for, to a '
+            . 'real standard of quality — or only claims to have. Nothing else in the run re-examines this '
+            . 'step; if a weak or unfinished result passes you, it passes for good. You judge and report — '
+            . 'you never do, edit, or fix the work yourself: stepping in would destroy the independence that '
+            . 'is the whole reason your judgement is worth anything.';
     }
 
     /**

@@ -1599,8 +1599,12 @@ final class WorkflowAbstractTest
         $wf->run();
 
         $prompt = $this->lastUserText($worker);
-        Assert::true(str_contains($prompt, 'claim, not evidence'));
-        Assert::true(str_contains($prompt, 'MUST establish it yourself with a tool'));
+        Assert::true(str_contains($prompt, 'Trust what you SEE, not a retelling'));
+        Assert::true(str_contains($prompt, 'Replay the evidence that settles it'));
+        // Evidence stops a fabricated OUTPUT, not a gamed ORACLE: an agent can pass a test it weakened and
+        // freeze the green as evidence (ImpossibleBench). The critic is told to judge the command, not only
+        // its output — part of the contract, asserted here.
+        Assert::true(str_contains($prompt, 'evidence proves only as much as the command behind it'));
         // and the old instruction that caused the rubber-stamping must not come back
         Assert::false(str_contains($prompt, 'usually enough'));
 
@@ -1608,7 +1612,7 @@ final class WorkflowAbstractTest
         // reviewing a generated solver ran the project's tests, found them red — which they are, the
         // solver has not run yet — and rejected the source over it. A false pass became a false
         // failure, so the carve-out for not-yet-run artifacts is part of the contract too.
-        Assert::true(str_contains($prompt, 'OUTRANKS this instruction'));
+        Assert::true(str_contains($prompt, 'OUTRANKS all of this'));
         Assert::true(str_contains($prompt, 'has NOT run yet'));
     }
 
@@ -2156,7 +2160,7 @@ final class WorkflowAbstractTest
             }
         }
 
-        Assert::false(str_contains($text, 'REVIEWER'));
+        Assert::false(str_contains($text, 'critic of a workflow step'));
     }
 
     #[Test]
