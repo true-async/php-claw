@@ -23,14 +23,18 @@ use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
 /**
- * The base every workflow extends — a HELPER, not an engine. The workflow itself is a class with
- * state (its own fields); its steps are methods marked {@see Step}, whose bodies the author (a
- * human or the AI) writes by hand: build a prompt, call {@see ai()}, call {@see tool()}, write to
- * a field. The base does not run anything for the step — it only makes that code shorter and
- * durable:
+ * The base every workflow extends — a HELPER, not an engine. The workflow itself is a class with state
+ * (its own fields); its steps are methods the base drives in declaration order, of two kinds. A
+ * {@see StepAI} is a PURE method returning an {@see AiStep} declaration — a prompt, a tool palette, an
+ * agent role and any {@see ParamRequest}s — and the base runs, records and resumes that ONE model exchange
+ * for it. A {@see Step} is a CODE method: deterministic glue that reads params and calls {@see tool()},
+ * re-run whole on resume. The base does not do the AI work; it makes the step's declaration durable and
+ * drives it:
  *
- *  - {@see ai()} talks to the model (the turn loop inside is an internal detail) with a
- *    least-privilege tool palette; {@see tool()} runs one tool; {@see param()} reads run inputs.
+ *  - a {@see StepAI}'s exchange runs with a least-privilege tool palette (the turn loop inside is an
+ *    internal detail); the model does the work through the tools — reading and writing files, recording
+ *    artifacts, asking a person. {@see tool()} runs one tool from a CODE step; {@see param()} reads run
+ *    inputs and any value an earlier step addressed to this one.
  *  - {@see step()} runs a step method unless a prior run already did, then snapshots the
  *    workflow's state + progress to the {@see WorkflowStateStoreInterface}. The state is restored at
  *    construction, so a skipped step loses nothing.
@@ -109,15 +113,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * The handoff fed into the current step's model context — what the previous step handed on. Formed
-     * lazily from {@see $pendingHandoff} on the first ai() call of a step, and persisted as it is formed
-     * so a resume (a fresh process whose in-memory history is gone) can {@see loadHandoff()} it back
-     * here at construction instead. Read by {@see handoffContext()}. '' for the first step.
+     * lazily from {@see $pendingHandoff} when a downstream step's exchange first reads it, and persisted as
+     * it is formed so a resume (a fresh process whose in-memory history is gone) can {@see loadHandoff()} it
+     * back here at construction instead. Read by {@see handoffContext()}. '' for the first step.
      */
     private string $incomingHandoff = '';
 
     /**
      * The previous step's name + the conversation history of its work, awaiting handoff formation —
-     * set at step end, consumed by the next step's first ai() call (which continues that history to
+     * set at step end, consumed when the next step's exchange begins (which continues that history to
      * ask the model for the handoff IN CONTEXT). Null = nothing pending (e.g. on a resume, where the
      * already-formed handoff is restored from the store rather than re-formed).
      *
@@ -126,7 +130,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private ?array $pendingHandoff = null;
 
     /**
-     * The full message history of the most recent {@see ai()} exchange — kept so a step's handoff can
+     * The full message history of the most recent model exchange — kept so a step's handoff can
      * be formed by CONTINUING that exact conversation (the model still holds what it actually did),
      * not from a cold re-summary. Transient.
      *
@@ -164,7 +168,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private readonly Environment $env;
 
     /**
-     * The scope in force while an {@see ai()} exchange is running: that call's narrowed palette. Null
+     * The scope in force while a model exchange is running: that call's narrowed palette. Null
      * between exchanges, when the run's own scope applies.
      *
      * It exists so {@see tool()} obeys the restriction the step asked for. A tool call made by the MODEL
@@ -388,7 +392,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         // Remember the work exchange for this step. The handoff is formed LAZILY — only if a later
-        // step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
+        // step actually runs an exchange (no point asking, or paying, when nothing downstream reads it,
         // e.g. the last step, or a step that finishes through a tool) — by CONTINUING this history,
         // and is persisted as it is formed. See {@see formPendingHandoff()}.
         $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
@@ -580,7 +584,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      *    since a non-parked tail was never the answer.
      *
      * The exchange goes through {@see runTurns()} like any other, so its palette, agent, ask channel,
-     * budget and per-turn checkpointing are exactly an imperative step's ai() call's.
+     * budget and per-turn checkpointing are exactly a work exchange's.
      */
     private function runAiExchange(string $name, AiStep $step): void
     {
@@ -985,12 +989,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * Collect the paths a work exchange WROTE — the successful `write_file` targets — for the step to
-     * turn into artifacts once its body is done. Called from {@see ai()}, deliberately not from
-     * runTurns (which handoff formation also drives, over the previous step's history). Not emitted
-     * here: a step often records the file it wrote by hand right after the ai() call that wrote it,
-     * and emitting mid-exchange would double the path. A write that ERRORED contributes nothing — the
-     * call is paired with its result and dropped on failure. Skipped while REVIEWING: a critic does
-     * not write, and its exchange is not the step's (the same reason its history is never persisted).
+     * turn into artifacts once its exchange is done. Called from {@see reviewedExchange()} over the step's
+     * OWN work history, deliberately not from runTurns (which handoff formation also drives, over the
+     * previous step's history, whose write_file calls belong to that step). A write that ERRORED
+     * contributes nothing — the call is paired with its result and dropped on failure. Skipped while
+     * REVIEWING: a critic does not write, and its exchange is not the step's (the same reason its history
+     * is never persisted).
      *
      * @param list<Message> $history
      */
@@ -1050,7 +1054,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * The child scope one {@see ai()} call runs in: the run's registry plus this workflow's own
+     * The child scope one model exchange runs in: the run's registry plus this workflow's own
      * #[Tool] methods, full by default or narrowed to exactly $tools for a least-privilege step, and
      * routed to $agent's model when a role is named. The model's specs and what the executor can
      * resolve are the same set either way.
@@ -1105,7 +1109,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Form the previous step's handoff — once — when a downstream step's ai() reads it. The handoff
+     * Form the previous step's handoff — once — when a downstream step's exchange reads it. The handoff
      * is NOT a grab of the return value: the model is EXPLICITLY asked to write it by CONTINUING the
      * step's own work conversation, so it still holds what it actually did (its tool calls, what it
      * read/changed), not a cold re-summary. The result is SAVED to the store keyed by the step that
@@ -1241,7 +1245,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * A fresh per-turn budget for one {@see ai()} exchange — a child of the run total carrying the
+     * A fresh per-turn budget for one model exchange — a child of the run total carrying the
      * turn caps, so its spend bubbles up. Null when neither a run total nor a turn cap is set.
      */
     private function turnBudget(): ?Budget

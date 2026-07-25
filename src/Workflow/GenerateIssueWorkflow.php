@@ -252,15 +252,21 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
 
     private function draftPrompt(): string
     {
-        // A re-run after the critic rejected the draft: the model still holds its previous attempt in the
-        // continued conversation, so don't re-state the whole brief — just hand it the findings to fix.
+        // A re-draft after the save-time validator rejected the class: save() reaches it via back('draft'),
+        // which re-enters this step FRESH — its exchange was cleared when it first finished — so the model
+        // does NOT still hold its prior attempt. It must be handed the whole brief again with the complaint
+        // on top, not just the findings; the findings alone tell it to "fix" a class it can no longer see.
         $critique = $this->critique();
+        $rework = $critique === null ? '' : <<<REWORK
+            A reviewer REJECTED your previous attempt at this solver:
 
-        if ($critique !== null) {
-            return "A reviewer REJECTED the workflow you just wrote:\n\n{$critique}\n\n"
-                . 'Rewrite the FULL class fixing exactly those problems, keeping the rest, and record the '
-                . 'corrected source again with the artifact tool.';
-        }
+            {$critique}
+
+            Rewrite the FULL class fixing exactly those problems, and record it again with the artifact
+            tool. The complete brief follows — build a correct solver from it.
+
+
+            REWORK;
 
         // The plan and the difficulty arrive as addressed params (understand() and assess() set them);
         // an unreadable difficulty maps to `moderate` — the middle, which cannot be wrong in an expensive
@@ -300,7 +306,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             {$chosen}
             APPROACH;
 
-        return <<<PROMPT
+        return $rework . <<<PROMPT
             Write a PHP class that solves the task below by extending Claw\\Workflow\\WorkflowAbstract.
             You DECIDE how many steps it needs — use the FEWEST the task actually requires (often just one).
 

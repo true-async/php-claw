@@ -78,21 +78,20 @@ final class SuperviseWorkflow extends WorkflowAbstract
 
     private function repairPrompt(): string
     {
-        // A re-write after the validator rejected the save: the model still holds its previous attempt in
-        // the continued conversation, so hand it only the complaint to fix (via critique(), set by back()).
+        // A re-write after the validator rejected the save: save() reaches it via back('repair'), which
+        // re-enters this step FRESH — the exchange it first ran is gone — so the model does NOT still hold
+        // its prior attempt. Hand it the whole brief again (the broken source and the error persist as run
+        // params) with the complaint on top; the complaint alone tells it to "fix" a class it cannot see.
         $critique = $this->critique();
-
-        if ($critique !== null) {
-            return "The corrected class was rejected:\n\n{$critique}\n\n"
-                . 'Rewrite the FULL class fixing exactly that. Reply with only the corrected PHP source.';
-        }
+        $rework = $critique === null ? '' : "A reviewer REJECTED your previous corrected class:\n\n{$critique}\n\n"
+            . "Rewrite the FULL class fixing exactly that. The complete brief follows.\n\n\n";
 
         $namespace = (string) $this->param('fixedNamespace');
         $class = (string) $this->param('fixedName');
         $error = (string) $this->param('error');
         $code = (string) $this->param('brokenCode');
 
-        return <<<PROMPT
+        return $rework . <<<PROMPT
             A generated solver workflow crashed at runtime. Find and fix the cause, and return the
             corrected class.
 
