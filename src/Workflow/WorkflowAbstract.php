@@ -462,9 +462,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $workHistory = [];
 
         // A back() into this step re-enters it fresh (its exchange was cleared when it finished); continuing
-        // the prior attempt is a refinement the imperative path has and this one will grow. Clear the arming
-        // so it does not leak to a later step.
+        // the prior attempt is a refinement the imperative path has and this one will grow. The reason is
+        // carried in as this re-entry's guidance so the pure body can fold it into the AiStep it declares
+        // (via critique()) — the same contract back() documents and the imperative path already honours;
+        // without this the reason was silently dropped. Clear the arming so it does not leak to a later step.
         if ($this->reentryStep === $name) {
+            $this->critique = $this->reentryReason;
             $this->reentryStep = null;
             $this->reentryReason = '';
         }

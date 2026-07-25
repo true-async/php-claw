@@ -406,6 +406,46 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
+    public function aBackIntoAnAiStepCarriesItsReasonAsGuidance(): void
+    {
+        // back() into a #[StepAI] must hand the step its reason: the pure body folds critique() into the
+        // AiStep it declares, exactly as the imperative path does. Without it the reason was dropped and the
+        // re-run repeated the first prompt — the contract back() documents, unhonoured on the declared path.
+        $worker = new ScriptedAgent($this->answer('first'), $this->answer('second'));
+        $store = new InMemoryStateStore();
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            private bool $sentBack = false;
+
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function work(): AiStep
+            {
+                return new AiStep($this->critique() ?? 'do the work');
+            }
+
+            #[Step]
+            protected function gate(): void
+            {
+                if ($this->sentBack) {
+                    return;
+                }
+
+                $this->sentBack = true;
+                $this->back('work', 'try the other approach');
+            }
+        };
+
+        $wf->run();
+
+        Assert::count($worker->requests, 2);                                  // work ran twice: first + the re-run
+        Assert::same($this->lastUserText($worker), 'try the other approach'); // the back reason drove the re-run
+    }
+
+    #[Test]
     public function toolResolvesThroughTheRegistryAndReturnsItsContent(): void
     {
         $registry = new Registry();
