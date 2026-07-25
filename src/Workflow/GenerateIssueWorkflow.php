@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Exceptions\WorkflowException;
 use Claw\Tool\Registry;
 
 /**
@@ -74,22 +75,23 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
              isolates. This is the concrete test for "is this step worth it".
         RECIPE;
 
-    private string $plan = '';
-    private string $code = '';
-
-    /** The worker tier assess() decided this task warrants — folded into the draft's step routing. */
-    private string $workerTier = 'worker';
-    private string $difficulty = 'moderate';
+    /** One bounded repair: on a validator reject at save, back() re-drafts once, then a second failure throws. */
+    private bool $repairAttempted = false;
 
     public function name(): string
     {
         return 'generate-issue-workflow';
     }
 
-    #[Step]
-    protected function understand(): void
+    /**
+     * A pure {@see StepAI}: it DECLARES the planning exchange, the base runs it. The plan reaches
+     * {@see draft()} as an addressed `plan` param (and {@see assess()}, the next step, through the handoff)
+     * — the declarative model carries nothing in fields, so what a later step needs is passed on a channel.
+     */
+    #[StepAI]
+    protected function understand(): AiStep
     {
-        $this->plan = $this->ai(
+        return new AiStep(
             'You are planning how to solve a task by writing a workflow. Inspect the project if it '
             . 'helps (read_file, list_files), then, in a few concrete sentences: outline the steps a '
             . 'workflow should take to solve this task, AND assess whether the project is mature with '
@@ -97,74 +99,93 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             . "whether a human must approve the design before it is implemented:\n\n" . $this->taskSummary(),
             ['read_file', 'list_files'],
             'worker-smart',   // planning a whole workflow is heavy thinking — use the strong tier
+            params: [new ParamRequest(
+                forStep: 'draft',
+                name: 'plan',
+                instruction: 'Restate your plan as a few concrete sentences: the steps a workflow should take '
+                    . 'to solve this task, and whether a human must approve the design before it is implemented.',
+            )],
         );
     }
 
     /**
-     * Judge how hard the task is and pick the model tier the GENERATED solver should run its steps
-     * on: a trivial fix wastes money on the strong model, a subtle change needs it. The verdict
-     * ('worker' vs 'worker-smart') is folded into the draft, so the solver routes its `ai()` calls to
-     * the chosen tier. Kept as its own step so the decision — and its reasoning — is visible in the trace.
+     * Judge how hard the task is; the one-word verdict reaches {@see draft()} as an addressed `difficulty`
+     * param, which routes both the drafting tier and the tier the GENERATED solver runs its own steps on —
+     * a trivial fix wastes money on the strong model, a subtle change needs it. Its own step so the decision
+     * and its reasoning stay visible in the trace; the plan it judges against arrives through the handoff.
+     *
+     * The verdict is a param, not a parsed first line: extraction asks for exactly the bare word, so the
+     * reasoning sentence can never be mistaken for it. {@see draftPrompt()} maps anything unreadable to
+     * `moderate` — the middle, which cannot be wrong in an expensive direction.
      */
-    #[Step]
-    protected function assess(): void
+    #[StepAI]
+    protected function assess(): AiStep
     {
-        $verdict = $this->ai(
-            'Rate how hard this coding task is for an AI to solve correctly. Your FIRST LINE must be '
-            . 'one bare word and nothing else — simple, moderate or complex. No label, no punctuation, '
-            . 'no backticks: a first line reading "Complexity: simple" is not one of those words and '
-            . "will be read as moderate. Put one sentence of reasoning on the line after it.\n\n"
-            . 'Simple = a localized, mechanical change; complex = subtle logic, wide blast radius, or '
-            . "design judgement.\n\nTask:\n{$this->taskSummary()}\n\nPlan:\n{$this->plan}",
+        return new AiStep(
+            'Rate how hard this coding task is for an AI to solve correctly — simple, moderate or complex — '
+            . 'and give one sentence of reasoning. Simple = a localized, mechanical change; complex = subtle '
+            . "logic, wide blast radius, or design judgement.\n\nTask:\n{$this->taskSummary()}",
             [],
             'supervisor-smart',
+            params: [new ParamRequest(
+                forStep: 'draft',
+                name: 'difficulty',
+                instruction: 'One bare word and nothing else — simple, moderate or complex. '
+                    . 'No label, no punctuation, no backticks.',
+            )],
         );
-
-        // Classify on the FIRST LINE only — the one-word verdict — not the whole reply: the reasoning
-        // sentence routinely names the other tiers ("not a simple change"), which would misclassify.
-        //
-        // The match is EXACT. It used to be `str_contains($word, 'complex')` tested before 'simple', so
-        // the entirely ordinary reply "Complexity: simple" tokenized to "complexity:", contained
-        // "complex", and routed a trivial task to the expensive model — the verdict inverted by the very
-        // check written to protect it. Anything unreadable now lands on `moderate`, which is the middle
-        // and cannot be wrong in an expensive direction.
-        $word = strtolower(trim((string) strtok(trim($verdict), "\r\n"), " \t`*_.:—–-"));
-        $this->difficulty = match ($word) {
-            'simple', 'complex' => $word,
-            default => 'moderate',
-        };
-
-        // A simple task runs cheap; anything with real judgement gets the strong tier.
-        $this->workerTier = $this->difficulty === 'simple' ? 'worker' : 'worker-smart';
     }
 
     /**
-     * Write the solver, then have it reviewed by the `solverReview` critic — "will it actually solve the
-     * task", not "is it valid PHP" (the validator covers that). The critic gates the step, so a rejected
-     * draft RE-RUNS here (continuing this conversation, see {@see WorkflowAbstract::ai()}) and is re-judged
-     * — the worker's fix can't slip through unreviewed, which is how a bad draft used to escape.
+     * Declare the drafting exchange under the `solverReview` critic — "will it actually solve the task",
+     * not "is it valid PHP" (the validator covers that). A pure {@see StepAI} cannot record an artifact
+     * itself, so the model RECORDS the solver source by calling the `artifact` tool; the critic judges that
+     * artifact, and the source reaches {@see save()} as an addressed `code` param. On a critic reject the
+     * base re-runs the exchange on the supervisor's guidance, so a bad draft cannot slip through unreviewed.
      */
-    #[Step(critic: 'solverReview')]
-    protected function draft(): string
+    #[StepAI(critic: 'solverReview')]
+    protected function draft(): AiStep
     {
-        // [] = the model returns the class CODE, it does not act with tools
-        $this->code = $this->extractCode($this->ai($this->draftPrompt(), [], 'worker-smart'));
-
-        // The generated class IS this step's output — record it as the artifact the critic judges. (A
-        // codegen step produces no run artifacts, and that is correct; the artifact is the source itself.)
-        $this->artifact('solver-class', $this->code, type: 'solver');
-
-        return $this->code;   // a rejection re-runs draft with the findings
+        return new AiStep(
+            $this->draftPrompt(),
+            ['artifact'],   // the only move the drafter needs: record the source it writes
+            'worker-smart',
+            params: [new ParamRequest(
+                forStep: 'save',
+                name: 'code',
+                instruction: 'Output the complete PHP source of the solver class you recorded with the '
+                    . 'artifact tool — exactly and nothing else, no prose and no markdown fences.',
+            )],
+        );
     }
 
+    /**
+     * Save the drafted solver through `define_workflow` (which validates, then stores it). On a validator
+     * reject the source is re-drafted ONCE: back() into {@see draft()} hands it the complaint via critique()
+     * and it rewrites; a second reject surfaces to the run path. A CODE step, so it never calls the model
+     * itself — the repair is a real re-draft, not a hidden ai() call inside save.
+     */
     #[Step]
     protected function save(): void
     {
-        $this->code = $this->saveGeneratedWorkflow(
-            (string) $this->param('solverName'),
-            $this->code,
-            fn (string $rejection): string => $this->reviseCode("The class you wrote was rejected: {$rejection}"),
-        );
+        $code = $this->extractCode((string) $this->param('code'));
+        $result = $this->tool('define_workflow', [
+            'name' => (string) $this->param('solverName'),
+            'code' => $code,
+            'shared' => true,
+        ]);
+
+        if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
+            return;
+        }
+
+        if ($this->repairAttempted) {
+            throw new WorkflowException($result);   // a second failure surfaces to the run path
+        }
+
+        $this->repairAttempted = true;
+        $this->back('draft', "The generated class was rejected when it was saved: {$result}\n\n"
+            . 'Rewrite the FULL class fixing exactly that, and record it again with the artifact tool.');
     }
 
     /**
@@ -176,6 +197,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     protected function criticRules(): array
     {
         $recipe = self::RECIPE;
+        $plan = (string) $this->param('plan');
 
         return [
             'solverReview' => "You are reviewing the GENERATED SOURCE of a solver class (the step's artifact). "
@@ -212,7 +234,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
                 . "- the plan below describes work this class simply does not do.\n\n"
                 . "Here is what the author was working from, so you judge against the same thing.\n\n"
                 . "The task:\n{$this->taskSummary()}\n\n"
-                . "The plan:\n{$this->plan}\n\n"
+                . "The plan:\n{$plan}\n\n"
                 . "The rules it was told to follow when choosing steps:\n{$recipe}",
         ];
     }
@@ -235,8 +257,17 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
 
         if ($critique !== null) {
             return "A reviewer REJECTED the workflow you just wrote:\n\n{$critique}\n\n"
-                . 'Rewrite the FULL class fixing exactly those problems, keeping the rest. Reply with only the PHP code.';
+                . 'Rewrite the FULL class fixing exactly those problems, keeping the rest, and record the '
+                . 'corrected source again with the artifact tool.';
         }
+
+        // The plan and the difficulty arrive as addressed params (understand() and assess() set them);
+        // an unreadable difficulty maps to `moderate` — the middle, which cannot be wrong in an expensive
+        // direction — so the drafter and the generated solver are always routed to a real tier.
+        $plan = (string) $this->param('plan');
+        $difficulty = strtolower(trim((string) $this->param('difficulty')));
+        $difficulty = \in_array($difficulty, ['simple', 'complex'], true) ? $difficulty : 'moderate';
+        $workerTier = $difficulty === 'simple' ? 'worker' : 'worker-smart';
 
         $namespace = (string) $this->param('solverNamespace');
         $class = (string) $this->param('solverName');
@@ -277,7 +308,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             {$task}
 
             Plan:
-            {$this->plan}
+            {$plan}
 
             How to decide the steps — this is the MODEL of how a workflow works and the principle for
             choosing steps, NOT a list of steps to stamp out (a step is one or more #[Step] methods; use
@@ -315,7 +346,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - implement `public function name(): string`
             - keep state in plain typed properties
             - write each step as a `protected` method marked `#[Step]` (NOT public, NOT private — the base run() drives them and the code is rejected otherwise); the default run() runs them in declaration order
-            - GRANULARITY — SCALE the number of steps to the task's difficulty (assessed as **{$this->difficulty}**). A SIMPLE/trivial task needs only 1–3 steps — and a SINGLE step (implement-and-verify in one) is perfectly fine for it; do NOT force the full phase-by-phase recipe onto a simple task; the extra steps cost more and add failure surface for no benefit. A MODERATE task wants a handful of focused steps. Reserve the full breakdown (design / review / implement-per-method / test / deliver) for genuinely COMPLEX work. The reason to split AT ALL: each step's `ai()` starts with a fresh, lean context (one fat step re-sends a huge growing history — expensive), and a small step is a unit a critic can check. BUT every step must be a COHERENT unit of REAL work that produces something validatable (an artifact, a passing gate) — never a step that just asks a question or restates a plan. When in doubt, FEWER steps: prefer the smallest decomposition that still lets each piece be verified. Not one giant step, and not a parade of ceremonial ones.
+            - GRANULARITY — SCALE the number of steps to the task's difficulty (assessed as **{$difficulty}**). A SIMPLE/trivial task needs only 1–3 steps — and a SINGLE step (implement-and-verify in one) is perfectly fine for it; do NOT force the full phase-by-phase recipe onto a simple task; the extra steps cost more and add failure surface for no benefit. A MODERATE task wants a handful of focused steps. Reserve the full breakdown (design / review / implement-per-method / test / deliver) for genuinely COMPLEX work. The reason to split AT ALL: each step's `ai()` starts with a fresh, lean context (one fat step re-sends a huge growing history — expensive), and a small step is a unit a critic can check. BUT every step must be a COHERENT unit of REAL work that produces something validatable (an artifact, a passing gate) — never a step that just asks a question or restates a plan. When in doubt, FEWER steps: prefer the smallest decomposition that still lets each piece be verified. Not one giant step, and not a parade of ceremonial ones.
             - a step's OUTPUT goes into one of TWO channels — NEVER its return value (the engine ignores what a step returns): (a) `\$this->artifact('<label>', text|file: ...)` — the GLOBAL channel, visible to every later step (via recall) AND to this step's critic; (b) the handoff — the automatic baton to the NEXT step only (below). Do not stash results in fields to pass them on; use these channels.
             - PARAMS — a THIRD, optional channel for passing a CONCRETE VALUE (not content) to a SPECIFIC later step to use IN CODE: `\$this->setParam('<forStep>', '<name>', \$value)` pins it FOR a named step (the target step's METHOD name), and THAT step reads it with `\$this->param('<name>')`. It is ADDRESSED: only the named step sees it — other steps cannot read it (the target step's own critic does). Use it when a step DECIDES an exact value the code of a particular later step needs deterministically — a file path, a count, an id, a strategy flag — rather than prose for the model. DURABLE (survives a resume) and entirely OPTIONAL: most steps pass nothing this way. (artifact = content visible to everyone + the critic; handoff = a prose note for the next model; param = a concrete value addressed to ONE named step's code.)
             - to have a step reviewed automatically, mark it `#[Step(critic: '<name>')]` and have it RECORD its output as an artifact — the critic judges that artifact, not any return value — and fold `\$this->critique()` (the reviewer's guidance, null on the first run) into your prompt so a re-run fixes the findings — fitting for steps like a SOLID/design review or a test-and-accept gate
@@ -332,7 +363,7 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - by DEFAULT `\$this->ai(\$prompt)` exposes EVERY tool to the model — that is the norm, let a step use whatever it needs; pass an explicit list ONLY to deliberately restrict, or `[]` for a pure-reasoning call that must not act
             - you may give THIS workflow its own bespoke tools: mark a method `#[\\Claw\\Workflow\\Tool(description: '<what it does>')]` and it becomes a tool the model can call inside your `ai()` steps (named after the method in snake_case; its typed params become the input schema). Use this to let the model check and FIX its own work — e.g. a `validate()` tool that runs `php -l` / the test gate via `\$this->tool('bash', ...)` and returns OK or the error, so a step can call it, see the failure, and correct itself in the same exchange instead of failing the run
             - route a step to a specialized agent role via the 3rd arg, e.g. `\$this->ai(\$p, null, agent: 'reviewer')`; roles: worker (cheap default), worker-smart (stronger model), reviewer (SOLID/code review), supervisor (unblock/escalate), planner (validate/design)
-            - this task was assessed as **{$this->difficulty}**; route the solver's own implementation/test steps that call the model to `agent: '{$this->workerTier}'` so the work runs on the right-sized model (keep reviewer/supervisor steps on their roles)
+            - this task was assessed as **{$difficulty}**; route the solver's own implementation/test steps that call the model to `agent: '{$workerTier}'` so the work runs on the right-sized model (keep reviewer/supervisor steps on their roles)
             - when you NEED a missing detail or a decision from a person (an incomplete issue, a foundational design choice), do NOT guess: call `\$this->ask(string \$question): string` and use the returned answer — behind it may be a human or a supervisor agent
             - the run is budget-limited (tokens and time); work in focused steps and do not loop or re-read pointlessly, an exhausted budget stops the run
             - the ONLY way to touch files or the shell is through `\$this->tool(\$name, \$params)`; use EXACTLY these tool names and input keys (do not invent keys):
@@ -345,7 +376,9 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
             - THE BATON IS AUTOMATIC: after each step the engine EXPLICITLY asks the model — continuing that step's OWN ai() conversation — to form a handoff (a summary of what the step did + the findings the next step must watch for), and feeds it into the next step's context as "the previous step handed this to you". You do NOT write handoff code, and it is NOT your return value — it is formed from the step's ai() work. So make each step do its work through `\$this->ai(...)`/tools and record key outputs as artifacts; the next step can rely on the incoming handoff being present (and can pull any earlier artifact with recall)
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval, include/require, or a dynamic `\$var(...)` call — they are forbidden and the code will be rejected
 
-            Return ONLY the PHP source — no prose, no markdown fences.
+            Write the complete class, then RECORD it by calling the artifact tool with label 'solver-class'
+            and the full PHP source as its text (no prose, no markdown fences). The tool call is how you hand
+            the class on — do not just reply with it as text.
             PROMPT;
     }
 
@@ -377,20 +410,5 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
         }
 
         return $docs === [] ? implode(', ', $names) : implode("\n", $docs);
-    }
-
-    /**
-     * One strong-tier revision pass: fold the rejection reason back into the original draft
-     * constraints and re-extract the corrected source. Used by {@see save()} on a rejection.
-     */
-    private function reviseCode(string $reason): string
-    {
-        return $this->extractCode($this->ai(
-            "{$reason}\n\n"
-            . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-            . $this->draftPrompt() . "\n\nThe code you produced was:\n\n" . $this->code,
-            [],
-            'worker-smart',
-        ));
     }
 }

@@ -7,6 +7,7 @@ namespace Tests\Workflow;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\StopReason;
 use Claw\Agent\TextBlock;
+use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
 use Claw\Project\Issue;
 use Claw\Project\Project;
@@ -40,16 +41,22 @@ final class GenerateIssueWorkflowTest
             $registry->add(new ListFilesTool($workspace));
             $registry->add(new DefineWorkflowTool($store, new WorkflowValidator()));
 
-            // Each step calls ai(); between steps the engine forms a handoff (continuing the step's
-            // conversation). draft is critic-gated, so after the code comes the solverReview critic's
-            // verdict: plan, [handoff], difficulty, [handoff], code, OK(critic). save makes no model call.
+            // The declarative flow: each #[StepAI] runs its exchange, then the base extracts its params and
+            // forms the handoff — both continuing the step's own conversation. So the model sees, in order:
+            // the plan and its plan-param restatement and understand's handoff; the difficulty reasoning and
+            // its difficulty-param word and assess's handoff; the draft (which RECORDS the solver via the
+            // artifact tool, then settles), the critic, and the code param that hands the source to save.
             $agent = new ScriptedAgent(
-                self::answer('Plan: read the file, then summarize it.'),
-                self::answer('handoff after understand'),
-                self::answer('simple — a localized, mechanical change.'),
-                self::answer('handoff after assess'),
-                self::answer(self::solverCode('Issue7Solver')),
-                self::answer('OK'),   // the solverReview critic passes the drafted solver
+                self::answer('Plan: read the file, then summarize it.'),   // understand: work
+                self::answer('Plan: read the file, then summarize it.'),   // understand: plan param
+                self::answer('handoff after understand'),                  // understand -> assess handoff
+                self::answer('simple — a localized, mechanical change.'),  // assess: work
+                self::answer('simple'),                                    // assess: difficulty param
+                self::answer('handoff after assess'),                      // assess -> draft handoff
+                self::solverArtifact('Issue7Solver'),                      // draft: records the solver
+                self::answer('recorded the solver'),                       // draft: settles
+                self::answer('OK'),                                        // solverReview critic passes
+                self::answer(self::solverCode('Issue7Solver')),            // draft: code param -> save
             );
 
             $env = new Environment()
@@ -97,8 +104,9 @@ final class GenerateIssueWorkflowTest
                 'Rows with an embedded comma are written unquoted.',
             ));
 
-            // request #5 is the draft call (plan, handoff, difficulty, handoff, DRAFT, critic)
-            $draft = self::textOf($agent, 4);
+            // requests[6] is the draft call — plan, plan-param, handoff, difficulty, difficulty-param,
+            // handoff, DRAFT (records the solver), settle, critic, code-param.
+            $draft = self::textOf($agent, 6);
             Assert::true(str_contains($draft, 'Fix the CSV export'));
             Assert::true(str_contains($draft, 'Rows with an embedded comma are written unquoted.'));
         } finally {
@@ -124,7 +132,7 @@ final class GenerateIssueWorkflowTest
             // The difficulty is folded into the draft prompt, so that is where the verdict shows. A line
             // that is not one of the three bare words lands on `moderate` — the middle, which cannot be
             // wrong in an expensive direction. What matters is that it is no longer read as `complex`.
-            $draft = self::textOf($agent, 4);
+            $draft = self::textOf($agent, 6);
             Assert::false(str_contains($draft, 'assessed as **complex**'));
             Assert::true(str_contains($draft, 'assessed as **moderate**'));
         } finally {
@@ -150,8 +158,9 @@ final class GenerateIssueWorkflowTest
         try {
             $agent = self::generate($dir, 'Issue10Solver', 'simple');
 
-            // request #6 is the critic (plan, handoff, difficulty, handoff, draft, CRITIC)
-            $review = self::textOf($agent, 5);
+            // requests[8] is the critic — the draft exchange is the artifact-recording turn plus its
+            // settle, so the critic follows two turns later than on the old imperative flow.
+            $review = self::textOf($agent, 8);
 
             Assert::false(str_contains($review, 'REJECT only if'));   // the closed list is gone
             Assert::true(str_contains($review, 'Plan: change the thing.'));            // the plan
@@ -175,7 +184,7 @@ final class GenerateIssueWorkflowTest
 
         try {
             $agent = self::generate($dir, 'Issue13Solver', 'simple');
-            $review = self::textOf($agent, 5);   // the critic's prompt
+            $review = self::textOf($agent, 8);   // the critic's prompt
 
             Assert::true(str_contains($review, 'too SIMPLE to earn its own existence'));
             Assert::true(str_contains($review, 'is it a step at all, or ceremony?'));
@@ -203,7 +212,7 @@ final class GenerateIssueWorkflowTest
         try {
             $agent = self::generate($dir, 'Issue11Solver', 'simple', recipe: 'PROVE IT RED FIRST, then build.');
 
-            $draft = self::textOf($agent, 4);
+            $draft = self::textOf($agent, 6);
             Assert::true(str_contains($draft, 'THE APPROACH TO FOLLOW'));
             Assert::true(str_contains($draft, 'PROVE IT RED FIRST, then build.'));
             Assert::true(str_contains($draft, 'HOW TO DECIDE THE STEPS'));   // the general recipe stays
@@ -221,7 +230,7 @@ final class GenerateIssueWorkflowTest
         try {
             $agent = self::generate($dir, 'Issue12Solver', 'simple');
 
-            Assert::false(str_contains(self::textOf($agent, 4), 'THE APPROACH TO FOLLOW'));
+            Assert::false(str_contains(self::textOf($agent, 6), 'THE APPROACH TO FOLLOW'));
         } finally {
             self::rmrf($dir);
         }
@@ -241,12 +250,16 @@ final class GenerateIssueWorkflowTest
         $registry->add(new DefineWorkflowTool($store, new WorkflowValidator()));
 
         $agent = new ScriptedAgent(
-            self::answer('Plan: change the thing.'),
-            self::answer('handoff after understand'),
-            self::answer($verdict),
-            self::answer('handoff after assess'),
-            self::answer(self::solverCode($class)),
-            self::answer('OK'),
+            self::answer('Plan: change the thing.'),    // understand: work
+            self::answer('Plan: change the thing.'),    // understand: plan param (embedded in draft + critic prompts)
+            self::answer('handoff after understand'),   // handoff
+            self::answer('reasoning about difficulty'), // assess: work
+            self::answer($verdict),                     // assess: difficulty param (the line under test)
+            self::answer('handoff after assess'),       // handoff
+            self::solverArtifact($class),               // draft: records the solver
+            self::answer('recorded the solver'),        // draft: settles
+            self::answer('OK'),                         // critic passes
+            self::answer(self::solverCode($class)),     // draft: code param -> save
         );
 
         $env = new Environment()
@@ -281,6 +294,14 @@ final class GenerateIssueWorkflowTest
         }
 
         return $text;
+    }
+
+    /** A draft turn that RECORDS the solver via the artifact tool — the declarative codegen output. */
+    private static function solverArtifact(string $class): AgentResponse
+    {
+        $call = new ToolUseBlock('art-' . $class, 'artifact', ['label' => 'solver-class', 'text' => self::solverCode($class)]);
+
+        return new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage());
     }
 
     /** A valid solver class the WorkflowValidator accepts. */
