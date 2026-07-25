@@ -15,10 +15,12 @@ use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Tool\DeferredToolInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
 use Claw\Tool\ToolResultMeta;
+use Claw\Tool\ToolSearchTool;
 use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
@@ -958,7 +960,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // The handoff from the previous step is fed in automatically — the selective context carry-over —
         // plus the available tools named up front so the model reliably reaches for the right one
         // (recall, done, ...) instead of only sometimes noticing them.
-        $system = $scope->findSystemPrompt() . $this->handoffContext() . $palette->briefing('Tools available to you this step — call them by name when useful');
+        $system = $scope->findSystemPrompt() . $this->handoffContext();   // the tool briefing is the turn loop's now
 
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
@@ -1065,6 +1067,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     {
         $registry = $this->withLocalTools($this->env->findRegistry());
         $palette = $tools === null ? $registry : $registry->only($tools);
+
+        // When the palette holds occasional (deferred) tools, add search_tools so their schemas can be
+        // withheld from the context until the model asks — it carries the palette to answer that ask.
+        if ($this->hasDeferred($palette)) {
+            $palette = $palette->with(new ToolSearchTool($palette));
+        }
+
         $scope = $this->env->child()->set(EnvKey::Registry, $palette);
 
         $model = $agent !== null ? $this->agentModel($agent) : null;
@@ -1074,6 +1083,18 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         return $scope;
+    }
+
+    /** Whether a palette holds any occasional (deferred) tool — the trigger for adding search_tools. */
+    private function hasDeferred(Registry $palette): bool
+    {
+        foreach ($palette->all() as $tool) {
+            if ($tool instanceof DeferredToolInterface) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

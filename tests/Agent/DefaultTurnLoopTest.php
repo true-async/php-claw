@@ -19,10 +19,14 @@ use Claw\Agent\ToolResultBlock;
 use Claw\Agent\ToolUseBlock;
 use Claw\Agent\Usage;
 use Claw\Exceptions\ContextLengthException;
+use Claw\Http\HttpResponse;
+use Claw\Tool\HttpTool;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
+use Claw\Tool\ToolSearchTool;
 use Testo\Assert;
 use Testo\Test;
+use Tests\Support\FakeHttpClient;
 use Tests\Support\RecordingExecutor;
 use Tests\Support\ScriptedAgent;
 use Tests\Support\StubTool;
@@ -63,8 +67,39 @@ final class DefaultTurnLoopTest
         // model, system prompt and tool specs are threaded into the request
         Assert::count($agent->requests, 1);
         Assert::same($agent->requests[0]->model, 'model-x');
-        Assert::same($agent->requests[0]->system, 'you are claw');
+        Assert::true(str_starts_with($agent->requests[0]->system, 'you are claw'));   // + the turn loop's tool briefing
         Assert::same($agent->requests[0]->tools[0]->name, 'echo');
+    }
+
+    #[Test]
+    public function aDeferredToolIsWithheldUntilSearchLoadsIt(): void
+    {
+        // Progressive disclosure: a deferred tool (http_request) is named in the briefing but its schema is
+        // NOT sent to the API until the model finds it with search_tools; from the next turn it is callable.
+        $palette = new Registry();
+        $palette->add(new HttpTool(new FakeHttpClient(new HttpResponse(200, 'ok'))));   // DeferredToolInterface
+        $palette = $palette->with(new ToolSearchTool($palette));   // the door, exactly as paletteScope adds it
+
+        $search = new ToolUseBlock('t1', 'search_tools', ['query' => 'fetch a url from the web']);
+        $http = new ToolUseBlock('t2', 'http_request', ['url' => 'https://example.com']);
+        $agent = new ScriptedAgent(
+            new AgentResponse([$search], [$search], StopReason::ToolUse, new Usage(1, 1)),
+            new AgentResponse([$http], [$http], StopReason::ToolUse, new Usage(1, 1)),
+            new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done'),
+        );
+
+        new DefaultTurnLoop($agent, new RecordingExecutor(), 'model-x', 'sys', $palette)->run([Message::userText('go')]);
+
+        $namesOf = static fn (int $i): array => array_map(static fn ($s): string => $s->name, $agent->requests[$i]->tools);
+
+        // turn 1: search_tools is offered, http_request is withheld and flagged in the briefing
+        Assert::true(\in_array('search_tools', $namesOf(0), true));
+        Assert::false(\in_array('http_request', $namesOf(0), true));
+        Assert::true(str_contains($agent->requests[0]->system, 'http_request'));
+        Assert::true(str_contains($agent->requests[0]->system, 'NOT loaded'));
+
+        // turn 2: the search loaded it, so now its full schema is in the API and it can be called
+        Assert::true(\in_array('http_request', $namesOf(1), true));
     }
 
     #[Test]
@@ -493,7 +528,7 @@ final class DefaultTurnLoopTest
 
         // model, system and specs are re-threaded on the follow-up round-trip too
         Assert::same($agent->requests[1]->model, 'model-x');
-        Assert::same($agent->requests[1]->system, 'you are claw');
+        Assert::true(str_starts_with($agent->requests[1]->system, 'you are claw'));   // + the turn loop's tool briefing
         Assert::same($agent->requests[1]->tools[0]->name, 'echo');
     }
 

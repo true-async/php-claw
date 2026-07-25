@@ -10,8 +10,14 @@ use Claw\Exceptions\ToolException;
  * Return the current date and time. Safe (read-only). Useful because the model
  * has no clock of its own.
  */
-final readonly class DateTool implements ToolInterface
+final readonly class DateTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['date', 'time', 'now', 'today', 'clock', 'timestamp', 'day', 'when'];
+    }
+
     public function name(): string
     {
         return 'current_date';

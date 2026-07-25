@@ -20,8 +20,14 @@ use Claw\Http\HttpClientInterface;
  * is an error and surfaces as a {@see ToolException}. The body is clipped so a huge page cannot flood the
  * context.
  */
-final readonly class HttpTool implements ToolInterface
+final readonly class HttpTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['network', 'http', 'https', 'web', 'fetch', 'url', 'download', 'api', 'request', 'internet', 'scrape'];
+    }
+
     public function __construct(
         private HttpClientInterface $http,
         private int $maxBytes = 100_000,

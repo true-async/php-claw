@@ -7,8 +7,10 @@ namespace Claw\Agent;
 use Claw\Exceptions\ContextLengthException;
 use Claw\Exec\ExecutorInterface;
 use Claw\Tool\BashTool;
+use Claw\Tool\DeferredToolInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
+use Claw\Tool\ToolSearchTool;
 use Claw\Trace\Tracer;
 
 /**
@@ -156,6 +158,21 @@ final class DefaultTurnLoop implements TurnLoopInterface
         // input instead of finishing; without one the system prompt is untouched (headless).
         $system = $this->ask === null ? $this->system : $this->system . self::ASK_INSTRUCTION;
 
+        // Progressive tool disclosure: when the palette carries a search_tools tool, the DEFERRED tools
+        // ({@see DeferredToolInterface}) are withheld from the API — named in the briefing, callable only
+        // after search_tools has loaded them — so a large palette does not ship every schema every turn.
+        // No search_tools means no deferred tools in this palette, so everything is full, as before.
+        $twoLevel = $this->tools->has('search_tools');
+        $loaded = [];   // names whose full schema goes to the API (grows as search_tools loads more)
+
+        if ($twoLevel) {
+            foreach ($this->tools->all() as $paletteTool) {
+                if (!$paletteTool instanceof DeferredToolInterface) {
+                    $loaded[$paletteTool->name()] = true;   // everything not deferred is always full
+                }
+            }
+        }
+
         // Loops until the model returns a final answer (no tool_use). The bound is
         // memory: the model's context window (the API rejects an oversized history ->
         // ContextLengthException), plus an optional soft cap.
@@ -179,8 +196,8 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $response = $this->agent->send(new AgentRequest(
                 model: $this->model,
                 messages: $history,
-                system: $system,
-                tools: $this->tools->specs(),
+                system: $system . $this->toolBriefing($loaded),
+                tools: $twoLevel ? $this->tools->only(array_keys($loaded))->specs() : $this->tools->specs(),
             ));
 
             $totalInput  += $response->usage->inputTokens;
@@ -286,6 +303,19 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 $result = $this->executor->call(new ToolCall($call->id, $call->name, $call->input));
                 $this->tracer?->toolResult($call->name, $result->content, $result->isError);
                 $results[] = $result;
+
+                // A search_tools call LOADS the tools it matched: mark them so their full schema goes to
+                // the API from the NEXT turn. The tool already returned that set to the model; this just
+                // re-derives it (matches() is deterministic) to update what the loop advertises.
+                if ($twoLevel && $call->name === 'search_tools') {
+                    $search = $this->tools->has('search_tools') ? $this->tools->get('search_tools') : null;
+
+                    if ($search instanceof ToolSearchTool) {
+                        foreach ($search->matches((string) ($call->input['query'] ?? '')) as $matched) {
+                            $loaded[$matched] = true;
+                        }
+                    }
+                }
 
                 // No-progress guard: the SAME tool returning the SAME result — an error OR a useless
                 // success ("no such tool", "nothing found") — over and over is a wedged model, not work.
@@ -405,6 +435,50 @@ final class DefaultTurnLoop implements TurnLoopInterface
         $exit = BashTool::exitCode($result->content);
 
         return $exit !== null && $exit !== 0;
+    }
+
+    /**
+     * The short tool list appended to the system prompt: one line per tool, so the model reliably notices
+     * what it has (a model handed only API schemas reaches for tools inconsistently). A DEFERRED tool not
+     * yet loaded is named and flagged — the model must reach it with search_tools before it can call it.
+     *
+     * @param array<string, true> $loaded names whose full schema is already in the API this turn
+     */
+    private function toolBriefing(array $loaded): string
+    {
+        $tools = $this->tools->all();
+
+        if ($tools === []) {
+            return '';
+        }
+
+        $lines = [];
+
+        foreach ($tools as $tool) {
+            $name = $tool->name();
+            $line = "- {$name}: " . self::firstSentence($tool->description());
+
+            if ($tool instanceof DeferredToolInterface && !isset($loaded[$name])) {
+                $line .= '  — NOT loaded; call search_tools to use it';
+            }
+
+            $lines[] = $line;
+        }
+
+        return "\n\nTools available to you — call them by name when useful:\n" . implode("\n", $lines);
+    }
+
+    /** The first sentence of a tool's description (or a clipped head), for the one-line briefing. */
+    private static function firstSentence(string $text): string
+    {
+        $text = trim((string) preg_replace('/\s+/', ' ', $text));
+        $end = strpos($text, '. ');
+
+        if ($end !== false && $end <= 160) {
+            return substr($text, 0, $end + 1);
+        }
+
+        return \strlen($text) > 160 ? substr($text, 0, 157) . '…' : $text;
     }
 
     private function keepGoing(int $turnNo): bool

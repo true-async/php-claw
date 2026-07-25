@@ -229,7 +229,7 @@ final readonly class Triage
             $this->agent,
             $env->executor(),
             $env->findAgentModel('project-manager'),
-            self::SYSTEM . $registry->briefing('The tools you have — these are your only way to act'),
+            self::SYSTEM,   // the tool briefing is the turn loop's now
             $registry,
             tracer: $tracer,
         );

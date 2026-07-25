@@ -15,8 +15,14 @@ use Claw\Exceptions\ToolException;
  * the delay and then fires — there is no central timer loop. Reminders live in
  * memory, so they do not survive a restart (persistence is a later layer).
  */
-final readonly class ScheduleTool implements ToolInterface
+final readonly class ScheduleTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['schedule', 'cron', 'timer', 'later', 'remind', 'recurring', 'defer', 'periodic'];
+    }
+
     /**
      * @param \Closure(string): void $deliver Sends a message to the user.
      */

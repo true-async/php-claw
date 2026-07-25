@@ -12,8 +12,14 @@ use Claw\Exceptions\ToolException;
  * Dangerous: this runs arbitrary PHP in-process. It is gated by the permission
  * layer; intended for quick calculations like `strtoupper("hi")` or `gmdate(...)`.
  */
-final readonly class PhpEvalTool implements ToolInterface
+final readonly class PhpEvalTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['php', 'eval', 'run', 'execute', 'compute', 'snippet', 'expression', 'calculate'];
+    }
+
     public function name(): string
     {
         return 'php_eval';

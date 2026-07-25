@@ -684,7 +684,7 @@ final class IssueRunnerTest
             $system = $agent->requests[0]->system;
             Assert::false(str_contains($system, 'helpful coding assistant'));
             Assert::false(str_contains($system, 'Be concise'));
-            Assert::true(str_contains($system, 'Tools available to you this step'));   // the briefing stays
+            Assert::true(str_contains($system, 'Tools available to you'));   // the briefing stays (now built by the turn loop)
         } finally {
             self::rmrf($projectsDir);
             self::rmrf($projectFolder);
