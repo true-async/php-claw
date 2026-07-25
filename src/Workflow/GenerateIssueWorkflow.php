@@ -341,6 +341,22 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
               is a CRITIC (below). So: either the model verifies-and-fixes within its own exchange, or you
               gate the step with a critic — never a bare "verify" step.
 
+            THE SHAPE OF A STEP, EXACTLY — copy this shape; the body is one `return new AiStep(...);` and
+            nothing else (no code, no side effects, and PHP heredocs/quotes only — never Python triple quotes):
+
+                #[StepAI]
+                protected function implement(): AiStep
+                {
+                    return new AiStep(
+                        'Read src/Foo.php, add the method the ticket asks for, then run `php -l` on the file '
+                        . 'and fix any error before you stop. Record the finished file with the artifact tool.',
+                        ['read_file', 'write_file', 'bash', 'artifact'],
+                        '{$workerTier}',
+                    );
+                }
+
+            A CODE step is `protected function <name>(): void` marked `#[Step]` and calls `\$this->tool(...)`.
+
             Hard requirements. Most are checked mechanically when the class is saved and cost you a
             rejection round if missed — the opening tag and `declare(strict_types=1)`, the namespace and
             class name, `extends WorkflowAbstract`, at least one step, that steps are `protected`,
