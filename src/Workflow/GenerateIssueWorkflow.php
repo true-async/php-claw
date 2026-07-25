@@ -92,18 +92,18 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
     protected function understand(): AiStep
     {
         return new AiStep(
-            'You are planning how to solve a task by writing a workflow. Inspect the project if it '
-            . 'helps (read_file, list_files), then, in a few concrete sentences: outline the steps a '
-            . 'workflow should take to solve this task, AND assess whether the project is mature with '
-            . 'an established architecture and whether the change is foundational — this decides '
-            . "whether a human must approve the design before it is implemented:\n\n" . $this->taskSummary(),
+            'You are planning how to solve this task by writing a workflow — triage has already decided '
+            . 'one is warranted, so do NOT re-litigate that. Inspect the project to ground the plan (read '
+            . 'the code the ticket touches, its tests, how it is laid out), then, in a few concrete '
+            . "sentences, outline the DISTINCT STAGES the workflow should take. Describe the WORK, not the "
+            . "algorithm:\n\n" . $this->taskSummary(),
             null,   // FULL palette by default — the planner may read the project AND query the knowledge base
             'worker-smart',   // planning a whole workflow is heavy thinking — use the strong tier
             params: [new ParamRequest(
                 forStep: 'draft',
                 name: 'plan',
-                instruction: 'Restate your plan as a few concrete sentences: the steps a workflow should take '
-                    . 'to solve this task, and whether a human must approve the design before it is implemented.',
+                instruction: 'Restate your plan as a few concrete sentences: the distinct stages the '
+                    . 'workflow should take to solve this task.',
             )],
         );
     }
