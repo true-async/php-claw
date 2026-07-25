@@ -1355,7 +1355,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
-        throw WorkflowException::stopped('run stopped: ' . $budget->reason());
+        throw WorkflowException::budgetSpent('run stopped: ' . $budget->reason());
     }
 
     /** Read a numeric environment value (a budget cap), or 0.0 when unset/non-numeric. */

@@ -409,6 +409,11 @@ final readonly class IssueRunner
             throw $cancellation;
         } catch (\Throwable $e) {
             $ctx->tracer->exit($span);
+
+            if ($e instanceof WorkflowException && $e->budget) {
+                return $this->pauseForBudget($ctx, $e->getMessage());   // paused on budget, not failed
+            }
+
             $this->failRun($ctx, "run #{$ctx->runId} failed: {$e->getMessage()}");
             $this->giveBackToProjectManager($ctx->issue, "the direct attempt failed: {$e->getMessage()}", $ctx->runId);
 
@@ -548,6 +553,24 @@ final readonly class IssueRunner
         $ctx->store->setRunStatus($ctx->runId, RunStatus::Failed);
         $ctx->tracer->log('run-failed', $reason, [], Level::Notice);
         $this->frontend->report($reason, true);
+    }
+
+    /**
+     * A run whose budget ran out is PAUSED, not failed: the ticket goes to WaitingHuman and the run is
+     * left RESUMABLE — its status is untouched, so raising the limit and running the issue again picks it
+     * up where it stopped. Handing it back to triage as a failure would throw away work the budget only
+     * interrupted. Returns 0: a pause is not an error.
+     */
+    private function pauseForBudget(RunContext $ctx, string $reason): int
+    {
+        $ctx->store->setIssueStatus($ctx->issue->id, IssueStatus::WaitingHuman);
+        $ctx->tracer->log('run-paused', "{$reason} — raise the budget and run issue #{$ctx->issue->id} again", [], Level::Notice);
+        $this->frontend->report(
+            "Run #{$ctx->runId} paused: {$reason}. Raise the budget and run issue #{$ctx->issue->id} again to resume.",
+            false,
+        );
+
+        return 0;
     }
 
     private function giveBackToProjectManager(Issue $issue, string $reason, string $runId): void
@@ -758,6 +781,15 @@ final readonly class IssueRunner
             } catch (\Cancellation $cancellation) {
                 throw $cancellation;   // a cancelled run must stop — never "repair" a cancellation
             } catch (\Throwable $e) {
+                // A budget stop is a PAUSE, not a failure: the run is left resumable and the ticket waits
+                // on a person to raise the limit, not on triage. Caught before the deliberate-stop branch
+                // below, which would otherwise fail the run and hand it back.
+                if ($e instanceof WorkflowException && $e->budget) {
+                    $ctx->tracer->exit($solverSpan);
+
+                    return $this->pauseForBudget($ctx, $e->getMessage());
+                }
+
                 // Repair answers ONE question: is this workflow's code broken? Three kinds of failure
                 // arrive here and only one of them is that.
                 //
@@ -767,14 +799,12 @@ final readonly class IssueRunner
                 // then runs that invention. Measured: a 400 from a malformed history had the supervisor
                 // rewrite a workflow whose source it could not even read.
                 //
-                // A DELIBERATE stop is the run doing what it was told: the budget ran out, the supervisor
-                // said `stop`, a step exhausted its review rounds with nobody to escalate to. The code is
-                // not merely innocent here, it is being repaired AGAINST a decision that was taken on
-                // purpose — the supervisor was sent to rewrite the class it had itself just stopped, and
-                // the cheapest way to satisfy "fix the cause of: run stopped by the supervisor" is to
-                // delete the critic that stopped it. A budget stop was worse still: the repair's own
-                // model call hit the same spent budget, so the ticket came back reading "the solver
-                // crashed and could not be repaired: run stopped: budget spent".
+                // A DELIBERATE stop is the run doing what it was told: the supervisor said `stop`, or a
+                // step exhausted its review rounds with nobody to escalate to. (A budget stop is handled
+                // just above, as a PAUSE, not here.) The code is not merely innocent, it is being repaired
+                // AGAINST a decision taken on purpose — the supervisor sent to rewrite the class it had
+                // itself just stopped, and the cheapest way to satisfy "fix the cause of: run stopped by
+                // the supervisor" is to delete the critic that stopped it.
                 //
                 // Everything else — TypeError, ParseError, a step calling a method that is not there —
                 // really can mean the generated code is broken, which is what repair is for.

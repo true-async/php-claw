@@ -20,8 +20,11 @@ namespace Claw\Exceptions;
  */
 final class WorkflowException extends ClawException
 {
-    public function __construct(string $message, public readonly bool $deliberate = false)
-    {
+    public function __construct(
+        string $message,
+        public readonly bool $deliberate = false,
+        public readonly bool $budget = false,
+    ) {
         parent::__construct($message);
     }
 
@@ -29,5 +32,16 @@ final class WorkflowException extends ClawException
     public static function stopped(string $message): self
     {
         return new self($message, deliberate: true);
+    }
+
+    /**
+     * A run halted because its TOTAL budget is spent — a deliberate, RESUMABLE stop that is not a failure.
+     * The run path turns it into a WaitingHuman pause the operator settles by raising the limit, rather
+     * than a failed run handed back to triage. {@see $budget} tells it apart from the other deliberate
+     * stops (a supervisor `stop`, review rounds exhausted), which are genuine dead ends for the ticket.
+     */
+    public static function budgetSpent(string $message): self
+    {
+        return new self($message, deliberate: true, budget: true);
     }
 }

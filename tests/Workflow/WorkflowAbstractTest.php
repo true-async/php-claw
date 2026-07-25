@@ -700,15 +700,15 @@ final class WorkflowAbstractTest
             ->set(EnvKey::Ask, $channel);
         $wf = new ProbeWorkflow($env, 'r1');
 
-        $threw = false;
+        $marked = false;
 
         try {
             $wf->callAi('hi');
-        } catch (WorkflowException) {
-            $threw = true;
+        } catch (WorkflowException $e) {
+            $marked = $e->budget;   // tagged a budget stop, so the run path can PAUSE the ticket, not fail it
         }
 
-        Assert::true($threw);            // an exhausted budget stops the run
+        Assert::true($marked);           // an exhausted budget stops the run, marked as a budget stop
         Assert::false($channel->asked);  // and it did NOT consult the ask channel
     }
 

@@ -256,6 +256,40 @@ final class IssueRunnerTest
     }
 
     #[Test]
+    public function aBudgetStopPausesTheRunAsWaitingHumanRatherThanFailingIt(): void
+    {
+        $projectsDir = self::tempDir();
+        $projectFolder = self::tempDir();
+
+        try {
+            $store = self::registerProject($projectsDir, $projectFolder);
+
+            for ($i = 0; $i < 20; $i++) {
+                $store->addIssue("filler {$i}");
+            }
+            $issue = $store->addIssue('a task whose run runs out of budget');
+
+            $workflows = WorkflowStore::solvers($projectsDir, $store->project()->id);
+            $solver = self::solverName($issue->id);
+            $workflows->write($solver, self::pausingSolverCode($workflows->namespaceFor(true), $solver), true);
+
+            $frontend = new RecordingRunFrontend();
+            $runner = new IssueRunner($projectsDir, $store, self::config($projectsDir), new ScriptedAgent(), $frontend);
+
+            Assert::same($runner->run($issue), 0);   // a pause is not a failure
+
+            // The ticket waits on a person to raise the budget; the run is left resumable, not rewritten,
+            // and not handed back to triage.
+            Assert::same($store->loadIssue($issue->id)->status, IssueStatus::WaitingHuman);
+            Assert::false(is_file($workflows->path($solver . 'R1', true)));
+            Assert::false($frontend->reported('repairing'));
+        } finally {
+            self::rmrf($projectsDir);
+            self::rmrf($projectFolder);
+        }
+    }
+
+    #[Test]
     public function theDirectPathNeedsAVerdictItCannotGiveItself(): void
     {
         // The worker used to end its own run by calling `done`, and every false completion this project
@@ -449,6 +483,37 @@ final class IssueRunnerTest
                 public function implement(): void
                 {
                     throw WorkflowException::stopped('run stopped: budget spent');
+                }
+            }
+
+            PHP;
+    }
+
+    /** A solver whose step halts because the budget is spent — a PAUSE, not a failure. */
+    private static function pausingSolverCode(string $namespace, string $class): string
+    {
+        return <<<PHP
+            <?php
+
+            declare(strict_types=1);
+
+            namespace {$namespace};
+
+            use Claw\\Exceptions\\WorkflowException;
+            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\WorkflowAbstract;
+
+            final class {$class} extends WorkflowAbstract
+            {
+                public function name(): string
+                {
+                    return 'pausing-solver';
+                }
+
+                #[Step]
+                public function implement(): void
+                {
+                    throw WorkflowException::budgetSpent('run stopped: budget spent');
                 }
             }
 
