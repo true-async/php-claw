@@ -178,8 +178,9 @@ final class TriageTest
             new Triage($store, $config, $agent)->analyse($issue);
             $system = $agent->requests[0]->system;
 
-            // An operational test for `direct`, not an adjective.
-            Assert::true(str_contains($system, 'CAN YOU NAME THE FILES IT TOUCHES'));
+            // An operational test for `direct`, not an adjective: can one agent, in one continuous
+            // context, carry it from start to finish.
+            Assert::true(str_contains($system, 'ONE agent, in ONE continuous context'));
 
             // And a stated order for when two verdicts both fit, which is the common case for a small
             // bug: `direct` and `library` would each have been defensible.
