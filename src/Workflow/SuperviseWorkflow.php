@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Exceptions\WorkflowException;
+
 /**
  * The supervisor's run-level CODE REPAIR: when a generated solver crashes at runtime, this takes its
  * source and the error and writes a FIXED version under a NEW class name (via the supervisor role and
@@ -17,37 +19,74 @@ namespace Claw\Workflow;
  */
 final class SuperviseWorkflow extends WorkflowAbstract
 {
-    private string $fixed = '';
+    /** One bounded repair: on a validator reject at save, back() re-writes once, then a second failure throws. */
+    private bool $repairAttempted = false;
 
     public function name(): string
     {
         return 'supervise-run';
     }
 
-    #[Step]
-    protected function repair(): void
+    /**
+     * A pure {@see StepAI}: declare the repair exchange (on the supervisor role), the base runs it. The
+     * corrected source reaches {@see save()} as an addressed `code` param — the declarative model carries
+     * nothing in fields.
+     */
+    #[StepAI]
+    protected function repair(): AiStep
     {
-        $this->fixed = $this->extractCode($this->ai($this->repairPrompt(), [], 'supervisor'));
+        return new AiStep(
+            $this->repairPrompt(),
+            [],
+            'supervisor',
+            params: [new ParamRequest(
+                forStep: 'save',
+                name: 'code',
+                instruction: 'Output the complete corrected PHP source, exactly and nothing else — '
+                    . 'no prose, no markdown fences.',
+            )],
+        );
     }
 
+    /**
+     * Save the corrected solver through `define_workflow` (which validates, then stores it). On a validator
+     * reject it is re-written ONCE: back() into {@see repair()} hands it the complaint via critique() and it
+     * rewrites; a second reject surfaces to the run path. A CODE step, so it never calls the model itself.
+     */
     #[Step]
     protected function save(): void
     {
-        $this->fixed = $this->saveGeneratedWorkflow(
-            (string) $this->param('fixedName'),
-            $this->fixed,
-            fn (string $rejection): string => $this->extractCode($this->ai(
-                "The corrected class was rejected: {$rejection}\n\n"
-                . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-                . $this->repairPrompt() . "\n\nThe code you produced was:\n\n" . $this->fixed,
-                [],
-                'supervisor',
-            )),
-        );
+        $code = $this->extractCode((string) $this->param('code'));
+        $result = $this->tool('define_workflow', [
+            'name' => (string) $this->param('fixedName'),
+            'code' => $code,
+            'shared' => true,
+        ]);
+
+        if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
+            return;
+        }
+
+        if ($this->repairAttempted) {
+            throw new WorkflowException($result);   // a second failure surfaces to the run path
+        }
+
+        $this->repairAttempted = true;
+        $this->back('repair', "The corrected class was rejected when it was saved: {$result}\n\n"
+            . 'Rewrite the FULL class fixing exactly that.');
     }
 
     private function repairPrompt(): string
     {
+        // A re-write after the validator rejected the save: the model still holds its previous attempt in
+        // the continued conversation, so hand it only the complaint to fix (via critique(), set by back()).
+        $critique = $this->critique();
+
+        if ($critique !== null) {
+            return "The corrected class was rejected:\n\n{$critique}\n\n"
+                . 'Rewrite the FULL class fixing exactly that. Reply with only the corrected PHP source.';
+        }
+
         $namespace = (string) $this->param('fixedNamespace');
         $class = (string) $this->param('fixedName');
         $error = (string) $this->param('error');

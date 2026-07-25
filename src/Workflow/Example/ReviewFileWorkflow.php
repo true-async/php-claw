@@ -4,23 +4,26 @@ declare(strict_types=1);
 
 namespace Claw\Workflow\Example;
 
+use Claw\Workflow\AiStep;
+use Claw\Workflow\ParamRequest;
 use Claw\Workflow\Step;
+use Claw\Workflow\StepAI;
 use Claw\Workflow\WorkflowAbstract;
 
 /**
  * An example workflow, showing the shape the base supports.
  *
- * State is plain fields. Steps are {@see Step} methods whose bodies are written by hand — read a
- * file with {@see tool()}, reach the model with {@see ai()}, write a field. The base drives the
- * steps in order, snapshots the fields after each, and skips steps already done on resume, so the
- * body stays this small. A critic is not special machinery: it is a sub-step — another ai() call
- * the author makes inside a step and acts on in plain PHP.
+ * Two kinds of step. A {@see Step} is CODE — deterministic glue, re-run whole on resume (here: read a
+ * file with {@see tool()} into a snapshotted field). A {@see StepAI} is PURE: it DECLARES one model
+ * exchange as an {@see AiStep} and does no work itself — the base runs, records and resumes that exchange.
+ * What one step hands a later one rides a channel — a handoff to the next step, or a param addressed to a
+ * named one — never a return value or a shared field of prose. A critic is not special machinery: mark the
+ * step `#[StepAI(critic: '<name>')]` and the base judges its recorded artifact against the rules in
+ * {@see criticRules()}, re-running the step on the supervisor's guidance while the critic is unhappy.
  */
 final class ReviewFileWorkflow extends WorkflowAbstract
 {
-    private string $source   = '';
-    private string $issues   = '';
-    private string $proposal = '';
+    private string $source = '';
 
     public function name(): string
     {
@@ -33,23 +36,33 @@ final class ReviewFileWorkflow extends WorkflowAbstract
         $this->source = $this->tool('read_file', ['path' => (string) $this->param('path')]);
     }
 
-    #[Step]
-    protected function findIssues(): void
+    #[StepAI]
+    protected function findIssues(): AiStep
     {
-        $this->issues = $this->ai("List the problems in this file:\n\n" . $this->source);
+        return new AiStep(
+            "List the problems in this file:\n\n" . $this->source,
+            params: [new ParamRequest(
+                forStep: 'propose',
+                name: 'issues',
+                instruction: 'List the problems you found, one per line.',
+            )],
+        );
     }
 
-    #[Step]
-    protected function propose(): void
+    #[StepAI(critic: 'solid')]
+    protected function propose(): AiStep
     {
-        $this->proposal = $this->ai("Propose concrete fixes for:\n\n" . $this->issues);
+        return new AiStep(
+            'Propose concrete fixes for these problems, then record your proposal with the artifact tool '
+            . "(label 'proposal'):\n\n" . (string) $this->param('issues'),
+            ['artifact'],
+        );
+    }
 
-        // A critic as a sub-step: judge the proposal with another ai() call and, if it is weak,
-        // redo it once. Plain PHP — the author decides when to judge; nothing is baked into step().
-        $verdict = $this->ai("Reply only 'ok' or 'weak' — is this proposal solid?\n\n" . $this->proposal);
-
-        if (str_contains(strtolower($verdict), 'weak')) {
-            $this->proposal = $this->ai("Make this proposal stronger and more concrete:\n\n" . $this->proposal);
-        }
+    /** @return array<string, string> */
+    protected function criticRules(): array
+    {
+        return ['solid' => 'the proposal must be concrete and address each listed problem; reject a vague '
+            . 'proposal or one that skips a problem, so the step re-runs and strengthens it.'];
     }
 }

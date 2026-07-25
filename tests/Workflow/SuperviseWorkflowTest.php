@@ -32,8 +32,12 @@ final class SuperviseWorkflowTest
             $registry = new Registry();
             $registry->add(new DefineWorkflowTool($store, new WorkflowValidator()));
 
-            // The supervisor returns the corrected source for the new class name.
-            $agent = new ScriptedAgent(self::answer(self::solverCode('Issue7SolverR1')));
+            // The declarative flow: repair's exchange writes the corrected source, then the base extracts
+            // the `code` param that hands it to save — two turns, both the corrected class.
+            $agent = new ScriptedAgent(
+                self::answer(self::solverCode('Issue7SolverR1')),   // repair: the corrected source
+                self::answer(self::solverCode('Issue7SolverR1')),   // code param -> save
+            );
 
             $env = new Environment()
                 ->set(EnvKey::Worker, $agent)
