@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace ClawWorkflow\Library;
 
 use Claw\Project\IssueType;
+use Claw\Workflow\AiStep;
 use Claw\Workflow\LibraryWorkflow;
-use Claw\Workflow\Step;
+use Claw\Workflow\StepAI;
 use Claw\Workflow\WorkflowAbstract;
 
 /**
@@ -40,10 +41,10 @@ final class FixBugWorkflow extends WorkflowAbstract
      * critic caught it and the run stopped, but the instruction that invited it was ours: it said
      * "write a test" and nothing about leaving the ones already there alone.
      */
-    #[Step(critic: 'reproduced')]
-    protected function reproduce(): void
+    #[StepAI(critic: 'reproduced')]
+    protected function reproduce(): AiStep
     {
-        $this->ai(
+        return new AiStep(
             $this->rework()
             . $this->ticket()
             . "\n\nMake this defect visible as a FAILING TEST, in the project's own test suite and its own "
@@ -84,10 +85,10 @@ final class FixBugWorkflow extends WorkflowAbstract
      * blast radius at all: a fix that turned the suite green while rewriting code the ticket never
      * mentioned passed every gate this workflow has, because every gate was reading the test results.
      */
-    #[Step(critic: 'contained')]
-    protected function fix(): void
+    #[StepAI(critic: 'contained')]
+    protected function fix(): AiStep
     {
-        $this->ai(
+        return new AiStep(
             $this->rework()
             . $this->ticket()
             . "\n\nThe failing test above is the definition of this bug. Change the PRODUCTION code so "
@@ -109,10 +110,10 @@ final class FixBugWorkflow extends WorkflowAbstract
      * the suite red has traded one defect for others, and a step that only reran its own test would
      * report that as success.
      */
-    #[Step(critic: 'proven')]
-    protected function verify(): void
+    #[StepAI(critic: 'proven')]
+    protected function verify(): AiStep
     {
-        $this->ai(
+        return new AiStep(
             $this->rework()
             . "Run the project's WHOLE test suite — not only the test written for this bug — and read the "
             . "output.\n\n"

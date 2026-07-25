@@ -77,8 +77,8 @@ final class WorkflowValidator
      * rejected if any are missed". The four checks below are the ones that sentence was promising and
      * nothing performed — a header that trains both the model and the maintainer to trust a gate that is
      * mostly absent. Each is mechanical, so it belongs here rather than in prose a model may or may not
-     * follow, and a rejection here comes back through the revise pass {@see WorkflowAbstract::
-     * saveGeneratedWorkflow()} already wires.
+     * follow, and a rejection here comes back to the generating workflow's save step, which re-drafts the
+     * source once (via back()) before the run gives up on it.
      *
      * `final` is deliberately NOT among them. The prompt asks for it and it is good practice, but a
      * non-final workflow runs correctly, and a gate that fails a working class costs a revision round to
@@ -118,7 +118,7 @@ final class WorkflowValidator
      */
     private function assertHasAtLeastOneStep(string $code): void
     {
-        if (preg_match('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b/', $code) === 1) {
+        if (preg_match('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step(?:AI)?\b/', $code) === 1) {
             return;
         }
 
@@ -126,7 +126,7 @@ final class WorkflowValidator
             return;
         }
 
-        throw new WorkflowException('workflow must declare at least one #[Step] method, or drive the work from its own run()');
+        throw new WorkflowException('workflow must declare at least one #[Step] or #[StepAI] method, or drive the work from its own run()');
     }
 
     /**
@@ -147,7 +147,7 @@ final class WorkflowValidator
      */
     private function assertCriticNamesResolve(string $code): void
     {
-        if (preg_match_all('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b[^\]]*\bcritic\s*:\s*[\'"]([^\'"]+)[\'"]/', $code, $used) === false) {
+        if (preg_match_all('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step(?:AI)?\b[^\]]*\bcritic\s*:\s*[\'"]([^\'"]+)[\'"]/', $code, $used) === false) {
             return;
         }
 
@@ -198,7 +198,7 @@ final class WorkflowValidator
         $body = $end === false ? substr($code, $start) : substr($code, $start, $end - $start);
         preg_match_all('/[\'"]([^\'"]+)[\'"]\s*=>/', $body, $declared);
 
-        preg_match_all('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b[^\]]*\bcritic\s*:\s*[\'"]([^\'"]+)[\'"]/', $code, $used);
+        preg_match_all('/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step(?:AI)?\b[^\]]*\bcritic\s*:\s*[\'"]([^\'"]+)[\'"]/', $code, $used);
 
         foreach ($declared[1] as $name) {
             if (!\in_array($name, $used[1], true)) {
@@ -234,7 +234,7 @@ final class WorkflowValidator
      */
     private function assertStepsAreProtected(string $code): void
     {
-        $pattern = '/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step\b[^\]]*\]\s*'
+        $pattern = '/#\[\s*\\\\?(?:[\w\\\\]+\\\\)?Step(?:AI)?\b[^\]]*\]\s*'
             . '((?:(?:public|private|protected|static|final|abstract)\s+)*)function\s+(\w+)/';
 
         if (preg_match_all($pattern, $code, $matches, PREG_SET_ORDER) === false) {

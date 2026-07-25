@@ -72,22 +72,21 @@ final class SuperviseWorkflowTest
 
             namespace ClawWorkflow\\Common;
 
-            use Claw\\Workflow\\Step;
+            use Claw\\Workflow\\AiStep;
+            use Claw\\Workflow\\StepAI;
             use Claw\\Workflow\\WorkflowAbstract;
 
             final class {$class} extends WorkflowAbstract
             {
-                private string \$summary = '';
-
                 public function name(): string
                 {
                     return 'solve';
                 }
 
-                #[Step]
-                protected function summarize(): void
+                #[StepAI]
+                protected function summarize(): AiStep
                 {
-                    \$this->summary = \$this->ai('Summarize the project.', ['read_file']);
+                    return new AiStep('Summarize the project.', ['read_file']);
                 }
             }
             PHP;

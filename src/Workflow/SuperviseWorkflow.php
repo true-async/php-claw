@@ -105,17 +105,17 @@ final class SuperviseWorkflow extends WorkflowAbstract
             Hard requirements (the code is validated before it is saved, and rejected if any are missed):
             - the file must begin with `<?php` then `declare(strict_types=1);`
             - namespace {$namespace};
-            - `use Claw\\Workflow\\Step;` and `use Claw\\Workflow\\WorkflowAbstract;`
+            - `use Claw\\Workflow\\AiStep;`, `use Claw\\Workflow\\StepAI;` and `use Claw\\Workflow\\WorkflowAbstract;` (keep `use Claw\\Workflow\\Step;` if the broken solver has a CODE step)
             - `final class {$class} extends WorkflowAbstract` (use the NEW name {$class})
             - implement `public function name(): string`
-            - KEEP the same `#[Step]` method names and the same typed property names as the broken
-              solver: the run is mid-flight, and its saved state is restored by property name and
+            - KEEP the same step method names (each `#[StepAI]` or `#[Step]`) and the same typed property names
+              as the broken solver: the run is mid-flight, and its saved state is restored by property name and
               resumed by step name, so renaming them loses progress
-            - reach the model with `\$this->ai(string \$prompt, ?array \$tools = null, ?string \$agent = null)`
-              (\$tools defaults to ALL tools; pass a list to restrict or `[]` for none), tools with
-              `\$this->tool(string \$name, array \$params)`, and a person or supervisor with
-              `\$this->ask(string \$question): string`; all of them return STRINGS
-            - the ONLY way to touch files or the shell is `\$this->tool(...)`; file paths are relative to the project root
+            - an AI step is a PURE `#[StepAI]` method that RETURNS `new AiStep(\$prompt, ?\$tools, ?\$agent)` — the
+              base runs the one declared exchange; the method calls no model and has no side effects. A `#[Step]`
+              CODE method returning void may call `\$this->tool(...)`. The model reads/writes files, runs commands
+              and can ask a person INSIDE the declared exchange, through the tools you expose
+            - the ONLY way to touch files or the shell is a tool the model calls; file paths are relative to the project root
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval,
               include/require, or a dynamic `\$var(...)` call — they are forbidden and the code is rejected
 

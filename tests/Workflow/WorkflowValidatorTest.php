@@ -154,6 +154,29 @@ final class WorkflowValidatorTest
     }
 
     /**
+     * The validator recognises #[StepAI] as a step, the same as #[Step]. It used to key off `#[Step\b`,
+     * which does not match `StepAI`, so a purely declarative solver — the shape the generator now writes —
+     * would have been rejected for declaring "no step", and its critic bindings would have gone unchecked.
+     */
+    #[Test]
+    public function recognisesStepAiAsAStep(): void
+    {
+        // a declarative-only workflow IS a workflow
+        Assert::false($this->rejected(self::shell('', "#[StepAI] protected function go(): AiStep { return new AiStep('p'); }")));
+
+        // and its critic bindings are validated too: a name with no rules, and an orphan rule, both rejected
+        Assert::true($this->rejected(self::shell('', "#[StepAI(critic: 'gate')] protected function go(): AiStep { return new AiStep('p'); }")));
+        Assert::false($this->rejected(self::shell(
+            '',
+            "#[StepAI(critic: 'gate')] protected function go(): AiStep { return new AiStep('p'); }\n"
+            . "protected function criticRules(): array { return ['gate' => 'the rules']; }",
+        )));
+
+        // a #[StepAI] method must be protected, the same as a #[Step] one
+        Assert::true($this->rejected(self::shell('', "#[StepAI] public function go(): AiStep { return new AiStep('p'); }")));
+    }
+
+    /**
      * A structurally valid workflow wrapped around $body, so a case can probe ONE rule without tripping
      * the others. $extra is spliced in at class level for cases that need their own step declaration.
      */

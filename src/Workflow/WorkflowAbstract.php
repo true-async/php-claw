@@ -134,33 +134,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private array $lastHistory = [];
 
-    /**
-     * The prior attempt's conversation, carried into a critic re-run (or a {@see back()} jump) so the
-     * step's next ai() CONTINUES that history instead of cold-restarting: the model keeps everything it
-     * already did and reacts to the critique, rather than re-deriving the whole step from scratch. The
-     * attempt's FIRST ai() consumes it (then it clears); empty otherwise. Transient.
-     *
-     * @var list<Message>
-     */
-    private array $resumeHistory = [];
-
-    /**
-     * Each step's last work conversation, kept so a {@see back()} into an earlier step can CONTINUE it
-     * (the model re-enters with full context, not cold). Transient — a resume rebuilds it as steps re-run.
-     *
-     * @var array<string, list<Message>>
-     */
-    private array $stepHistory = [];
-
-    /**
-     * Steps whose written-down exchange this instance has already considered. Transient by design: it is
-     * about THIS process, and its whole job is to tell "I am re-entering a step a dead process left in
-     * the middle" from "I am calling ai() again inside a step I am running".
-     *
-     * @var array<string, true>
-     */
-    private array $reentered = [];
-
     /** A {@see back()} request made during the running step: the earlier step to re-enter, and why. */
     private ?string $backTo = null;
 
@@ -351,21 +324,18 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $round = 0;
             $maxRounds = $this->maxRounds($step?->maxRounds);
             $workHistory = [];
-            $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
             $priorAttempt = null;   // fingerprint of the previous attempt's artifacts — see the identical-attempt stop
 
             if ($this->reentryStep === $name) {
-                $resume = $this->stepHistory[$name] ?? [];   // a back() into this step continues its prior conversation
-                $this->critique = $this->reentryReason;        // the back() reason is its first-attempt guidance
+                $this->critique = $this->reentryReason;   // the back() reason is its first-attempt guidance
                 $this->reentryStep = null;
                 $this->reentryReason = '';
             }
 
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
-                $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
+                $this->lastHistory = [];        // a CODE step drives no model exchange, so it leaves no (stale) history
                 $this->writtenPaths = [];       // and re-collects which files it wrote (see recordWrittenFiles)
-                $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
 
                 $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
                 $this->emitWrittenFileArtifacts();   // the files it wrote become artifacts, after its own recording so a path is not doubled
@@ -409,7 +379,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 }
 
                 $this->critique = $guidance;   // the re-run reads this via critique()
-                $resume = $workHistory;        // the next attempt continues THIS attempt's conversation
                 $this->enforceBudget();        // the round spent tokens; stop here if the budget is gone
             }
         } finally {
@@ -423,7 +392,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // e.g. the last step, or a step that finishes through a tool) — by CONTINUING this history,
         // and is persisted as it is formed. See {@see formPendingHandoff()}.
         $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
-        $this->stepHistory[$name] = $workHistory;   // kept so a later back() into this step continues its context
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
@@ -458,7 +426,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $previousStep = $this->currentStep;
         $this->currentStep = $name;
         $this->critique = null;
-        $this->reentered[$name] = true;   // this step's exchange is base-driven; a critic's own ai() must not reload it
         $workHistory = [];
 
         // A back() into this step re-enters it fresh (its exchange was cleared when it finished); continuing
@@ -493,7 +460,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
-        $this->stepHistory[$name] = $workHistory;
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
         $this->env->findStore()->clearExchange($this->runId, $name);
@@ -964,52 +930,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected function project(): ?Project
     {
         return $this->project;
-    }
-
-    /**
-     * A model call: one exchange over $prompt, returning the final text. The turn loop that drives it
-     * (tool round-trips and all) is an internal detail.
-     *
-     * By default the model is shown — and can run — EVERY tool the run has: a capable agent should
-     * reach for whatever the task needs, so a full palette is the norm. Narrowing is the exception,
-     * a deliberate least-privilege choice for a step that must NOT act a certain way: pass an explicit
-     * list to expose only those tools, or `[]` to forbid tools entirely (a pure-reasoning judge, or a
-     * call whose whole job is to return text/code rather than do anything).
-     *
-     * Pass $agent to route the call to a named agent role (worker/reviewer/supervisor/planner, set
-     * up in the run's {@see EnvKey::Agents} map): the role's model is used for just this call, on
-     * the same access. An unknown role falls back to the scope's default model.
-     *
-     * @param ?list<string> $tools null = every tool (default); a list = only those; [] = none
-     */
-    protected function ai(string $prompt, ?array $tools = null, ?string $agent = null): string
-    {
-        $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
-        $this->formPendingHandoff();   // a downstream step is reading: form (and persist) the previous step's handoff
-
-        $prior = $this->resumeHistory;   // a re-run/back continues the prior attempt's conversation, not a cold restart
-        $this->resumeHistory = [];       // only the attempt's first ai() continues; later calls start fresh
-
-        // A step re-entered after the process died picks its own exchange back up. ONCE, and only when
-        // nothing else already supplied a history: a step that calls ai() twice would otherwise have its
-        // second call continue the first one's conversation, and a critic re-run already carries the
-        // attempt it is correcting. The written-down exchange is for the case where this instance has
-        // never run this step at all — which, in a live run, means there is nothing written down.
-        if ($prior === [] && !isset($this->reentered[$this->currentStep])) {
-            $this->reentered[$this->currentStep] = true;
-            $prior = $this->env->findStore()->loadExchange($this->runId, $this->currentStep);
-        }
-
-        $text = $this->runTurns($prompt, $tools, $agent, $prior);
-
-        // Collect what this WORK exchange wrote, HERE and not in runTurns: handoff formation also drives
-        // runTurns, but continuing the PREVIOUS step's conversation — which still holds that step's
-        // write_file calls — so recording there would re-attribute the prior step's files to this one.
-        // Going through ai() only sees the exchanges a step actually runs as work; a re-run continuing a
-        // prior attempt re-collects its writes, which is right — those files are still on disk.
-        $this->recordWrittenFiles($this->lastHistory);
-
-        return $text;
     }
 
     /**
@@ -1526,7 +1446,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $this->verdict = null;
 
-        $reply = trim($this->ai(
+        $reply = trim($this->runTurns(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
@@ -1556,6 +1476,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'the reason. The tool call is the verdict — prose alone is not one.',
             $toolNames,
             'reviewer',
+            [],   // a critic exchange is always fresh — it never continues a prior conversation
         ));
 
         $verdict = $this->takeVerdict();
@@ -1797,34 +1718,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * that branch on it cannot drift.
      */
     protected const string WORKFLOW_SAVED_MARKER = 'saved as';
-
-    /**
-     * Save a generated workflow through the `define_workflow` tool, with one repair pass — the
-     * save/detect/repair/retry control flow shared by every code-generating workflow. On the first
-     * rejection it hands the validator's complaint to $revise (which re-drafts the source on the
-     * appropriate role) and retries once; a second rejection throws. Returns the saved source.
-     *
-     * @param callable(string): string $revise given the rejection text, returns corrected source
-     *
-     * @throws WorkflowException on a second rejection
-     */
-    protected function saveGeneratedWorkflow(string $name, string $code, callable $revise): string
-    {
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
-
-        if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
-            return $code;
-        }
-
-        $code = $revise($result);
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
-
-        if (!str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
-            throw new WorkflowException($result);   // a second failure surfaces to the run-path
-        }
-
-        return $code;
-    }
 
     /**
      * Ask a question of whoever sits on the run's ask channel — a person at the console, or an agent
