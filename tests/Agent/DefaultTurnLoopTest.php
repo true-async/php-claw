@@ -628,6 +628,74 @@ final class DefaultTurnLoopTest
     }
 
     #[Test]
+    public function checkpointsTheExchangeBeforeBlockingOnAQuestion(): void
+    {
+        // The [question] turn is a no-tool turn the tool-turn checkpoint never reaches. Without a
+        // checkpoint AT THE PARK, a crash while waiting leaves nothing recorded and a resume re-asks the
+        // model. So the loop writes the exchange down — ending on the question — before it blocks.
+        $agent = new ScriptedAgent(
+            new AgentResponse([new TextBlock('[question] which file?')], [], StopReason::EndTurn, new Usage(), '[question] which file?'),
+            new AgentResponse([new TextBlock('done')], [], StopReason::EndTurn, new Usage(), 'done'),
+        );
+        $ask = new class () implements SpeakerInterface {
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Human;
+            }
+
+            public function reply(string $incoming): string
+            {
+                return 'src/Foo.php';
+            }
+        };
+
+        $checkpoints = [];
+        $loop = new DefaultTurnLoop(
+            $agent,
+            new RecordingExecutor(),
+            'm',
+            's',
+            new Registry(),
+            ask: $ask,
+            checkpoint: function (array $history) use (&$checkpoints): void {
+                $checkpoints[] = $history;
+            },
+        );
+
+        $loop->run([Message::userText('go')]);
+
+        // Exactly one checkpoint — at the park; the answered turn and the final 'done' are no-tool turns.
+        Assert::count($checkpoints, 1);
+        $parked = $checkpoints[0];
+
+        // Two messages — user(go) + assistant([question]) — so it was written BEFORE the answer was
+        // appended (that would make three), and its tail reads back as a park, not a settled answer.
+        Assert::count($parked, 2);
+        Assert::same(DefaultTurnLoop::pendingQuestion($parked), 'which file?');
+    }
+
+    #[Test]
+    public function pendingQuestionTellsAParkFromASettledExchange(): void
+    {
+        $parked = [
+            Message::userText('go'),
+            new Message(Role::Assistant, [new TextBlock('[question] which file?')]),
+        ];
+        Assert::same(DefaultTurnLoop::pendingQuestion($parked), 'which file?');   // a park -> the question
+
+        $settled = [
+            Message::userText('go'),
+            new Message(Role::Assistant, [new TextBlock('all done')]),
+        ];
+        Assert::same(DefaultTurnLoop::pendingQuestion($settled), null);           // an ordinary answer -> null
+
+        $midTool = [new Message(Role::Assistant, [new ToolUseBlock('t', 'echo', [])])];
+        Assert::same(DefaultTurnLoop::pendingQuestion($midTool), null);           // a tail asking for tools -> null
+
+        Assert::same(DefaultTurnLoop::pendingQuestion([]), null);                 // empty -> null
+    }
+
+    #[Test]
     public function stopsTheExchangeWhenTheTurnBudgetIsSpent(): void
     {
         // The model would keep calling a tool forever; the turn budget stops the exchange after the

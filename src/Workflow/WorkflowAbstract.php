@@ -23,23 +23,28 @@ use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
 /**
- * The base every workflow extends — a HELPER, not an engine. The workflow itself is a class with
- * state (its own fields); its steps are methods marked {@see Step}, whose bodies the author (a
- * human or the AI) writes by hand: build a prompt, call {@see ai()}, call {@see tool()}, write to
- * a field. The base does not run anything for the step — it only makes that code shorter and
- * durable:
+ * The base every workflow extends — a HELPER, not an engine. The workflow itself is a class with state
+ * (its own fields); its steps are methods the base drives in declaration order, of two kinds. A
+ * {@see StepAI} is a PURE method returning an {@see AiStep} declaration — a prompt, a tool palette, an
+ * agent role and any {@see ParamRequest}s — and the base runs, records and resumes that ONE model exchange
+ * for it. A {@see Step} is a CODE method: deterministic glue that reads params and calls {@see tool()},
+ * re-run whole on resume. The base does not do the AI work; it makes the step's declaration durable and
+ * drives it:
  *
- *  - {@see ai()} talks to the model (the turn loop inside is an internal detail) with a
- *    least-privilege tool palette; {@see tool()} runs one tool; {@see param()} reads run inputs.
+ *  - a {@see StepAI}'s exchange runs with a least-privilege tool palette (the turn loop inside is an
+ *    internal detail); the model does the work through the tools — reading and writing files, recording
+ *    artifacts, asking a person. {@see tool()} runs one tool from a CODE step; {@see param()} reads run
+ *    inputs and any value an earlier step addressed to this one.
  *  - {@see step()} runs a step method unless a prior run already did, then snapshots the
  *    workflow's state + progress to the {@see WorkflowStateStoreInterface}. The state is restored at
  *    construction, so a skipped step loses nothing.
  *  - {@see run()} is just the entry point — by default it drives the step methods in order, but
  *    the author may override it and orchestrate by hand (plain if/while), calling step() as needed.
  *
- * A critic, though, IS machinery here: a step can declare {@see Step::$critic}, and the driver judges
- * the step's RESULT (the method's return value) against it on the reviewer role; while it falls short,
- * the supervisor (the ask channel) guides a re-run — a declarative aspect, not a hand-written sub-step.
+ * A critic, though, IS machinery here: a step — imperative {@see Step} or declarative {@see StepAI} —
+ * can declare one, and the driver judges the step's recorded artifacts against it on the reviewer role;
+ * while it falls short, the supervisor (the ask channel) guides a re-run — a declarative aspect, not a
+ * hand-written sub-step.
  *
  * The critic is a gate the step cannot open from the inside, and there is no longer any way for a step
  * to open it from the inside: a worker does its work and returns, and whether the run ends is decided
@@ -54,8 +59,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * a step and let it fix itself once or twice; if two rounds do not close the findings, the problem is
      * usually a mismatch (the step's prompt vs the critic's rubric) or a task that truly needs a human, not
      * "one more try" — so we escalate rather than churn dozens of rounds burning tokens. A step that
-     * legitimately churns (e.g. a test gate) raises it per case via `#[Step(maxRounds: N)]`. A checkpoint,
-     * not a hard kill; the budget is still the ultimate backstop.
+     * legitimately churns (e.g. a test gate) raises it per case via `#[Step(maxRounds: N)]` (or
+     * `#[StepAI(maxRounds: N)]`). A checkpoint, not a hard kill; the budget is still the ultimate backstop.
      */
     private const int DEFAULT_MAX_ROUNDS = 2;
 
@@ -86,6 +91,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private bool $reviewing = false;
 
+    /**
+     * True while an engine-internal continuation (param extraction) is running. Like {@see $reviewing} it
+     * suppresses the exchange checkpoint: extraction continues the step's OWN conversation, so without it a
+     * crash mid-extraction would leave the step's exchange row holding the extraction Q&A, which a resume
+     * would then replay as the step's work.
+     */
+    private bool $extracting = false;
+
     /** The verdict the critic recorded through the `verdict` tool during the current review; transient. */
     private ?Verdict $verdict = null;
 
@@ -100,15 +113,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * The handoff fed into the current step's model context — what the previous step handed on. Formed
-     * lazily from {@see $pendingHandoff} on the first ai() call of a step, and persisted as it is formed
-     * so a resume (a fresh process whose in-memory history is gone) can {@see loadHandoff()} it back
-     * here at construction instead. Read by {@see handoffContext()}. '' for the first step.
+     * lazily from {@see $pendingHandoff} when a downstream step's exchange first reads it, and persisted as
+     * it is formed so a resume (a fresh process whose in-memory history is gone) can {@see loadHandoff()} it
+     * back here at construction instead. Read by {@see handoffContext()}. '' for the first step.
      */
     private string $incomingHandoff = '';
 
     /**
      * The previous step's name + the conversation history of its work, awaiting handoff formation —
-     * set at step end, consumed by the next step's first ai() call (which continues that history to
+     * set at step end, consumed when the next step's exchange begins (which continues that history to
      * ask the model for the handoff IN CONTEXT). Null = nothing pending (e.g. on a resume, where the
      * already-formed handoff is restored from the store rather than re-formed).
      *
@@ -117,40 +130,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private ?array $pendingHandoff = null;
 
     /**
-     * The full message history of the most recent {@see ai()} exchange — kept so a step's handoff can
+     * The full message history of the most recent model exchange — kept so a step's handoff can
      * be formed by CONTINUING that exact conversation (the model still holds what it actually did),
      * not from a cold re-summary. Transient.
      *
      * @var list<Message>
      */
     private array $lastHistory = [];
-
-    /**
-     * The prior attempt's conversation, carried into a critic re-run (or a {@see back()} jump) so the
-     * step's next ai() CONTINUES that history instead of cold-restarting: the model keeps everything it
-     * already did and reacts to the critique, rather than re-deriving the whole step from scratch. The
-     * attempt's FIRST ai() consumes it (then it clears); empty otherwise. Transient.
-     *
-     * @var list<Message>
-     */
-    private array $resumeHistory = [];
-
-    /**
-     * Each step's last work conversation, kept so a {@see back()} into an earlier step can CONTINUE it
-     * (the model re-enters with full context, not cold). Transient — a resume rebuilds it as steps re-run.
-     *
-     * @var array<string, list<Message>>
-     */
-    private array $stepHistory = [];
-
-    /**
-     * Steps whose written-down exchange this instance has already considered. Transient by design: it is
-     * about THIS process, and its whole job is to tell "I am re-entering a step a dead process left in
-     * the middle" from "I am calling ai() again inside a step I am running".
-     *
-     * @var array<string, true>
-     */
-    private array $reentered = [];
 
     /** A {@see back()} request made during the running step: the earlier step to re-enter, and why. */
     private ?string $backTo = null;
@@ -182,7 +168,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     private readonly Environment $env;
 
     /**
-     * The scope in force while an {@see ai()} exchange is running: that call's narrowed palette. Null
+     * The scope in force while a model exchange is running: that call's narrowed palette. Null
      * between exchanges, when the run's own scope applies.
      *
      * It exists so {@see tool()} obeys the restriction the step asked for. A tool call made by the MODEL
@@ -317,6 +303,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
+        if ($this->isAiStep($name)) {
+            $this->runAiStep($name);   // a #[StepAI] step is driven by the base, not by an imperative body
+
+            return;
+        }
+
         $this->enforceBudget();   // don't begin a new step once the run's budget is spent
 
         $tracer = $this->tracer();
@@ -326,7 +318,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         try {
             $step = $this->stepAttribute($name);   // reflect the Step attribute once, read both fields off it
-            $rubric = $this->criticRubric($step, $name);
+            $rubric = $this->criticRubric($step?->critic, $name);
             $this->critique = null;
 
             // Run the step; if it declares a critic, judge the ARTIFACTS it produced (its reviewable
@@ -334,23 +326,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // supervisor guide a re-run — until the critic passes, the supervisor accepts/stops, the
             // soft round cap escalates, or the budget runs out.
             $round = 0;
-            $maxRounds = $this->maxRounds($step);
+            $maxRounds = $this->maxRounds($step?->maxRounds);
             $workHistory = [];
-            $resume = [];   // the prior attempt's conversation; a re-run continues it (empty on the first attempt)
             $priorAttempt = null;   // fingerprint of the previous attempt's artifacts — see the identical-attempt stop
 
             if ($this->reentryStep === $name) {
-                $resume = $this->stepHistory[$name] ?? [];   // a back() into this step continues its prior conversation
-                $this->critique = $this->reentryReason;        // the back() reason is its first-attempt guidance
+                $this->critique = $this->reentryReason;   // the back() reason is its first-attempt guidance
                 $this->reentryStep = null;
                 $this->reentryReason = '';
             }
 
             while (true) {
                 $this->artifacts[$name] = [];   // a fresh attempt of THIS step regenerates its artifacts; prior steps keep theirs
-                $this->lastHistory = [];        // so a step that makes no ai() call leaves no (stale) history
+                $this->lastHistory = [];        // a CODE step drives no model exchange, so it leaves no (stale) history
                 $this->writtenPaths = [];       // and re-collects which files it wrote (see recordWrittenFiles)
-                $this->resumeHistory = $resume; // a re-run's first ai() CONTINUES the prior attempt, not a cold restart
 
                 $this->{$name}();   // the return value is NOT a channel — the step's output is its artifacts/handoff
                 $this->emitWrittenFileArtifacts();   // the files it wrote become artifacts, after its own recording so a path is not doubled
@@ -372,22 +361,15 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 // supervisor the fact instead and let it settle the round (accept, redirect, or stop).
                 // Byte-exact on purpose: evidence that legitimately varies (timings) simply never matches,
                 // and the guard stays out of the way.
-                $attempt = array_map(
-                    static fn (Artifact $a): array => [$a->label, $a->kind, $a->value],
-                    $this->artifacts[$name],
+                $attempt = $this->attemptFingerprint($name);
+
+                $verdict = $this->verdictFor(
+                    $name,
+                    $rubric,
+                    $artifacts,
+                    $workHistory === [] && $this->artifacts[$name] === [],
+                    $priorAttempt !== null && $attempt === $priorAttempt,
                 );
-
-                if ($workHistory === [] && $this->artifacts[$name] === []) {
-                    $verdict = Verdict::reject("step '{$name}' produced nothing: no model/tool work and no artifact. A step "
-                        . 'must do real work and leave a result; if it needs no review, it should carry no critic.');
-                } elseif ($priorAttempt !== null && $attempt === $priorAttempt) {
-                    $verdict = Verdict::reject('the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
-                        . 'guidance changed nothing about the work. Another round cannot help: either the '
-                        . 'finding is wrong, or this step needs different guidance or a person.');
-                } else {
-                    $verdict = $this->critic($name, $rubric, $artifacts);
-                }
-
                 $priorAttempt = $attempt;
 
                 if ($verdict->passes()) {
@@ -401,7 +383,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 }
 
                 $this->critique = $guidance;   // the re-run reads this via critique()
-                $resume = $workHistory;        // the next attempt continues THIS attempt's conversation
                 $this->enforceBudget();        // the round spent tokens; stop here if the budget is gone
             }
         } finally {
@@ -411,11 +392,10 @@ abstract class WorkflowAbstract implements WorkflowInterface
         }
 
         // Remember the work exchange for this step. The handoff is formed LAZILY — only if a later
-        // step actually calls ai() (no point asking, or paying, when nothing downstream reads it,
+        // step actually runs an exchange (no point asking, or paying, when nothing downstream reads it,
         // e.g. the last step, or a step that finishes through a tool) — by CONTINUING this history,
         // and is persisted as it is formed. See {@see formPendingHandoff()}.
         $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
-        $this->stepHistory[$name] = $workHistory;   // kept so a later back() into this step continues its context
 
         $this->done[] = $name;
         $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
@@ -423,6 +403,207 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // The step is finished and its result is in the snapshot and the journal. The half-finished
         // conversation kept for a resume is now only a way to re-enter a step that has already left.
         $this->env->findStore()->clearExchange($this->runId, $name);
+    }
+
+    /** Whether $name is an AI step (marked {@see StepAI}) — read by reflection, without running the body. */
+    private function isAiStep(string $name): bool
+    {
+        return $this->aiAttribute($name) !== null;
+    }
+
+    /**
+     * Drive a {@see StepAI} step. The method itself is pure — it returns an {@see AiStep} declaration and
+     * does nothing else; the base runs the one exchange it names, records it as it happens, and on resume
+     * CONTINUES the recorded conversation rather than re-running the model from the top. The step's output
+     * is its handoff, formed from this exchange for the next step, exactly as an imperative step's is.
+     *
+     * A crash while the step was PARKED on a person's answer resumes here: {@see runAiExchange()} finds
+     * the recorded exchange ending on an unanswered [question] and continues it from the answer. The body
+     * is never re-entered after a resume and is pure anyway, so there is nothing to do twice.
+     */
+    private function runAiStep(string $name): void
+    {
+        $this->enforceBudget();
+
+        $tracer = $this->tracer();
+        $span = $tracer?->enterStep($name);
+        $previousStep = $this->currentStep;
+        $this->currentStep = $name;
+        $this->critique = null;
+        $workHistory = [];
+
+        // A back() into this step re-enters it fresh (its exchange was cleared when it finished); continuing
+        // the prior attempt is a refinement the imperative path has and this one will grow. The reason is
+        // carried in as this re-entry's guidance so the pure body can fold it into the AiStep it declares
+        // (via critique()) — the same contract back() documents and the imperative path already honours;
+        // without this the reason was silently dropped. Clear the arming so it does not leak to a later step.
+        if ($this->reentryStep === $name) {
+            $this->critique = $this->reentryReason;
+            $this->reentryStep = null;
+            $this->reentryReason = '';
+        }
+
+        try {
+            $declaration = $this->{$name}();
+
+            if (!$declaration instanceof AiStep) {
+                throw new \LogicException("step '{$name}' is marked #[StepAI] but did not return an AiStep declaration");
+            }
+
+            $attribute = $this->aiAttribute($name);
+            $rubric = $this->criticRubric($attribute?->critic, $name);
+            $maxRounds = $this->maxRounds($attribute?->maxRounds);
+
+            $this->formPendingHandoff();   // form the PREVIOUS step's handoff before this one's exchange runs
+            $workHistory = $this->reviewedExchange($name, $declaration, $rubric, $maxRounds);
+            $this->extractParams($declaration, $workHistory);   // hand any declared machine-readable values to later steps
+        } finally {
+            $this->critique = null;
+            $this->currentStep = $previousStep;
+            $tracer?->exit($span);
+        }
+
+        $this->pendingHandoff = ['name' => $name, 'history' => $workHistory];
+        $this->done[] = $name;
+        $this->env->findStore()->save($this->runId, $this->captureState(), $this->done);
+        $this->env->findStore()->clearExchange($this->runId, $name);
+    }
+
+    /** The {@see StepAI} attribute on $name, instantiated, or null when the method is not an AI step. */
+    private function aiAttribute(string $name): ?StepAI
+    {
+        $attributes = new \ReflectionMethod($this, $name)->getAttributes(StepAI::class);
+
+        return $attributes === [] ? null : $attributes[0]->newInstance();
+    }
+
+    /**
+     * The AI step's exchange under its critic. Round 0 runs (or resumes) the declared exchange; while the
+     * critic is unhappy the supervisor guides a re-run that CONTINUES the prior attempt with the guidance
+     * as its next turn — until the critic passes, the supervisor accepts/stops, or the cap escalates. With
+     * no rubric it is a single exchange. The judge/guard/supervise is the same the imperative path uses
+     * (via {@see verdictFor()} and {@see superviseStep()}); only PRODUCING an attempt differs — a declared
+     * exchange, not a hand-written body.
+     *
+     * @return list<Message>
+     */
+    private function reviewedExchange(string $name, AiStep $step, ?string $rubric, int $maxRounds): array
+    {
+        $round = 0;
+        $priorAttempt = null;
+        $workHistory = [];
+
+        while (true) {
+            $this->artifacts[$name] = [];
+            $this->writtenPaths = [];
+
+            if ($round === 0) {
+                $this->runAiExchange($name, $step);
+            } else {
+                $this->runTurns((string) $this->critique, $step->tools, $step->agent, $workHistory);   // continue with guidance
+            }
+
+            $workHistory = $this->lastHistory;   // capture BEFORE the critic, whose own ai() clobbers lastHistory
+            $this->recordWrittenFiles($workHistory);
+            $this->emitWrittenFileArtifacts();
+
+            if ($rubric === null) {
+                break;
+            }
+
+            $artifacts = $this->renderArtifacts($this->artifacts[$name]);
+            $attempt = $this->attemptFingerprint($name);
+            $verdict = $this->verdictFor(
+                $name,
+                $rubric,
+                $artifacts,
+                $workHistory === [] && $this->artifacts[$name] === [],
+                $priorAttempt !== null && $attempt === $priorAttempt,
+            );
+            $priorAttempt = $attempt;
+
+            if ($verdict->passes()) {
+                break;
+            }
+
+            $guidance = $this->superviseStep($name, $artifacts, $verdict, ++$round, $maxRounds);
+
+            if ($guidance === null) {
+                break;   // the supervisor accepted the work as-is
+            }
+
+            $this->critique = $guidance;
+            $this->enforceBudget();
+        }
+
+        return $workHistory;
+    }
+
+    /**
+     * Deliver a {@see StepAI}'s machine-readable outputs. For each declared {@see ParamRequest}, CONTINUE
+     * the accepted work conversation with a dedicated request for exactly that value and pin it with
+     * {@see setParam()} for the target step — the same mechanism {@see formPendingHandoff()} uses for the
+     * prose handoff, addressed to a named step instead of the next one automatically. Runs under
+     * {@see $extracting} so its own turns are not checkpointed into the step's exchange row.
+     *
+     * @param list<Message> $workHistory
+     */
+    private function extractParams(AiStep $step, array $workHistory): void
+    {
+        if ($step->params === [] || $workHistory === []) {
+            return;
+        }
+
+        $this->extracting = true;
+
+        try {
+            foreach ($step->params as $request) {
+                $value = trim($this->runTurns(
+                    "Before this step ends, answer EXACTLY this and nothing else: {$request->instruction}\n\n"
+                    . 'Reply with only the value — no prose, no explanation, no quotes.',
+                    [],
+                    'extract',
+                    $workHistory,
+                ));
+                $this->setParam($request->forStep, $request->name, $value);
+            }
+        } finally {
+            $this->extracting = false;
+        }
+    }
+
+    /**
+     * Run — or continue — the one exchange a {@see StepAI} declares. What the store already holds for this
+     * (run, step) decides which:
+     *
+     *  - PARKED — the recorded exchange ends on an unanswered [question]: continue it from the person's
+     *    answer, which becomes the next user turn, so the model picks up where it paused instead of being
+     *    asked the same thing again. This is the resume the two-kind model exists to make deterministic.
+     *  - otherwise (nothing recorded, or a partial non-parked tail) — open the declared prompt. A partial
+     *    tail is carried in as prior context and the in-flight turn is re-run, which is cheap and correct
+     *    since a non-parked tail was never the answer.
+     *
+     * The exchange goes through {@see runTurns()} like any other, so its palette, agent, ask channel,
+     * budget and per-turn checkpointing are exactly a work exchange's.
+     */
+    private function runAiExchange(string $name, AiStep $step): void
+    {
+        $recorded = $this->env->findStore()->loadExchange($this->runId, $name);
+        $pending = $recorded === [] ? null : DefaultTurnLoop::pendingQuestion($recorded);
+
+        if ($pending !== null) {
+            $ask = $this->env->find(EnvKey::Ask);
+
+            if (!$ask instanceof SpeakerInterface) {
+                throw new WorkflowException("step '{$name}' paused on a person's answer, but no ask channel is configured to resume it");
+            }
+
+            $this->runTurns($ask->reply($pending) ?? '', $step->tools, $step->agent, $recorded);
+
+            return;
+        }
+
+        $this->runTurns($step->prompt, $step->tools, $step->agent, $recorded);
     }
 
     /** Read a value from the run's environment — this scope, then the parent project settings. */
@@ -756,52 +937,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * A model call: one exchange over $prompt, returning the final text. The turn loop that drives it
-     * (tool round-trips and all) is an internal detail.
-     *
-     * By default the model is shown — and can run — EVERY tool the run has: a capable agent should
-     * reach for whatever the task needs, so a full palette is the norm. Narrowing is the exception,
-     * a deliberate least-privilege choice for a step that must NOT act a certain way: pass an explicit
-     * list to expose only those tools, or `[]` to forbid tools entirely (a pure-reasoning judge, or a
-     * call whose whole job is to return text/code rather than do anything).
-     *
-     * Pass $agent to route the call to a named agent role (worker/reviewer/supervisor/planner, set
-     * up in the run's {@see EnvKey::Agents} map): the role's model is used for just this call, on
-     * the same access. An unknown role falls back to the scope's default model.
-     *
-     * @param ?list<string> $tools null = every tool (default); a list = only those; [] = none
-     */
-    protected function ai(string $prompt, ?array $tools = null, ?string $agent = null): string
-    {
-        $this->enforceBudget();   // refuse to start a model call once the run's total budget is spent
-        $this->formPendingHandoff();   // a downstream step is reading: form (and persist) the previous step's handoff
-
-        $prior = $this->resumeHistory;   // a re-run/back continues the prior attempt's conversation, not a cold restart
-        $this->resumeHistory = [];       // only the attempt's first ai() continues; later calls start fresh
-
-        // A step re-entered after the process died picks its own exchange back up. ONCE, and only when
-        // nothing else already supplied a history: a step that calls ai() twice would otherwise have its
-        // second call continue the first one's conversation, and a critic re-run already carries the
-        // attempt it is correcting. The written-down exchange is for the case where this instance has
-        // never run this step at all — which, in a live run, means there is nothing written down.
-        if ($prior === [] && !isset($this->reentered[$this->currentStep])) {
-            $this->reentered[$this->currentStep] = true;
-            $prior = $this->env->findStore()->loadExchange($this->runId, $this->currentStep);
-        }
-
-        $text = $this->runTurns($prompt, $tools, $agent, $prior);
-
-        // Collect what this WORK exchange wrote, HERE and not in runTurns: handoff formation also drives
-        // runTurns, but continuing the PREVIOUS step's conversation — which still holds that step's
-        // write_file calls — so recording there would re-attribute the prior step's files to this one.
-        // Going through ai() only sees the exchanges a step actually runs as work; a re-run continuing a
-        // prior attempt re-collects its writes, which is right — those files are still on disk.
-        $this->recordWrittenFiles($this->lastHistory);
-
-        return $text;
-    }
-
-    /**
      * Drive one model exchange and return its final text. $prior is conversation history to CONTINUE
      * (empty for a fresh call); the prompt is appended as the next user turn. The whole exchange's
      * history is kept in {@see $lastHistory} so the step can later continue it (e.g. to form its
@@ -854,12 +989,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /**
      * Collect the paths a work exchange WROTE — the successful `write_file` targets — for the step to
-     * turn into artifacts once its body is done. Called from {@see ai()}, deliberately not from
-     * runTurns (which handoff formation also drives, over the previous step's history). Not emitted
-     * here: a step often records the file it wrote by hand right after the ai() call that wrote it,
-     * and emitting mid-exchange would double the path. A write that ERRORED contributes nothing — the
-     * call is paired with its result and dropped on failure. Skipped while REVIEWING: a critic does
-     * not write, and its exchange is not the step's (the same reason its history is never persisted).
+     * turn into artifacts once its exchange is done. Called from {@see reviewedExchange()} over the step's
+     * OWN work history, deliberately not from runTurns (which handoff formation also drives, over the
+     * previous step's history, whose write_file calls belong to that step). A write that ERRORED
+     * contributes nothing — the call is paired with its result and dropped on failure. Skipped while
+     * REVIEWING: a critic does not write, and its exchange is not the step's (the same reason its history
+     * is never persisted).
      *
      * @param list<Message> $history
      */
@@ -919,7 +1054,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * The child scope one {@see ai()} call runs in: the run's registry plus this workflow's own
+     * The child scope one model exchange runs in: the run's registry plus this workflow's own
      * #[Tool] methods, full by default or narrowed to exactly $tools for a least-privilege step, and
      * routed to $agent's model when a role is named. The model's specs and what the executor can
      * resolve are the same set either way.
@@ -964,8 +1099,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             // has no idea what a step is; it only knows a turn has landed.
             /** @param list<Message> $history */
             function (array $history): void {
-                if ($this->reviewing) {
-                    return;   // a critic's conversation is not the step's; see $reviewing
+                if ($this->reviewing || $this->extracting) {
+                    return;   // a critic's or an extraction's conversation is not the step's work
                 }
 
                 $this->env->findStore()->saveExchange($this->runId, $this->currentStep, $history);
@@ -974,7 +1109,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Form the previous step's handoff — once — when a downstream step's ai() reads it. The handoff
+     * Form the previous step's handoff — once — when a downstream step's exchange reads it. The handoff
      * is NOT a grab of the return value: the model is EXPLICITLY asked to write it by CONTINUING the
      * step's own work conversation, so it still holds what it actually did (its tool calls, what it
      * read/changed), not a cold re-summary. The result is SAVED to the store keyed by the step that
@@ -1110,7 +1245,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * A fresh per-turn budget for one {@see ai()} exchange — a child of the run total carrying the
+     * A fresh per-turn budget for one model exchange — a child of the run total carrying the
      * turn caps, so its spend bubbles up. Null when neither a run total nor a turn cap is set.
      */
     private function turnBudget(): ?Budget
@@ -1128,10 +1263,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * Act on the run's total budget when it is spent, per the {@see BudgetPolicy}:
-     *  - Stop (default): throw — a hard but resumable stop (the snapshot survives).
-     *  - Ask: ask the run's ask channel whether to continue; a typed token top-up raises the budget
-     *    and resumes, anything else (or no channel) falls back to the hard stop.
+     * Stop the run when its TOTAL budget is spent — a hard but RESUMABLE stop: the snapshot survives, so
+     * the run picks up where it left off once it is given more budget. It never asks the ask channel.
+     * Reacting to "there are no tokens left" by spending tokens to ask a model whether to continue is a
+     * contradiction, and on a resumed run that question could consume a person's answer meant for the
+     * worker. A spent budget is the operator's to settle out of band — raise the limit and resume — not an
+     * in-run prompt.
      *
      * @throws WorkflowException
      */
@@ -1143,40 +1280,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return;
         }
 
-        if ($this->budgetPolicy() === BudgetPolicy::Ask) {
-            $channel = $this->env->find(EnvKey::Ask);
-
-            if ($channel instanceof SpeakerInterface) {
-                $extra = $this->parseExtraTokens($channel->reply(
-                    "Budget spent: {$budget->reason()}. Enter extra tokens to continue, or nothing to stop.",
-                ));
-
-                if ($extra > 0) {
-                    $budget->raise($extra);
-                    $this->tracer()?->log('budget', "raised by {$extra} tokens", [], Level::Notice);
-
-                    return;
-                }
-            }
-        }
-
-        throw WorkflowException::stopped('run stopped: ' . $budget->reason());
-    }
-
-    /** The configured reaction to a spent run total — {@see BudgetPolicy::Stop} when unset. */
-    private function budgetPolicy(): BudgetPolicy
-    {
-        $policy = $this->env->find(EnvKey::BudgetPolicy);
-
-        return $policy instanceof BudgetPolicy ? $policy : BudgetPolicy::Stop;
-    }
-
-    /** A positive token top-up parsed from an ask answer (e.g. "+100000"), or 0 to stop. */
-    private function parseExtraTokens(?string $answer): int
-    {
-        $digits = ltrim(trim((string) $answer), '+');
-
-        return $digits !== '' && ctype_digit($digits) ? (int) $digits : 0;
+        throw WorkflowException::budgetSpent('run stopped: ' . $budget->reason());
     }
 
     /** Read a numeric environment value (a budget cap), or 0.0 when unset/non-numeric. */
@@ -1200,10 +1304,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * actual rules live in {@see criticRules()}, keyed by that name. Null when the step has no critic.
      * An unknown name is a generation bug — fail loud rather than judge against an empty rubric.
      */
-    private function criticRubric(?Step $step, string $name): ?string
+    private function criticRubric(?string $critic, string $name): ?string
     {
-        $critic = $step?->critic;
-
         if ($critic === null || $critic === '') {
             return null;
         }
@@ -1217,12 +1319,42 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return $rules;
     }
 
-    /** The soft critic-round cap for a step — its `#[Step(maxRounds: N)]`, else the workflow default. */
-    private function maxRounds(?Step $step): int
+    /** The soft critic-round cap a step declared (`#[Step(maxRounds: N)]` / `#[StepAI(...)]`), else the default. */
+    private function maxRounds(?int $max): int
     {
-        $max = $step?->maxRounds;
-
         return $max !== null && $max > 0 ? $max : self::DEFAULT_MAX_ROUNDS;
+    }
+
+    /**
+     * A step attempt's fingerprint — its artifacts as [label, kind, value] triples — for the
+     * byte-identical-rerun guard. One definition so both step kinds decide "the same" the same way.
+     *
+     * @return list<array{0: string, 1: string, 2: string}>
+     */
+    private function attemptFingerprint(string $name): array
+    {
+        return array_map(static fn (Artifact $a): array => [$a->label, $a->kind, $a->value], $this->artifacts[$name]);
+    }
+
+    /**
+     * The verdict on one attempt: the two deterministic guards first — a step that produced nothing, or a
+     * re-run byte-identical to the last, neither worth an AI critic's round — else the AI critic. Shared by
+     * both step kinds so the guards and their wording cannot drift between them.
+     */
+    private function verdictFor(string $name, string $rubric, string $artifacts, bool $producedNothing, bool $identical): Verdict
+    {
+        if ($producedNothing) {
+            return Verdict::reject("step '{$name}' produced nothing: no model/tool work and no artifact. A step "
+                . 'must do real work and leave a result; if it needs no review, it should carry no critic.');
+        }
+
+        if ($identical) {
+            return Verdict::reject('the re-run produced BYTE-IDENTICAL output to the previous attempt — the '
+                . 'guidance changed nothing about the work. Another round cannot help: either the '
+                . 'finding is wrong, or this step needs different guidance or a person.');
+        }
+
+        return $this->critic($name, $rubric, $artifacts);
     }
 
     /**
@@ -1318,7 +1450,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
         $this->verdict = null;
 
-        $reply = trim($this->ai(
+        $reply = trim($this->runTurns(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
@@ -1348,6 +1480,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'the reason. The tool call is the verdict — prose alone is not one.',
             $toolNames,
             'reviewer',
+            [],   // a critic exchange is always fresh — it never continues a prior conversation
         ));
 
         $verdict = $this->takeVerdict();
@@ -1591,34 +1724,6 @@ abstract class WorkflowAbstract implements WorkflowInterface
     protected const string WORKFLOW_SAVED_MARKER = 'saved as';
 
     /**
-     * Save a generated workflow through the `define_workflow` tool, with one repair pass — the
-     * save/detect/repair/retry control flow shared by every code-generating workflow. On the first
-     * rejection it hands the validator's complaint to $revise (which re-drafts the source on the
-     * appropriate role) and retries once; a second rejection throws. Returns the saved source.
-     *
-     * @param callable(string): string $revise given the rejection text, returns corrected source
-     *
-     * @throws WorkflowException on a second rejection
-     */
-    protected function saveGeneratedWorkflow(string $name, string $code, callable $revise): string
-    {
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
-
-        if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
-            return $code;
-        }
-
-        $code = $revise($result);
-        $result = $this->tool('define_workflow', ['name' => $name, 'code' => $code, 'shared' => true]);
-
-        if (!str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
-            throw new WorkflowException($result);   // a second failure surfaces to the run-path
-        }
-
-        return $code;
-    }
-
-    /**
      * Ask a question of whoever sits on the run's ask channel — a person at the console, or an agent
      * (any {@see SpeakerInterface} placed in {@see EnvKey::Ask}) — and return their answer. The
      * exchange is two-way, so it runs OFF the trace; the question and answer are noted at
@@ -1654,8 +1759,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
     }
 
     /**
-     * The workflow's step methods (those marked {@see Step}), in declaration order — what the
-     * default run() drives.
+     * The workflow's step methods (those marked {@see Step} or {@see StepAI}), in declaration order —
+     * what the default run() drives.
      *
      * @return list<string>
      */
@@ -1664,7 +1769,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $names = [];
 
         foreach (new \ReflectionClass($this)->getMethods() as $method) {
-            if ($method->getAttributes(Step::class) !== []) {
+            if ($method->getAttributes(Step::class) !== [] || $method->getAttributes(StepAI::class) !== []) {
                 $names[] = $method->getName();
             }
         }

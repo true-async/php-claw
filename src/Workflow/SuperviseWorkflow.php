@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Exceptions\WorkflowException;
+
 /**
  * The supervisor's run-level CODE REPAIR: when a generated solver crashes at runtime, this takes its
  * source and the error and writes a FIXED version under a NEW class name (via the supervisor role and
@@ -17,43 +19,79 @@ namespace Claw\Workflow;
  */
 final class SuperviseWorkflow extends WorkflowAbstract
 {
-    private string $fixed = '';
+    /** One bounded repair: on a validator reject at save, back() re-writes once, then a second failure throws. */
+    private bool $repairAttempted = false;
 
     public function name(): string
     {
         return 'supervise-run';
     }
 
-    #[Step]
-    protected function repair(): void
+    /**
+     * A pure {@see StepAI}: declare the repair exchange (on the supervisor role), the base runs it. The
+     * corrected source reaches {@see save()} as an addressed `code` param — the declarative model carries
+     * nothing in fields.
+     */
+    #[StepAI]
+    protected function repair(): AiStep
     {
-        $this->fixed = $this->extractCode($this->ai($this->repairPrompt(), [], 'supervisor'));
+        return new AiStep(
+            $this->repairPrompt(),
+            [],
+            'supervisor',
+            params: [new ParamRequest(
+                forStep: 'save',
+                name: 'code',
+                instruction: 'Output the complete corrected PHP source, exactly and nothing else — '
+                    . 'no prose, no markdown fences.',
+            )],
+        );
     }
 
+    /**
+     * Save the corrected solver through `define_workflow` (which validates, then stores it). On a validator
+     * reject it is re-written ONCE: back() into {@see repair()} hands it the complaint via critique() and it
+     * rewrites; a second reject surfaces to the run path. A CODE step, so it never calls the model itself.
+     */
     #[Step]
     protected function save(): void
     {
-        $this->fixed = $this->saveGeneratedWorkflow(
-            (string) $this->param('fixedName'),
-            $this->fixed,
-            fn (string $rejection): string => $this->extractCode($this->ai(
-                "The corrected class was rejected: {$rejection}\n\n"
-                . "Return ONLY the corrected PHP source. The constraints are unchanged:\n\n"
-                . $this->repairPrompt() . "\n\nThe code you produced was:\n\n" . $this->fixed,
-                [],
-                'supervisor',
-            )),
-        );
+        $code = $this->extractCode((string) $this->param('code'));
+        $result = $this->tool('define_workflow', [
+            'name' => (string) $this->param('fixedName'),
+            'code' => $code,
+            'shared' => true,
+        ]);
+
+        if (str_contains($result, self::WORKFLOW_SAVED_MARKER)) {
+            return;
+        }
+
+        if ($this->repairAttempted) {
+            throw new WorkflowException($result);   // a second failure surfaces to the run path
+        }
+
+        $this->repairAttempted = true;
+        $this->back('repair', "The corrected class was rejected when it was saved: {$result}\n\n"
+            . 'Rewrite the FULL class fixing exactly that.');
     }
 
     private function repairPrompt(): string
     {
+        // A re-write after the validator rejected the save: save() reaches it via back('repair'), which
+        // re-enters this step FRESH — the exchange it first ran is gone — so the model does NOT still hold
+        // its prior attempt. Hand it the whole brief again (the broken source and the error persist as run
+        // params) with the complaint on top; the complaint alone tells it to "fix" a class it cannot see.
+        $critique = $this->critique();
+        $rework = $critique === null ? '' : "A reviewer REJECTED your previous corrected class:\n\n{$critique}\n\n"
+            . "Rewrite the FULL class fixing exactly that. The complete brief follows.\n\n\n";
+
         $namespace = (string) $this->param('fixedNamespace');
         $class = (string) $this->param('fixedName');
         $error = (string) $this->param('error');
         $code = (string) $this->param('brokenCode');
 
-        return <<<PROMPT
+        return $rework . <<<PROMPT
             A generated solver workflow crashed at runtime. Find and fix the cause, and return the
             corrected class.
 
@@ -66,17 +104,17 @@ final class SuperviseWorkflow extends WorkflowAbstract
             Hard requirements (the code is validated before it is saved, and rejected if any are missed):
             - the file must begin with `<?php` then `declare(strict_types=1);`
             - namespace {$namespace};
-            - `use Claw\\Workflow\\Step;` and `use Claw\\Workflow\\WorkflowAbstract;`
+            - `use Claw\\Workflow\\AiStep;`, `use Claw\\Workflow\\StepAI;` and `use Claw\\Workflow\\WorkflowAbstract;` (keep `use Claw\\Workflow\\Step;` if the broken solver has a CODE step)
             - `final class {$class} extends WorkflowAbstract` (use the NEW name {$class})
             - implement `public function name(): string`
-            - KEEP the same `#[Step]` method names and the same typed property names as the broken
-              solver: the run is mid-flight, and its saved state is restored by property name and
+            - KEEP the same step method names (each `#[StepAI]` or `#[Step]`) and the same typed property names
+              as the broken solver: the run is mid-flight, and its saved state is restored by property name and
               resumed by step name, so renaming them loses progress
-            - reach the model with `\$this->ai(string \$prompt, ?array \$tools = null, ?string \$agent = null)`
-              (\$tools defaults to ALL tools; pass a list to restrict or `[]` for none), tools with
-              `\$this->tool(string \$name, array \$params)`, and a person or supervisor with
-              `\$this->ask(string \$question): string`; all of them return STRINGS
-            - the ONLY way to touch files or the shell is `\$this->tool(...)`; file paths are relative to the project root
+            - an AI step is a PURE `#[StepAI]` method that RETURNS `new AiStep(\$prompt, ?\$tools, ?\$agent)` — the
+              base runs the one declared exchange; the method calls no model and has no side effects. A `#[Step]`
+              CODE method returning void may call `\$this->tool(...)`. The model reads/writes files, runs commands
+              and can ask a person INSIDE the declared exchange, through the tools you expose
+            - the ONLY way to touch files or the shell is a tool the model calls; file paths are relative to the project root
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval,
               include/require, or a dynamic `\$var(...)` call — they are forbidden and the code is rejected
 

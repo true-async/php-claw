@@ -7,6 +7,7 @@ namespace Tests\Workflow;
 use Claw\Agent\AgentInterface;
 use Claw\Agent\AgentResponse;
 use Claw\Agent\Budget;
+use Claw\Agent\Message;
 use Claw\Agent\Role;
 use Claw\Agent\SpeakerInterface;
 use Claw\Agent\SpeakerRole;
@@ -26,11 +27,13 @@ use Claw\Tool\ToolInterface;
 use Claw\Trace\ArrayTraceSink;
 use Claw\Trace\Tracer;
 use Claw\Trace\TraceRecordInterface;
-use Claw\Workflow\BudgetPolicy;
+use Claw\Workflow\AiStep;
 use Claw\Workflow\Environment;
 use Claw\Workflow\EnvKey;
 use Claw\Workflow\InMemoryStateStore;
+use Claw\Workflow\ParamRequest;
 use Claw\Workflow\Step;
+use Claw\Workflow\StepAI;
 use Claw\Workflow\Tool;
 use Claw\Workflow\WorkflowAbstract;
 use Claw\Workflow\WorkflowStateStoreInterface;
@@ -49,9 +52,28 @@ final class WorkflowAbstractTest
     public function runDrivesStepMethodsInDeclarationOrder(): void
     {
         $sink = new ArrayTraceSink();
-        $wf = new ProbeWorkflow($this->config(tracer: new Tracer('r1', $sink)), 'r1');
+        $wf = new class ($this->config(tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
+            public string $trail = '';
 
-        $wf->run();
+            public function name(): string
+            {
+                return 'order';
+            }
+
+            #[Step]
+            protected function alpha(): void
+            {
+                $this->trail .= 'a';
+            }
+
+            #[Step]
+            protected function beta(): void
+            {
+                $this->trail .= 'b';
+            }
+        };
+
+        $wf->run();   // the base's default run() drives the step methods in declaration order
 
         Assert::same($wf->trail, 'ab');                              // alpha then beta
         Assert::same($this->stepNames($sink), ['alpha', 'beta']);    // both traced, in order
@@ -140,7 +162,7 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function aReturnsTheModelTextAndAdvertisesOnlyItsToolPalette(): void
+    public function anAiStepAdvertisesOnlyItsNarrowedToolPalette(): void
     {
         $worker = new ScriptedAgent($this->answer('the answer'));
         $registry = new Registry();
@@ -148,9 +170,8 @@ final class WorkflowAbstractTest
         $registry->add($this->echoTool('bash'));
         $wf = new ProbeWorkflow($this->config(worker: $worker, registry: $registry), 'r1');
 
-        $out = $wf->callAi('hello there', ['read']);
+        $wf->runAi('hello there', ['read']);
 
-        Assert::same($out, 'the answer');
         Assert::count($worker->requests[0]->tools, 1);          // only the palette is advertised
         Assert::same($worker->requests[0]->tools[0]->name, 'read');
         Assert::true(str_contains($worker->requests[0]->system, '- read:'));   // and named in the system prompt
@@ -174,13 +195,14 @@ final class WorkflowAbstractTest
                 return strtoupper($text);
             }
 
-            public function go(): string
+            #[StepAI]
+            protected function work(): AiStep
             {
-                return $this->ai('hi');   // null tools -> the whole palette, locals included
+                return new AiStep('hi');   // null tools -> the whole palette, locals included
             }
         };
 
-        $wf->go();
+        $wf->run();
 
         $names = array_map(static fn ($spec): string => $spec->name, $worker->requests[0]->tools);
         Assert::true(\in_array('read', $names, true));    // a global tool
@@ -211,14 +233,237 @@ final class WorkflowAbstractTest
                 return strtoupper($text);
             }
 
-            public function go(): string
+            #[StepAI]
+            protected function work(): AiStep
             {
-                return $this->ai('hi');
+                return new AiStep('hi');
             }
         };
 
-        Assert::same($wf->go(), 'done');   // the turn loop ran the local tool, then finished
+        $wf->run();   // the turn loop ran the local tool, then finished
+
         Assert::same($wf->calls, 1);       // the model's tool call reached the workflow method
+    }
+
+    #[Test]
+    public function anAiStepRunsTheDeclaredExchangeAndCompletes(): void
+    {
+        // A #[StepAI] method is PURE: it returns an AiStep and does no work. The base runs the one
+        // exchange it declares, then marks the step done — the method never touches the model itself.
+        $store = new InMemoryStateStore();
+        $worker = new ScriptedAgent($this->answer('done'));
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function work(): AiStep
+            {
+                return new AiStep('do the work');
+            }
+        };
+
+        $wf->run();
+
+        Assert::count($worker->requests, 1);                        // the base ran the declared exchange
+        Assert::same($this->lastUserText($worker), 'do the work');  // with the declared prompt
+        Assert::same($store->load('r1')['done'], ['work']);         // and recorded the step as done
+    }
+
+    #[Test]
+    public function anAiStepParkedOnAQuestionResumesFromTheAnswer(): void
+    {
+        // The prior life got as far as asking a person and parked — the recorded exchange ends on the
+        // [question]. A fresh instance must CONTINUE from the answer, not re-run the model from the top.
+        $store = new InMemoryStateStore();
+        $store->saveExchange('r1', 'work', [
+            Message::userText('do the work'),
+            new Message(Role::Assistant, [new TextBlock('[question] which file?')]),
+        ]);
+
+        $channel = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Human;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'src/Foo.php';
+            }
+        };
+
+        $worker = new ScriptedAgent($this->answer('done'));
+        $env = $this->config(worker: $worker, store: $store)->set(EnvKey::Ask, $channel);
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function work(): AiStep
+            {
+                return new AiStep('do the work');
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($channel->heard, 'which file?');               // resumed by asking the parked question
+        Assert::count($worker->requests, 1);                        // one model call — to CONTINUE, not re-ask
+        Assert::same($this->lastUserText($worker), 'src/Foo.php');  // the answer went in as the next turn
+        Assert::same($store->load('r1')['done'], ['work']);         // and the step then completed
+    }
+
+    #[Test]
+    public function anAiStepUnderACriticReRunsOnTheSupervisorsGuidance(): void
+    {
+        // A #[StepAI] carries its critic on the attribute. The critic rejects the first attempt; the
+        // supervisor's guidance drives a re-run that CONTINUES the exchange; the second attempt passes —
+        // the same review loop the imperative path uses, over a declared exchange instead of a body.
+        $worker = new ScriptedAgent(
+            $this->toolUse('artifact', ['label' => 'work', 'text' => 'first attempt']),   // attempt 1 records its output
+            $this->answer('done'),                                                        // attempt 1 finishes
+            $this->toolUse('verdict', [                                                   // critic 1 rejects
+                'decision' => 'reject',
+                'rubric_item' => 'the work must be tested',
+                'fact' => 'the work has no test',
+            ]),
+            $this->answer('reviewed'),                                                    // closes critic 1's exchange
+            $this->toolUse('artifact', ['label' => 'work', 'text' => 'second attempt']),  // attempt 2 records a different output
+            $this->answer('done'),                                                        // attempt 2 finishes on the guidance
+            $this->answer('OK'),                                                          // critic 2 accepts
+        );
+        $supervisor = new class () implements SpeakerInterface {
+            public ?string $heard = null;
+
+            public function name(): SpeakerRole
+            {
+                return SpeakerRole::Supervisor;
+            }
+
+            public function reply(string $incoming): string
+            {
+                $this->heard = $incoming;
+
+                return 'add the missing test';
+            }
+        };
+
+        $store = new InMemoryStateStore();
+        $env = $this->config(worker: $worker, store: $store)->set(EnvKey::Ask, $supervisor);
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            protected function criticRules(): array
+            {
+                return ['reviewed' => 'the work must be tested'];
+            }
+
+            #[StepAI(critic: 'reviewed')]
+            protected function work(): AiStep
+            {
+                return new AiStep('do the work');
+            }
+        };
+
+        $wf->run();
+
+        // the reject reached the supervisor with the rubric item and the observed fact
+        Assert::true(str_contains((string) $supervisor->heard, 'Rubric item violated: the work must be tested'));
+        Assert::true(str_contains((string) $supervisor->heard, 'Observed: the work has no test'));
+        Assert::same($store->load('r1')['done'], ['work']);   // the step completed after the accepted re-run
+        Assert::true(\count($worker->requests) >= 4);         // attempt, critic, re-run, critic — a re-run happened
+    }
+
+    #[Test]
+    public function anAiStepExtractsAParamForALaterCodeStep(): void
+    {
+        // A #[StepAI] hands a machine-readable value to a later CODE step: after the work settles the base
+        // asks the model for exactly that value and pins it; the code step reads it with param().
+        $worker = new ScriptedAgent(
+            $this->answer('I read the ticket; the change is localized'),   // the work exchange
+            $this->answer('simple'),                                       // the extraction: only the value
+        );
+        $store = new InMemoryStateStore();
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            public string $seen = '';
+
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function assess(): AiStep
+            {
+                return new AiStep('assess the size of the change', params: [
+                    new ParamRequest(forStep: 'route', name: 'size', instruction: 'One word: simple or complex.'),
+                ]);
+            }
+
+            #[Step]
+            protected function route(): void
+            {
+                $this->seen = (string) $this->param('size');
+            }
+        };
+
+        $wf->run();
+
+        Assert::same($wf->seen, 'simple');                              // the code step read the extracted value
+        Assert::same($store->load('r1')['done'], ['assess', 'route']);  // both steps ran, in order
+        Assert::count($worker->requests, 2);                           // the work exchange plus one extraction call
+    }
+
+    #[Test]
+    public function aBackIntoAnAiStepCarriesItsReasonAsGuidance(): void
+    {
+        // back() into a #[StepAI] must hand the step its reason: the pure body folds critique() into the
+        // AiStep it declares, exactly as the imperative path does. Without it the reason was dropped and the
+        // re-run repeated the first prompt — the contract back() documents, unhonoured on the declared path.
+        $worker = new ScriptedAgent($this->answer('first'), $this->answer('second'));
+        $store = new InMemoryStateStore();
+        $wf = new class ($this->config(worker: $worker, store: $store), 'r1') extends WorkflowAbstract {
+            private bool $sentBack = false;
+
+            public function name(): string
+            {
+                return 'ai';
+            }
+
+            #[StepAI]
+            protected function work(): AiStep
+            {
+                return new AiStep($this->critique() ?? 'do the work');
+            }
+
+            #[Step]
+            protected function gate(): void
+            {
+                if ($this->sentBack) {
+                    return;
+                }
+
+                $this->sentBack = true;
+                $this->back('work', 'try the other approach');
+            }
+        };
+
+        $wf->run();
+
+        Assert::count($worker->requests, 2);                                  // work ran twice: first + the re-run
+        Assert::same($this->lastUserText($worker), 'try the other approach'); // the back reason drove the re-run
     }
 
     #[Test]
@@ -376,14 +621,16 @@ final class WorkflowAbstractTest
     #[Test]
     public function aiRoutesToANamedAgentRolesModel(): void
     {
+        // Each probe runs its one exchange, so two routings need two instances over the shared worker
+        // (a #[StepAI] step runs once — a second call would be skipped as already done).
         $worker = new ScriptedAgent($this->answer('ok'), $this->answer('ok'));
-        $env = $this->config(worker: $worker)->set(EnvKey::Agents, ['reviewer' => 'model-x']);
-        $wf = new ProbeWorkflow($env, 'r1');
 
-        $wf->callAi('hi', [], 'reviewer');
+        new ProbeWorkflow($this->config(worker: $worker)->set(EnvKey::Agents, ['reviewer' => 'model-x']), 'r1')
+            ->runAi('hi', [], 'reviewer');
         Assert::same($worker->requests[0]->model, 'model-x');   // routed to the role's model
 
-        $wf->callAi('hi', [], 'unknown');
+        new ProbeWorkflow($this->config(worker: $worker)->set(EnvKey::Agents, ['reviewer' => 'model-x']), 'r1')
+            ->runAi('hi', [], 'unknown');
         Assert::same($worker->requests[1]->model, 'm');         // unknown role -> scope default
     }
 
@@ -396,7 +643,7 @@ final class WorkflowAbstractTest
         $env = $this->config(worker: $worker)->set(EnvKey::Agents, ['worker-smart' => 'strong-model']);
         $wf = new ProbeWorkflow($env, 'r1');
 
-        $wf->callAi('hi', [], 'project-manager');
+        $wf->runAi('hi', [], 'project-manager');
         Assert::same($worker->requests[0]->model, 'strong-model');   // chain reached worker-smart
 
         // An explicit setting still wins over the chain.
@@ -407,12 +654,12 @@ final class WorkflowAbstractTest
             ]),
             'r1',
         );
-        $own->callAi('hi', [], 'project-manager');
+        $own->runAi('hi', [], 'project-manager');
         Assert::same($worker->requests[1]->model, 'pm-model');
 
         // With no strong role configured at all there is nothing better to reach for: the default.
         $bare = new ProbeWorkflow($this->config(worker: $worker), 'r1');
-        $bare->callAi('hi', [], 'project-manager');
+        $bare->runAi('hi', [], 'project-manager');
         Assert::same($worker->requests[2]->model, 'm');
     }
 
@@ -461,7 +708,7 @@ final class WorkflowAbstractTest
         $threw = false;
 
         try {
-            $wf->callAi('hi');
+            $wf->runAi('hi');
         } catch (WorkflowException) {
             $threw = true;
         }
@@ -488,12 +735,17 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function askPolicyRaisesTheBudgetAndContinuesOnATopUp(): void
+    public function anExhaustedBudgetStopsAndNeverAsksTheChannel(): void
     {
+        // Budget is not an in-run question: reacting to "no tokens" by spending tokens to ask a model is a
+        // contradiction, and on a resumed run that ask could eat a person's answer meant for the worker.
+        // So a spent budget just stops — resumably — and the ask channel, even when present, is untouched.
         $budget = new Budget(tokenLimit: 10);
         $budget->spend(10);   // already exhausted
 
         $channel = new class () implements SpeakerInterface {
+            public bool $asked = false;
+
             public function name(): SpeakerRole
             {
                 return SpeakerRole::Human;
@@ -501,50 +753,26 @@ final class WorkflowAbstractTest
 
             public function reply(string $incoming): string
             {
-                return '+100';   // grant 100 more tokens
-            }
-        };
-        $env = $this->config(worker: new ScriptedAgent($this->answer('done')))
-            ->set(EnvKey::Budget, $budget)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::Ask)
-            ->set(EnvKey::Ask, $channel);
-        $wf = new ProbeWorkflow($env, 'r1');
+                $this->asked = true;
 
-        Assert::same($wf->callAi('hi'), 'done');   // topped up, so the call proceeds
-    }
-
-    #[Test]
-    public function askPolicyStopsWhenNoTopUpIsGiven(): void
-    {
-        $budget = new Budget(tokenLimit: 10);
-        $budget->spend(10);
-
-        $channel = new class () implements SpeakerInterface {
-            public function name(): SpeakerRole
-            {
-                return SpeakerRole::Human;
-            }
-
-            public function reply(string $incoming): string
-            {
-                return '';   // decline -> stop
+                return '+100';   // a top-up the run must NOT honour any more
             }
         };
         $env = $this->config()
             ->set(EnvKey::Budget, $budget)
-            ->set(EnvKey::BudgetPolicy, BudgetPolicy::Ask)
             ->set(EnvKey::Ask, $channel);
         $wf = new ProbeWorkflow($env, 'r1');
 
-        $threw = false;
+        $marked = false;
 
         try {
-            $wf->callAi('hi');
-        } catch (WorkflowException) {
-            $threw = true;
+            $wf->runAi('hi');
+        } catch (WorkflowException $e) {
+            $marked = $e->budget;   // tagged a budget stop, so the run path can PAUSE the ticket, not fail it
         }
 
-        Assert::true($threw);
+        Assert::true($marked);           // an exhausted budget stops the run, marked as a budget stop
+        Assert::false($channel->asked);  // and it did NOT consult the ask channel
     }
 
     #[Test]
@@ -558,10 +786,10 @@ final class WorkflowAbstractTest
                 return 'crt';
             }
 
-            #[Step(critic: 'undefined-rules')]
-            public function make(): string
+            #[StepAI(critic: 'undefined-rules')]
+            protected function make(): AiStep
             {
-                return $this->ai('do it');
+                return new AiStep('do it');
             }
         };
 
@@ -599,10 +827,10 @@ final class WorkflowAbstractTest
                 return ['ok' => 'the work must be fine'];
             }
 
-            #[Step(critic: 'ok')]
-            public function make(): string
+            #[StepAI(critic: 'ok')]
+            protected function make(): AiStep
             {
-                return $this->ai('do it');   // the step works on the full palette
+                return new AiStep('do it');   // the step works on the full palette
             }
         };
 
@@ -659,7 +887,6 @@ final class WorkflowAbstractTest
         $registry = new Registry();
         $registry->add($bash);
         $worker = new ScriptedAgent(
-            $this->answer('the work'),                                // the step
             $this->toolUse('rerun_evidence', ['label' => 'tests']),   // the critic replays the record
             $this->toolUse('verdict', ['decision' => 'accept']),      // and accepts through the tool
             $this->answer('reviewed, all good'),                      // closing prose — not 'OK'
@@ -678,7 +905,8 @@ final class WorkflowAbstractTest
             #[Step(critic: 'gate')]
             public function make(): void
             {
-                $this->ai('do it', []);
+                // A CODE step that records evidence by hand — the critic replays it. No model call here;
+                // the exchange under review is the critic's own.
                 $this->artifact('tests', evidence: 'OK (3 tests, 5 assertions)', from: 'vendor/bin/phpunit --testdox');
             }
         };
@@ -692,7 +920,6 @@ final class WorkflowAbstractTest
     public function rerunEvidenceRefusesAnUnknownLabelAndNamesTheRecordedOnes(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('the work'),
             $this->toolUse('rerun_evidence', ['label' => 'test']),   // no such label — 'tests' exists
             $this->answer('OK'),
         );
@@ -710,7 +937,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'gate')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact('tests', evidence: 'OK', from: 'vendor/bin/phpunit');
             }
         };
@@ -728,7 +954,6 @@ final class WorkflowAbstractTest
         // The citation is a parameter, not an exhortation: a reject that names no broken rule and no
         // observed fact is not expressible — the call is refused and the reviewer must try again.
         $worker = new ScriptedAgent(
-            $this->answer('the work'),
             $this->toolUse('verdict', ['decision' => 'reject']),
             $this->answer('OK'),   // the reviewer concedes: nothing concrete to cite
         );
@@ -746,7 +971,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'ok')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact('work', 'the work');
             }
         };
@@ -760,15 +984,13 @@ final class WorkflowAbstractTest
     public function aRejectVerdictCarriesTheRubricItemAndTheFactToTheSupervisor(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('v1'),   // make() #1
-            $this->toolUse('verdict', [
+            $this->toolUse('verdict', [   // critic #1 rejects make()'s first artifact
                 'decision' => 'reject',
                 'rubric_item' => 'the work must include a test',
                 'fact' => 'the artifact contains no test at all',
             ]),
             $this->answer('rejected'),   // closes the critic's exchange
-            $this->answer('v2'),         // make() #2, on the guidance
-            $this->answer('OK'),         // critic #2 approves
+            $this->answer('OK'),         // critic #2 approves the re-run's artifact
         );
         $supervisor = new class () implements SpeakerInterface {
             public ?string $heard = null;
@@ -801,7 +1023,6 @@ final class WorkflowAbstractTest
         // rework churned on work nobody had faulted. The supervisor now hears what actually happened
         // and settles it — here by accepting, so the step runs exactly once.
         $worker = new ScriptedAgent(
-            $this->answer('v1'),
             $this->toolUse('verdict', ['decision' => 'cannot_verify', 'reason' => 'no runnable evidence was recorded']),
             $this->answer('recorded'),
         );
@@ -836,11 +1057,9 @@ final class WorkflowAbstractTest
         // Alone, the productive fix is the step's own: re-run and record the evidence the critic was
         // missing. The reason is the guidance, so the re-run knows exactly what to record.
         $worker = new ScriptedAgent(
-            $this->answer('v1'),
             $this->toolUse('verdict', ['decision' => 'cannot_verify', 'reason' => 'record the test run as evidence']),
             $this->answer('recorded'),
-            $this->answer('v2'),   // the re-run
-            $this->answer('OK'),   // critic #2 approves
+            $this->answer('OK'),   // critic #2 approves the re-run
         );
         $wf = new CriticStepWorkflow($this->config(worker: $worker), 'r1');
 
@@ -854,7 +1073,6 @@ final class WorkflowAbstractTest
     public function rerunEvidenceOnAStepWithNoRunnableEvidencePointsAtCannotVerify(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('the work'),
             $this->toolUse('rerun_evidence', ['label' => 'tests']),   // nothing runnable was recorded
             $this->answer('OK'),
         );
@@ -872,7 +1090,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'gate')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact('claim', text: 'I ran the tests, trust me');   // a claim, not evidence
             }
         };
@@ -888,7 +1105,6 @@ final class WorkflowAbstractTest
     public function theVerdictToolRefusesEveryMalformedDecisionAtTheCall(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('the work'),
             $this->toolUse('verdict', ['decision' => 'maybe']),            // not a decision
             $this->toolUse('verdict', ['decision' => 'cannot_verify']),    // no reason
             $this->toolUse('verdict', ['decision' => 'accept']),
@@ -908,7 +1124,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'ok')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact('work', 'the work');
             }
         };
@@ -926,7 +1141,6 @@ final class WorkflowAbstractTest
         // No `bash` in the run registry at all — the replay cannot start. The critic must be told
         // this settles nothing about the work, and where that leads: cannot_verify.
         $worker = new ScriptedAgent(
-            $this->answer('the work'),
             $this->toolUse('rerun_evidence', ['label' => 'tests']),
             $this->answer('OK'),
         );
@@ -944,7 +1158,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'gate')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact('tests', evidence: 'OK (3 tests)', from: 'vendor/bin/phpunit');
             }
         };
@@ -963,7 +1176,7 @@ final class WorkflowAbstractTest
         // The reason the kind exists: with only a text artifact, "All tests passed." IS the review's
         // whole input and a step can assert anything. Evidence puts the command's own output in front
         // of the reviewer, with the step's reading of it kept visibly separate.
-        $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
+        $worker = new ScriptedAgent($this->answer('OK'));
         $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
             public function name(): string
             {
@@ -978,7 +1191,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'gate')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact(
                     'tests',
                     text: 'the suite is green',
@@ -1032,10 +1244,10 @@ final class WorkflowAbstractTest
                 return 'ev';
             }
 
-            #[Step]
-            public function make(): void
+            #[StepAI]
+            protected function make(): AiStep
             {
-                $this->ai('prove it');
+                return new AiStep('prove it');
             }
         };
 
@@ -1071,25 +1283,21 @@ final class WorkflowAbstractTest
             $this->answer('understood, recorded nothing'),
         );
         $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
-            public string $out = '';
-
             public function name(): string
             {
                 return 'ev';
             }
 
-            #[Step]
-            public function make(): void
+            #[StepAI]
+            protected function make(): AiStep
             {
-                $this->out = $this->ai('record something');
+                return new AiStep('record something');
             }
         };
 
         $wf->run();   // the run survives; the model saw the refusal and carried on
 
-        Assert::same($wf->out, 'understood, recorded nothing');
-
-        // And the refusal reached the model as a tool result it could act on.
+        // The refusal reached the model as a tool result it could act on.
         $refusal = '';
         $key = array_key_last($worker->requests) ?? throw new \RuntimeException('no request was made');
         $last = $worker->requests[$key];
@@ -1129,18 +1337,16 @@ final class WorkflowAbstractTest
 
         $env = $this->config(worker: $worker, registry: $registry);
         $wf = new class ($env, 'r1') extends WorkflowAbstract {
-            public string $out = '';
-
             public function name(): string
             {
                 return 'narrow';
             }
 
-            #[Step]
-            public function make(): void
+            // Deliberately least-privilege: this step reads, and must not run commands.
+            #[StepAI]
+            protected function make(): AiStep
             {
-                // Deliberately least-privilege: this step reads, and must not run commands.
-                $this->out = $this->ai('look, do not touch', ['read', 'artifact']);
+                return new AiStep('look, do not touch', ['read', 'artifact']);
             }
         };
 
@@ -1259,7 +1465,7 @@ final class WorkflowAbstractTest
         // anything. It was doing as it was told: the prompt used to say the artifacts were "usually
         // enough". Giving the critic tools is worthless if it is told to trust the summary, so the
         // instruction to verify is part of the contract and is asserted here.
-        $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
+        $worker = new ScriptedAgent($this->answer('OK'));
         $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
             public function name(): string
             {
@@ -1274,7 +1480,6 @@ final class WorkflowAbstractTest
             #[Step(critic: 'ok')]
             public function make(): void
             {
-                $this->ai('do it', []);
                 $this->artifact('result', text: 'All tests passed.');
             }
         };
@@ -1412,16 +1617,16 @@ final class WorkflowAbstractTest
                 return 'relay';
             }
 
-            #[Step]
-            public function first(): void
+            #[StepAI]
+            protected function first(): AiStep
             {
-                $this->ai('do the work');
+                return new AiStep('do the work');
             }
 
-            #[Step]
-            public function second(): void
+            #[StepAI]
+            protected function second(): AiStep
             {
-                $this->ai('carry on');
+                return new AiStep('carry on');
             }
         };
 
@@ -1510,22 +1715,22 @@ final class WorkflowAbstractTest
                 return 'relay3';
             }
 
-            #[Step]
-            protected function first(): void
+            #[StepAI]
+            protected function first(): AiStep
             {
-                $this->ai('one');
+                return new AiStep('one');
             }
 
-            #[Step]
-            protected function second(): void
+            #[StepAI]
+            protected function second(): AiStep
             {
-                $this->ai('two');
+                return new AiStep('two');
             }
 
-            #[Step]
-            protected function third(): void
+            #[StepAI]
+            protected function third(): AiStep
             {
-                $this->ai('three');
+                return new AiStep('three');
             }
         };
 
@@ -1538,8 +1743,7 @@ final class WorkflowAbstractTest
     public function aStepWhoseCriticPassesRunsOnce(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('the work'),   // the step's ai()
-            $this->answer('OK'),         // the critic (reviewer) approves
+            $this->answer('OK'),   // the critic (reviewer) approves on the first pass
         );
         $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
             public string $work = '';
@@ -1559,7 +1763,7 @@ final class WorkflowAbstractTest
             public function make(): void
             {
                 $this->runs++;
-                $this->work = $this->ai('do it');
+                $this->work = 'the work';
                 $this->artifact('work', $this->work);   // the critic judges this artifact, not a return value
             }
         };
@@ -1574,10 +1778,8 @@ final class WorkflowAbstractTest
     public function aRejectedStepIsGuidedByTheSupervisorAndReruns(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('v1'),           // make() #1
             $this->answer('needs a test'), // critic #1 -> not OK
-            $this->answer('v2'),           // make() #2 (re-run with the guidance)
-            $this->answer('OK'),           // critic #2 -> approves
+            $this->answer('OK'),           // critic #2 -> approves the re-run
         );
         $supervisor = new class () implements SpeakerInterface {
             public ?string $heard = null;
@@ -1615,7 +1817,7 @@ final class WorkflowAbstractTest
             {
                 $this->runs++;
                 $this->sawCritique = $this->critique();
-                $this->work = $this->ai('do it');
+                $this->work = 'v' . $this->runs;        // a distinct result per attempt (so the re-run is not byte-identical)
                 $this->artifact('work', $this->work);   // the critic AND the supervisor judge this artifact
             }
         };
@@ -1639,10 +1841,8 @@ final class WorkflowAbstractTest
     public function guidanceThatMerelyBeginsWithStopIsGuidanceAndNotAnAbort(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('v1'),
             $this->answer('needs a test'),   // critic #1 -> not OK
-            $this->answer('v2'),
-            $this->answer('OK'),             // critic #2 -> approves
+            $this->answer('OK'),             // critic #2 -> approves the re-run
         );
         $wf = $this->supervised($worker, 'Stop rerunning the whole suite; run only the failing test.');
 
@@ -1663,10 +1863,8 @@ final class WorkflowAbstractTest
     public function anEmptyReplyDoesNotAcceptWorkTheCriticRejected(): void
     {
         $worker = new ScriptedAgent(
-            $this->answer('v1'),
             $this->answer('needs a test'),   // critic #1 -> not OK
-            $this->answer('v2'),
-            $this->answer('OK'),             // critic #2 -> approves
+            $this->answer('OK'),             // critic #2 -> approves the re-run
         );
         $wf = $this->supervised($worker, '   ');
 
@@ -1733,10 +1931,10 @@ final class WorkflowAbstractTest
                 return 'crashy';
             }
 
-            #[Step]
-            protected function implement(): void
+            #[StepAI]
+            protected function implement(): AiStep
             {
-                $this->ai('write the file');
+                return new AiStep('write the file');
             }
         };
 
@@ -1754,23 +1952,19 @@ final class WorkflowAbstractTest
         // must not start cold.
         $resumed = new ScriptedAgent($this->answer('already written, carrying on'));
         $second = new class ($this->config(worker: $resumed, registry: $registry, store: $store), 'r1') extends WorkflowAbstract {
-            public string $out = '';
-
             public function name(): string
             {
                 return 'crashy';
             }
 
-            #[Step]
-            protected function implement(): void
+            #[StepAI]
+            protected function implement(): AiStep
             {
-                $this->out = $this->ai('write the file');
+                return new AiStep('write the file');
             }
         };
 
         $second->run();
-
-        Assert::same($second->out, 'already written, carrying on');
 
         // The model was handed the interrupted conversation: its own tool call and the result it got.
         $sent = $resumed->requests[0]->messages;
@@ -1822,11 +2016,10 @@ final class WorkflowAbstractTest
                 return ['gate' => 'the work must be fine'];
             }
 
-            #[Step(critic: 'gate')]
-            public function make(): void
+            #[StepAI(critic: 'gate')]
+            protected function make(): AiStep
             {
-                $this->ai('do it');
-                $this->artifact('work', text: 'done');
+                return new AiStep('do it');
             }
 
             /** Run only the step, so the exchange is still there to look at afterwards. */
@@ -1875,10 +2068,10 @@ final class WorkflowAbstractTest
                 return 'w';
             }
 
-            #[Step]
-            public function make(): void
+            #[StepAI]
+            protected function make(): AiStep
             {
-                $this->ai('write it');
+                return new AiStep('write it');
             }
         };
 
@@ -1940,10 +2133,10 @@ final class WorkflowAbstractTest
                 return 'w';
             }
 
-            #[Step]
-            public function make(): void
+            #[StepAI]
+            protected function make(): AiStep
             {
-                $this->ai('write them');
+                return new AiStep('write them');
             }
         };
 
@@ -1960,6 +2153,7 @@ final class WorkflowAbstractTest
         $write = $this->toolUse('write_file', ['path' => 'src/Calc.php', 'content' => '<?php']);
         $worker = new ScriptedAgent(
             $write,
+            $this->toolUse('artifact', ['label' => 'the calculator', 'file' => 'src/Calc.php']),   // recorded by hand too
             $this->answer('done'),
         );
         $registry = new Registry();
@@ -1972,11 +2166,10 @@ final class WorkflowAbstractTest
                 return 'w';
             }
 
-            #[Step]
-            public function make(): void
+            #[StepAI]
+            protected function make(): AiStep
             {
-                $this->ai('write it');
-                $this->artifact('the calculator', file: 'src/Calc.php');   // recorded by hand too
+                return new AiStep('write it');
             }
         };
 
@@ -2008,56 +2201,22 @@ final class WorkflowAbstractTest
                 return 'ab';
             }
 
-            #[Step]
-            public function alpha(): void
+            #[StepAI]
+            protected function alpha(): AiStep
             {
-                $this->ai('write A');
+                return new AiStep('write A');
             }
 
-            #[Step]
-            public function beta(): void
+            #[StepAI]
+            protected function beta(): AiStep
             {
-                $this->ai('carry on');   // its first ai() forms alpha's handoff first
+                return new AiStep('carry on');   // its exchange forms alpha's handoff first
             }
         };
 
         $wf->run();
 
         Assert::same($this->fileArtifacts($sink), ['src/A.php']);   // once, not doubled under beta
-    }
-
-    #[Test]
-    public function filesWrittenAcrossSeveralAiCallsInOneStepAllBecomeArtifacts(): void
-    {
-        $writeA = $this->toolUse('write_file', ['path' => 'a.php', 'content' => '1']);
-        $writeB = $this->toolUse('write_file', ['path' => 'b.php', 'content' => '2']);
-        $worker = new ScriptedAgent(
-            $writeA,
-            $this->answer('a done'),   // first ai() ends
-            $writeB,
-            $this->answer('b done'),   // second ai() ends
-        );
-        $registry = new Registry();
-        $registry->add($this->cannedTool('write_file', 'Wrote'));
-
-        $sink = new ArrayTraceSink();
-        $wf = new class ($this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink)), 'r1') extends WorkflowAbstract {
-            public function name(): string
-            {
-                return 'w';
-            }
-
-            #[Step]
-            public function make(): void
-            {
-                $this->ai('write a');
-                $this->ai('write b');   // a fresh exchange; its writes must accumulate onto the first's
-            }
-        };
-
-        $wf->run();
-
-        Assert::same($this->fileArtifacts($sink), ['a.php', 'b.php']);
     }
 
     /**
@@ -2090,16 +2249,16 @@ final class WorkflowAbstractTest
                 return 'relay';
             }
 
-            #[Step]
-            protected function first(): void
+            #[StepAI]
+            protected function first(): AiStep
             {
-                $this->ai('do the work');
+                return new AiStep('do the work');
             }
 
-            #[Step]
-            protected function second(): void
+            #[StepAI]
+            protected function second(): AiStep
             {
-                $this->ai('carry on');
+                return new AiStep('carry on');
             }
         };
     }

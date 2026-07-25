@@ -36,7 +36,7 @@ final class CriticStepWorkflow extends WorkflowAbstract
     {
         $this->runs++;
         $this->sawCritique = $this->critique();
-        $this->work = $this->ai('do it');
+        $this->work = 'v' . $this->runs;        // a distinct result per attempt, so a re-run is not byte-identical
         $this->artifact('work', $this->work);   // what the critic AND the supervisor judge
     }
 }

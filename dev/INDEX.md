@@ -37,6 +37,7 @@ file rather than overwriting the first, so the reasoning behind what was built s
 |---|---|
 | The knowledge base, as built | [`design/knowledge-base.md`](design/knowledge-base.md) |
 | The knowledge base, second pass | [`design/knowledge-base-next.md`](design/knowledge-base-next.md) |
+| A run's request to a person | [`design/human-requests.md`](design/human-requests.md) |
 
 ## Hot paths
 

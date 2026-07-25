@@ -418,3 +418,29 @@ pass commits per note and writes each note's row last: an overtaken index is sta
 Separately, `ATTR_TIMEOUT => 4` was removed — measured, pdo_sqlite's default busy timeout on this
 build is 60000 ms, so that line lowered it fifteenfold while its comment claimed to raise it. The
 same line is still in `ProjectStore::open()`.
+
+---
+
+## 2026-07-25 — A run that needs a person raises one typed request
+
+**Decision.** A run that cannot proceed without a human raises ONE typed `request` —
+`{ id, run, kind, prompt, payload, options }`, durable in the journal, resolved by a `resolution` that
+names it by `id`. `WaitingHuman` stops being five undistinguished reasons (a parked question, a solver
+to approve, a ticket to split, a spent budget, an exhausted strategy) and becomes the state a request
+puts the ticket in; the board, the panel and the API all read the one shape. Budget is one such request:
+`enforceBudget()`, when the total is spent, records a `budget` request and STOPS rather than calling the
+ask channel — the person raises the limit out of band and resumes. `BudgetPolicy::Ask`, `parseExtraTokens`
+and the in-run top-up are deleted. Designed in [`design/human-requests.md`](design/human-requests.md);
+not yet built.
+
+**Why.** `WaitingHuman` was already reached from five places for five different human jobs, all identical
+on the board — the reason lived only in a `report()` string the dashboard never structured. And the
+budget path was wrong twice: to handle "no tokens" it spent tokens (the ask channel's front tier is the
+supervisor, a model call, which cannot authorize a budget anyway), and on a resumed run that call reached
+the human gate before the parked worker and — because the gate matched answers to the run by a FIFO
+cursor, not to the question by `id` — consumed the human's answer to the worker's question. Matching a
+resolution to its request by `id` closes that at the root, for every kind.
+
+**Open.** One `resolve` endpoint keyed by request id vs. per-kind endpoints (leaning one). Whether all
+five sites convert at once or `question` + `budget` land first. Whether `IssueStatus` gains a per-kind
+hint or the board reads the kind off the open request. See the design doc.

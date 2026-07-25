@@ -252,9 +252,17 @@ final class DefaultTurnLoop implements TurnLoopInterface
                 // A turn carrying the [question] marker is the latter: route it to the channel, inject
                 // the answer as the next user turn, and continue the same loop (context stays whole).
                 if ($this->ask !== null) {
-                    $question = $this->extractQuestion($response->text ?? '');
+                    $question = self::extractQuestion($response->text ?? '');
 
                     if ($question !== null) {
+                        // Persist the exchange BEFORE blocking on the answer: this turn — the [question] — is
+                        // a no-tool turn the tool-turn checkpoint below never reaches, so without this a crash
+                        // while parked leaves nothing recorded and a resume re-asks the model instead of
+                        // continuing from the answer. {@see pendingQuestion()} reads this tail back on resume.
+                        if ($this->checkpoint !== null) {
+                            ($this->checkpoint)($history);
+                        }
+
                         $answer = $this->ask->reply($question);
 
                         if ($answer !== null) {                       // null = the chain passed up, no one answered
@@ -326,9 +334,9 @@ final class DefaultTurnLoop implements TurnLoopInterface
             $history[] = new Message(Role::User, $results);
             $this->tracer?->exit($turn);
 
-            // A turn has landed and the history is whole: every tool_use answered. This is the only
-            // instant it is safe to write down, which is why the loop offers it rather than leaving the
-            // caller to guess when to snapshot.
+            // A turn has landed and the history is whole: every tool_use answered. One of the two instants
+            // it is safe to write the exchange down — the other is the [question] park above, which
+            // checkpoints before it blocks so a crash while waiting can resume from the question.
             if ($this->checkpoint !== null) {
                 ($this->checkpoint)($history);
             }
@@ -418,7 +426,7 @@ final class DefaultTurnLoop implements TurnLoopInterface
      * else null (a normal final answer). The marker is stripped; a bare marker with no question
      * falls back to a real prompt rather than echoing the literal "[question]" at the channel.
      */
-    private function extractQuestion(string $text): ?string
+    private static function extractQuestion(string $text): ?string
     {
         if (!str_contains($text, self::QUESTION_MARKER)) {
             return null;
@@ -427,5 +435,38 @@ final class DefaultTurnLoop implements TurnLoopInterface
         $question = trim(str_replace(self::QUESTION_MARKER, '', $text));
 
         return $question === '' ? 'The worker paused for input but gave no question.' : $question;
+    }
+
+    /**
+     * The unanswered [question] a checkpointed exchange ended on, or null when the last turn is an
+     * ordinary finished answer (an empty history, or a tail still asking for tools, is not a park).
+     *
+     * A resumed AI step reads this off its recorded exchange to tell a PARK — continue from the human's
+     * answer — from a SETTLED exchange it should replay. It is the same marker the live loop routes on,
+     * read from the durable tail rather than from a fresh response.
+     *
+     * @param list<Message> $history
+     */
+    public static function pendingQuestion(array $history): ?string
+    {
+        $last = $history === [] ? null : $history[array_key_last($history)];
+
+        if (!$last instanceof Message || $last->role !== Role::Assistant) {
+            return null;
+        }
+
+        $text = '';
+
+        foreach ($last->content as $block) {
+            if ($block instanceof ToolUseBlock) {
+                return null;   // a turn still asking for tools was never a park
+            }
+
+            if ($block instanceof TextBlock) {
+                $text .= $block->text;
+            }
+        }
+
+        return self::extractQuestion($text);
     }
 }

@@ -31,8 +31,9 @@ final readonly class DefineWorkflowTool implements ToolInterface
     {
         return 'Save a reusable workflow as a PHP class. The class must extend '
             . 'Claw\\Workflow\\WorkflowAbstract and implement name(). Keep state in plain fields; '
-            . 'write each step as a method marked #[\\Claw\\Workflow\\Step] whose body builds prompts, '
-            . 'calls $this->ai(...) for the model and $this->tool(...) for tools, and writes to the fields. '
+            . 'write each AI step as a pure method marked #[\\Claw\\Workflow\\StepAI] that returns '
+            . 'new Claw\\Workflow\\AiStep($prompt, $tools, $agent) declaring one model exchange, and any '
+            . 'deterministic glue as a #[\\Claw\\Workflow\\Step] method that calls $this->tool(...). '
             . 'The default run() drives the step methods in declaration order; override run() to '
             . 'orchestrate by hand. Set "shared" to make it available to every session.';
     }
