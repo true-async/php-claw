@@ -56,6 +56,8 @@ final class ToolFactory
         // that needs external data carries `http_request` in its palette, and one that must not touch the
         // network simply does not. Bounded by the run's tool timeout so a hung request cannot hold it open.
         $registry->add(new HttpTool(new CurlHttpClient($timeoutMs > 0 ? $timeoutMs : 30_000)));
+        // Search when the URL is not known yet — the other half of the search/fetch pair.
+        $registry->add(new WebSearchTool(new CurlHttpClient($timeoutMs > 0 ? $timeoutMs : 30_000)));
 
         // The knowledge base, when the project has a usable one. Offered rather than required: a base
         // that cannot answer would be a tool a model spends turns interrogating before believing it.
