@@ -7,8 +7,8 @@ namespace Claw\Tool;
 use Claw\Exceptions\ToolException;
 
 /**
- * List the files and directories in a workspace directory (one level). Safe.
- * Directories are suffixed with "/"; files show their size.
+ * List the files and directories in a workspace directory — one level, or the whole tree beneath it
+ * when `recursive` is set. Safe. Directories are suffixed with "/"; files show their size.
  */
 final readonly class ListFilesTool implements ToolInterface
 {
@@ -25,7 +25,10 @@ final readonly class ListFilesTool implements ToolInterface
 
     public function description(): string
     {
-        return 'List files and directories in a workspace directory. Optional "path" (workspace-relative, default ".").';
+        return 'List the files and directories in a workspace directory. Optional "path" '
+            . '(workspace-relative, default "."). Lists ONE level by default; pass "recursive": true to '
+            . 'walk the whole tree beneath it (capped). To find files by NAME across the tree, glob is '
+            . 'usually the better tool.';
     }
 
     public function inputSchema(): array
@@ -34,6 +37,10 @@ final readonly class ListFilesTool implements ToolInterface
             'type' => 'object',
             'properties' => [
                 'path' => ['type' => 'string', 'description' => 'Workspace-relative directory, default "."'],
+                'recursive' => [
+                    'type' => 'boolean',
+                    'description' => 'Walk the whole tree beneath path instead of listing one level (default false)',
+                ],
             ],
         ];
     }
@@ -62,6 +69,21 @@ final readonly class ListFilesTool implements ToolInterface
             throw new ToolException("list_files: not a directory: {$path}");
         }
 
+        $lines = ($input['recursive'] ?? false)
+            ? $this->walkTree($real)
+            : $this->listLevel($real, $path);
+
+        return $lines === [] ? '(empty directory)' : implode("\n", $lines);
+    }
+
+    /**
+     * One level, via scandir — the entry names as they sit in the directory. Directories carry a
+     * trailing "/", files their size.
+     *
+     * @return list<string>
+     */
+    private function listLevel(string $real, string $path): array
+    {
         $entries = scandir($real);
 
         if ($entries === false) {
@@ -69,11 +91,6 @@ final readonly class ListFilesTool implements ToolInterface
         }
 
         $entries = array_values(array_filter($entries, static fn (string $e): bool => $e !== '.' && $e !== '..'));
-
-        if ($entries === []) {
-            return '(empty directory)';
-        }
-
         $lines = [];
 
         foreach ($entries as $i => $entry) {
@@ -93,6 +110,45 @@ final readonly class ListFilesTool implements ToolInterface
             }
         }
 
-        return implode("\n", $lines);
+        return $lines;
+    }
+
+    /**
+     * The whole tree beneath $real, as workspace-relative paths sorted for a stable listing. Unreadable
+     * sub-directories are skipped (CATCH_GET_CHILD) rather than aborting the walk, and the same
+     * maxEntries cap bounds the output — a recursive listing of a large tree must not be unbounded.
+     *
+     * @return list<string>
+     */
+    private function walkTree(string $real): array
+    {
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($real, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST,
+            \RecursiveIteratorIterator::CATCH_GET_CHILD,
+        );
+
+        $prefix = strlen($real) + 1;
+        $rows = [];
+
+        foreach ($iterator as $info) {
+            $rel = str_replace(DIRECTORY_SEPARATOR, '/', substr($info->getPathname(), $prefix));
+
+            if ($info->isDir()) {
+                $rows[] = $rel . '/';
+            } else {
+                $size = $info->getSize();
+                $rows[] = $rel . '  (' . ($size === false ? '?' : $size) . ' bytes)';
+            }
+        }
+
+        sort($rows, SORT_STRING);
+
+        if (\count($rows) > $this->maxEntries) {
+            $rows = \array_slice($rows, 0, $this->maxEntries);
+            $rows[] = "... [truncated at {$this->maxEntries} entries]";
+        }
+
+        return $rows;
     }
 }

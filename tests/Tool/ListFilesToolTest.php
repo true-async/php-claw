@@ -46,6 +46,28 @@ final class ListFilesToolTest
     }
 
     #[Test]
+    public function recursiveWalksTheWholeTree(): void
+    {
+        $workspace = $this->workspace();
+        mkdir($workspace->root() . '/sub');
+        mkdir($workspace->root() . '/sub/deep');
+        file_put_contents($workspace->root() . '/top.txt', 'x');
+        file_put_contents($workspace->root() . '/sub/deep/inner.txt', 'yy');
+
+        $tool = new ListFilesTool($workspace);
+
+        $flat = $tool->handle([]);
+        Assert::false(str_contains($flat, 'inner.txt'));   // one level only, does not descend
+
+        $deep = $tool->handle(['recursive' => true]);
+        Assert::true(str_contains($deep, 'top.txt'));
+        Assert::true(str_contains($deep, 'sub/deep/inner.txt'));   // relative path, forward slashes
+        Assert::true(str_contains($deep, 'sub/deep/'));            // directories are listed too
+
+        $this->cleanup($workspace->root());
+    }
+
+    #[Test]
     public function rejectsTraversalAndNonDirectory(): void
     {
         $workspace = $this->workspace();
