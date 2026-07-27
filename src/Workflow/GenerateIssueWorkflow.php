@@ -61,7 +61,10 @@ final class GenerateIssueWorkflow extends WorkflowAbstract
              `php -l` and the tests, fix until green). One step is the DEFAULT, not a shortcoming.
           2. Add a further step ONLY when a part is distinct enough that its own fresh context or its own
              critic earns the cost — e.g. a real design decision before a large change, or a test gate that
-             must be proven green. When in doubt: fewer steps.
+             must be proven green. The test for that: imagine ONE agent doing the whole task in a single
+             sitting, and split off a part ONLY where you can NAME why that sitting would fail it — its own
+             context would rot under everything else, or it needs an independent critic it cannot get
+             inline. If you cannot name the failure, do not split. When in doubt: fewer steps.
           3. The concerns to COVER (this is NOT a list of steps): understand what's asked, make the change,
              prove it works (lint/tests green), record/deliver if it matters. On a simple task ALL of these
              live in the single implement-and-verify step — do not spread them into separate steps.
