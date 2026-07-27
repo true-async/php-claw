@@ -20,6 +20,7 @@ use Claw\Http\HttpClientInterface;
 final readonly class ServerClient
 {
     private const int SPAWN_TIMEOUT_MS = 10_000;
+    private const int ATTACH_TIMEOUT_MS = 10_000;
     private const int POLL_MS = 100;
 
     private ServerLocator $locator;
@@ -90,6 +91,125 @@ final readonly class ServerClient
         }
 
         throw new ClawException("the server refused to start the run (HTTP {$response->status})");
+    }
+
+    /**
+     * The runs recorded for an issue, oldest first — how the CLI finds the run a start produced, since
+     * the id is minted inside the run and not returned by the start.
+     *
+     * @param array{host: string, port: int} $server
+     *
+     * @return list<array{id: string, status: string}>
+     */
+    public function runs(array $server, string $key, string $issueId): array
+    {
+        $url = sprintf(
+            'http://%s:%d/api/projects/%s/issues/%s/runs',
+            $server['host'],
+            $server['port'],
+            rawurlencode($key),
+            rawurlencode($issueId),
+        );
+
+        $runs = [];
+
+        foreach ($this->getList($url) as $run) {
+            if (\is_array($run) && isset($run['id'])) {
+                $runs[] = ['id' => (string) $run['id'], 'status' => (string) ($run['status'] ?? '')];
+            }
+        }
+
+        return $runs;
+    }
+
+    /**
+     * A run's trace rows past $since — the poll the tail renders from, the same rows an SSE subscriber
+     * would receive.
+     *
+     * @param array{host: string, port: int} $server
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function trace(array $server, string $key, string $runId, int $since): array
+    {
+        $url = sprintf(
+            'http://%s:%d/api/projects/%s/runs/%s/trace?since=%d',
+            $server['host'],
+            $server['port'],
+            rawurlencode($key),
+            rawurlencode($runId),
+            $since,
+        );
+
+        $rows = [];
+
+        foreach ($this->getList($url) as $row) {
+            if (\is_array($row)) {
+                $rows[] = $row;
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * GET a URL and decode a top-level JSON list, or [] on any error. These endpoints return bare
+     * arrays (a run list, trace rows), which {@see HttpResponse::json()} refuses by contract — it is for
+     * string-keyed objects — so the body is decoded here instead.
+     *
+     * @return list<mixed>
+     */
+    private function getList(string $url): array
+    {
+        $response = $this->http->get($url);
+
+        if (!$response->isOk()) {
+            return [];
+        }
+
+        $data = json_decode($response->body, true);
+
+        return \is_array($data) && array_is_list($data) ? $data : [];
+    }
+
+    /**
+     * The highest run id recorded for an issue, or 0 when it has none — the mark a new run must beat.
+     *
+     * @param array{host: string, port: int} $server
+     */
+    public function latestRunId(array $server, string $key, string $issueId): int
+    {
+        $highest = 0;
+
+        foreach ($this->runs($server, $key, $issueId) as $run) {
+            $highest = max($highest, (int) $run['id']);
+        }
+
+        return $highest;
+    }
+
+    /**
+     * Wait for the run a start just produced: the first run whose id beats $afterId. Null when none
+     * appears in time — the caller falls back to telling the user to watch elsewhere.
+     *
+     * @param array{host: string, port: int} $server
+     */
+    public function awaitRun(array $server, string $key, string $issueId, int $afterId): ?string
+    {
+        $waited = 0;
+
+        while ($waited < self::ATTACH_TIMEOUT_MS) {
+            foreach ($this->runs($server, $key, $issueId) as $run) {
+                if ((int) $run['id'] > $afterId) {
+                    return $run['id'];
+                }
+            }
+
+            usleep(self::POLL_MS * 1000);
+            $waited += self::POLL_MS;
+        }
+
+        return null;
     }
 
     /**
