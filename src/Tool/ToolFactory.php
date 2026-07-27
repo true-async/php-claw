@@ -40,6 +40,10 @@ final class ToolFactory
         $registry->add(new ReadFileTool($workspace, secrets: $secrets));
         $registry->add(new WriteFileTool($workspace));
         $registry->add(new ListFilesTool($workspace));
+        // Locate-before-read, as their own READ-only tools rather than grep/find shelled through bash:
+        // bounded output, they skip vendor/.git, and a reviewer can hold them without a shell.
+        $registry->add(new GrepTool($workspace));
+        $registry->add(new GlobTool($workspace));
         // The network, as a first-class capability rather than a curl shelled out through bash: a step
         // that needs external data carries `http_request` in its palette, and one that must not touch the
         // network simply does not. Bounded by the run's tool timeout so a hung request cannot hold it open.
