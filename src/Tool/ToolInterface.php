@@ -25,6 +25,15 @@ interface ToolInterface
     public function risk(): Risk;
 
     /**
+     * What this tool does to the world — {@see Effect::Read}, {@see Effect::Write}, or both. It is how a
+     * palette is narrowed by capability rather than by name: a reviewer gets `exceptEffect(Effect::Write)`,
+     * so a Write tool added to the run later stays out of its palette without anyone revisiting a list.
+     *
+     * @return list<Effect>
+     */
+    public function effects(): array;
+
+    /**
      * Execute the call and return a textual result. May await.
      *
      * @param array<string, mixed> $input

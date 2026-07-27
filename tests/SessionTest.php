@@ -21,6 +21,7 @@ use Claw\Exceptions\QuotaExceededException;
 use Claw\Exceptions\RateLimitException;
 use Claw\Session;
 use Claw\Store\SessionStore;
+use Claw\Tool\Effect;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
@@ -342,6 +343,11 @@ final class SessionTest
                 return ['type' => 'object', 'properties' => ['msg' => ['type' => 'string']]];
             }
 
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
+            }
+
             public function risk(): Risk
             {
                 return Risk::Safe;
@@ -372,6 +378,11 @@ final class SessionTest
                 return ['type' => 'object', 'properties' => ['command' => ['type' => 'string']]];
             }
 
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
+            }
+
             public function risk(): Risk
             {
                 return Risk::Mutating;
@@ -400,6 +411,11 @@ final class SessionTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk

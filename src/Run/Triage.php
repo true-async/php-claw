@@ -104,31 +104,39 @@ final readonly class Triage
         a shelf entry, not to the kind of work, and reading one into the type is how every small bug ends
         up paying for a workflow it did not need.
 
-        THEN the FIRST decision, and it is BINARY: does this ticket need a WORKFLOW at all?
+        THEN the PIVOTAL decision, and it is BINARY: can the AI solve this ticket ITSELF, or does it
+        need a WORKFLOW?
 
-        A workflow means several genuinely distinct stages of development, each a real unit of work.
-        MOST TICKETS DO NOT NEED ONE: one agent with the project's tools, in one sitting — a single
-        turn loop — just does the work. The test: CAN YOU NAME THE FILES IT TOUCHES, and say what
-        changes in one sentence? If you can, the verdict is `direct` and you STOP HERE. The ticket's
-        TYPE never overrides this — "it is a new feature" is a classification, not a reason for a
-        workflow; a one-function feature is `direct` exactly like a one-line bug. When something on
-        the shelf would also fit, `direct` still wins: a shelf entry spends a whole workflow to do
-        what one exchange would have done.
+        "Itself" does NOT mean one model reply. It means ONE agent, in ONE continuous context, looping
+        with the project's tools (read files, write files, run commands) as many rounds as the task
+        takes — read the code, make the change, run the tests, fix, until it is done. Most tickets are
+        exactly this: the verdict is `direct` and you STOP HERE. (Judging this may itself take you
+        several tool rounds — that is expected; look before you decide.)
 
-        ONLY when the answer is honestly no — you cannot name the files without going to find out,
-        or the work truly has several distinct stages — choose which multi-stage shape, listed
+        A WORKFLOW is the opposite, and heavier: a COMPLEX STEP-BY-STEP process whose steps each run in
+        a SEPARATE, FRESH context — a new sitting that does NOT carry the previous step's whole history,
+        so each stays lean and can be reviewed on its own. You need one ONLY when the work has genuinely
+        DISTINCT STAGES that each want their own context — e.g. decide the design, THEN implement it,
+        THEN prove it green — not when one continuous sitting, however many tool rounds, would simply do
+        the job. The ticket's TYPE never overrides this — "it is a new feature" is a classification, not
+        a reason for a workflow; a one-function feature is `direct` exactly like a one-line bug. When
+        something on the shelf would also fit, `direct` still wins: a shelf entry spends a whole workflow
+        to do what one continuous sitting would have done.
+
+        ONLY when the answer is honestly no — even after looking, you cannot bound the change to one
+        continuous sitting, or the work truly has several distinct stages — choose which multi-stage shape, listed
         CHEAPEST FIRST (that order is the tie-break: when two fit, take the earlier one):
 
         - `library`   — the work needs more than one sitting, AND one of the ready-made WORKFLOWS listed
                         in the ticket brief fits it as it stands. The cheapest of the shelf verdicts: it
                         is code a person wrote and tested, it runs as written, and nothing is generated.
-                        Name it when you record the verdict.
+                        Name it as the `workflow` argument when you record the verdict.
         - `approach`  — the work needs more than one sitting, and no ready-made workflow fits, but one of
                         the listed APPROACHES does. An
                         approach is a written strategy for work of this kind; a solver is generated for
                         THIS ticket that follows it. Costs a generation pass, and buys a solver shaped to
                         the ticket rather than to the average of every ticket like it. Name the approach
-                        when you record the verdict.
+                        as the `workflow` argument when you record the verdict.
         - `generate`  — nothing on the shelf fits at all, so a solver is written from nothing. The last
                         resort before a person: say in your reason why no approach fitted, because if
                         one nearly did, the answer is to say so rather than to improvise.
@@ -229,7 +237,7 @@ final readonly class Triage
             $this->agent,
             $env->executor(),
             $env->findAgentModel('project-manager'),
-            self::SYSTEM . $registry->briefing('The tools you have — these are your only way to act'),
+            self::SYSTEM,   // the tool briefing is the turn loop's now
             $registry,
             tracer: $tracer,
         );

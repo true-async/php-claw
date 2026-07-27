@@ -75,7 +75,8 @@ final readonly class ProjectManagerTool implements ToolInterface
         return 'Manage this project\'s tickets. '
             . "action='create_issue' (title, optional description, optional parent) opens an issue — pass "
             . 'parent to open it as a SUB-ISSUE of a task too big to solve in one run; '
-            . "action='set_strategy' (issue, type, strategy, reason, optional requires_approval) records WHAT KIND "
+            . "action='set_strategy' (issue, type, strategy, why_not_direct (required unless strategy is direct), "
+            . 'reason, optional requires_approval) records WHAT KIND '
             . 'of work an issue is and HOW it is to be solved — type is one of bug, feature, refactor, '
             . 'design, research, chore; strategy is one of direct (one agent, a localized change), library '
             . '(a ready-made workflow fits — then `workflow` must name it, exactly as `list_workflows` gave '
@@ -88,7 +89,8 @@ final readonly class ProjectManagerTool implements ToolInterface
             . "action='report_failure' (issue, reason) says the current strategy did not work, so the "
             . 'issue is triaged again and the next attempt must escalate; '
             . "action='close_issue' (issue, optional reason) and action='reopen_issue' (issue) settle a "
-            . 'ticket. Decomposition is capped in depth and breadth; a refusal means pick another strategy.';
+            . 'ticket. Decomposition is capped in depth and breadth; when set_strategy refuses decompose '
+            . 'because a cap is reached, pick another strategy.';
     }
 
     public function inputSchema(): array
@@ -118,7 +120,7 @@ final readonly class ProjectManagerTool implements ToolInterface
                 ],
                 'strategy' => [
                     'type' => 'string',
-                    'enum' => ['direct', 'library', 'generate', 'decompose'],
+                    'enum' => ['direct', 'library', 'approach', 'generate', 'decompose'],
                     'description' => 'how the issue is to be solved; required for set_strategy',
                 ],
                 'why_not_direct' => [
@@ -148,6 +150,12 @@ final readonly class ProjectManagerTool implements ToolInterface
             ],
             'required' => ['action'],
         ];
+    }
+
+    public function effects(): array
+    {
+        // Reads the ticket ledger and creates/updates tickets and strategy attempts.
+        return [Effect::Read, Effect::Write];
     }
 
     public function risk(): Risk

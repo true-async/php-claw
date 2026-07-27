@@ -20,6 +20,8 @@ use Claw\Agent\Usage;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Tool\Effect;
+use Claw\Tool\ReadOnlyVariantInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolCall;
@@ -805,17 +807,19 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function theCriticsPaletteReplacesComposedCommandsWithRecordedEvidence(): void
+    public function theCriticsPaletteDropsWritersButKeepsAReadOnlyShell(): void
     {
-        // The critic reads whatever it needs, but the compose-a-command channels are deliberately
-        // absent from its palette: it executes only through `rerun_evidence` (replaying commands the
-        // reviewed step recorded) and it answers through `verdict`. Bare bash burned real review
-        // rounds on invented invocations, and `artifact` would record onto the very step under
-        // review. The review-only tools, in turn, must not exist for the working step.
+        // The critic is READ-ONLY by CAPABILITY, not by a name list: every write-capable tool is
+        // dropped (so `edit` cannot reach the work it judges, and `artifact` cannot record onto the
+        // very step under review), EXCEPT that a tool offering a read-only variant (the shell) comes
+        // back in that form — the critic can RUN the tests it needs but not mutate. It answers through
+        // `verdict` and replays recorded runs through `rerun_evidence`; the review-only tools, in turn,
+        // must not exist for the working step.
         $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
         $registry = new Registry();
-        $registry->add($this->echoTool('read'));
-        $registry->add($this->echoTool('bash'));
+        $registry->add($this->readOnlyEchoTool('read'));   // read-only: survives untouched
+        $registry->add($this->echoTool('edit'));           // read+write, no variant: gone for the critic
+        $registry->add($this->readOnlyShellTool('bash'));  // read+write, offers a read-only variant
         $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
             public function name(): string
             {
@@ -836,15 +840,16 @@ final class WorkflowAbstractTest
 
         $wf->run();
 
-        // request 0 = the step: the run's tools plus `artifact`; the review-only tools do not exist here.
+        // request 0 = the step: the run's full tools plus `artifact`; review-only tools do not exist here.
         $step = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[0]->tools);
         sort($step);
-        Assert::same($step, ['artifact', 'bash', 'read']);
+        Assert::same($step, ['artifact', 'bash', 'edit', 'read']);
 
-        // request 1 = the critic: bash and artifact are gone; rerun_evidence and verdict arrived.
+        // request 1 = the critic: `edit` is gone (write, no read-only form); `bash` returns in its
+        // read-only variant; rerun_evidence and verdict arrived.
         $critic = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[1]->tools);
         sort($critic);
-        Assert::same($critic, ['read', 'rerun_evidence', 'verdict']);
+        Assert::same($critic, ['bash', 'read', 'rerun_evidence', 'verdict']);
     }
 
     #[Test]
@@ -870,6 +875,11 @@ final class WorkflowAbstractTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk
@@ -1269,6 +1279,118 @@ final class WorkflowAbstractTest
     }
 
     /**
+     * The other way to get evidence without typing it: run the thing in the ordinary course of the work,
+     * then freeze THAT run. Every tool run the model makes comes back tagged with a `[run#N]` handle, and
+     * `artifact(run: 'run#N')` records the run's verbatim output as evidence — from the runtime's own
+     * record, never re-typed, and without running the thing a second time. A bash run keeps its command as
+     * the replayable source, so the critic can still rerun_evidence it.
+     */
+    #[Test]
+    public function aRunTheModelAlreadyDidCanBeFrozenIntoEvidenceByItsHandle(): void
+    {
+        $suite = "PHPUnit 9.6.34\n\nOK (12 tests, 20 assertions)";
+        $bash = new ToolUseBlock('t1', 'bash', ['command' => 'vendor/bin/phpunit']);
+        $promote = new ToolUseBlock('t2', 'artifact', ['label' => 'tests', 'run' => 'run#1', 'note' => 'green']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$bash], [$bash], StopReason::ToolUse, new Usage()),
+            new AgentResponse([$promote], [$promote], StopReason::ToolUse, new Usage()),
+            $this->answer('done'),
+        );
+
+        $registry = new Registry();
+        $registry->add($this->cannedTool('bash', $suite));
+
+        $sink = new ArrayTraceSink();
+        $env = $this->config(worker: $worker, registry: $registry, tracer: new Tracer('r1', $sink));
+        $wf = new class ($env, 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            #[StepAI]
+            protected function make(): AiStep
+            {
+                return new AiStep('run the tests, then record that run');
+            }
+        };
+
+        $wf->run();
+
+        // The model saw a handle appended to the run it made — that is how it knew to write run#1.
+        $sawHandle = false;
+
+        foreach ($worker->requests as $request) {
+            foreach ($request->messages as $message) {
+                foreach ($message->content as $block) {
+                    if ($block instanceof ToolResultBlock && str_contains($block->content, '[run#1]')) {
+                        $sawHandle = true;
+                    }
+                }
+            }
+        }
+
+        Assert::true($sawHandle);
+
+        // The frozen run became evidence: verbatim output, the command kept as its replayable source.
+        $recorded = [];
+
+        foreach ($sink->records as $record) {
+            if ($record->event()->type === 'artifact') {
+                $recorded = $record->event()->data;
+            }
+        }
+
+        Assert::same($recorded['kind'] ?? null, 'evidence');
+        Assert::same($recorded['value'] ?? null, $suite);                  // frozen from the ledger, not re-run
+        Assert::same($recorded['source'] ?? null, 'vendor/bin/phpunit');   // a bash run stays replayable
+        Assert::same($recorded['note'] ?? null, 'green');                  // the model's claim, kept apart
+    }
+
+    /**
+     * Freezing a run that was never made comes back as a TOOL ERROR the model can read and correct, not a
+     * crash — same contract as every other bad artifact call. The refusal names what went wrong so the
+     * model can run the thing first, then record its handle.
+     */
+    #[Test]
+    public function freezingARunThatDoesNotExistIsRefusedNotFatal(): void
+    {
+        $call = new ToolUseBlock('t1', 'artifact', ['label' => 'x', 'run' => 'run#7']);
+        $worker = new ScriptedAgent(
+            new AgentResponse([$call], [$call], StopReason::ToolUse, new Usage()),
+            $this->answer('understood'),
+        );
+        $wf = new class ($this->config(worker: $worker), 'r1') extends WorkflowAbstract {
+            public function name(): string
+            {
+                return 'ev';
+            }
+
+            #[StepAI]
+            protected function make(): AiStep
+            {
+                return new AiStep('record something');
+            }
+        };
+
+        $wf->run();
+
+        $refusal = '';
+        $key = array_key_last($worker->requests) ?? throw new \RuntimeException('no request was made');
+
+        foreach ($worker->requests[$key]->messages as $message) {
+            foreach ($message->content as $block) {
+                if ($block instanceof ToolResultBlock) {
+                    $refusal = $block->content;
+                }
+            }
+        }
+
+        Assert::true(str_contains($refusal, "no run 'run#7'"));
+        Assert::true(str_contains($refusal, 'have not run a tool'));
+    }
+
+    /**
      * A bad channel combination comes back as a TOOL ERROR the model can read and correct. It must not
      * be the LogicException the PHP-side artifact() throws: the executor turns only ToolException into a
      * tool result, so anything else takes the whole run down — and on a generated solver that crash then
@@ -1419,6 +1541,11 @@ final class WorkflowAbstractTest
                 return ['type' => 'object', 'properties' => ['command' => ['type' => 'string']]];
             }
 
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
+            }
+
             public function risk(): Risk
             {
                 return Risk::Safe;
@@ -1487,8 +1614,12 @@ final class WorkflowAbstractTest
         $wf->run();
 
         $prompt = $this->lastUserText($worker);
-        Assert::true(str_contains($prompt, 'claim, not evidence'));
-        Assert::true(str_contains($prompt, 'MUST establish it yourself with a tool'));
+        Assert::true(str_contains($prompt, 'Trust what you SEE, not a retelling'));
+        Assert::true(str_contains($prompt, 'Replay the evidence that settles it'));
+        // Evidence stops a fabricated OUTPUT, not a gamed ORACLE: an agent can pass a test it weakened and
+        // freeze the green as evidence (ImpossibleBench). The critic is told to judge the command, not only
+        // its output — part of the contract, asserted here.
+        Assert::true(str_contains($prompt, 'evidence proves only as much as the command behind it'));
         // and the old instruction that caused the rubber-stamping must not come back
         Assert::false(str_contains($prompt, 'usually enough'));
 
@@ -1496,7 +1627,7 @@ final class WorkflowAbstractTest
         // reviewing a generated solver ran the project's tests, found them red — which they are, the
         // solver has not run yet — and rejected the source over it. A false pass became a false
         // failure, so the carve-out for not-yet-run artifacts is part of the contract too.
-        Assert::true(str_contains($prompt, 'OUTRANKS this instruction'));
+        Assert::true(str_contains($prompt, 'OUTRANKS all of this'));
         Assert::true(str_contains($prompt, 'has NOT run yet'));
     }
 
@@ -2044,7 +2175,7 @@ final class WorkflowAbstractTest
             }
         }
 
-        Assert::false(str_contains($text, 'REVIEWER'));
+        Assert::false(str_contains($text, 'critic of a workflow step'));
     }
 
     #[Test]
@@ -2109,6 +2240,11 @@ final class WorkflowAbstractTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk
@@ -2384,6 +2520,11 @@ final class WorkflowAbstractTest
                 return ['type' => 'object'];
             }
 
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
+            }
+
             public function risk(): Risk
             {
                 return Risk::Safe;
@@ -2392,6 +2533,91 @@ final class WorkflowAbstractTest
             public function handle(array $input): string
             {
                 return 'ran:' . (\is_string($input['x'] ?? null) ? $input['x'] : '');
+            }
+        };
+    }
+
+    /** A purely read-only tool — it survives a reviewer's capability filter untouched. */
+    private function readOnlyEchoTool(string $name): ToolInterface
+    {
+        return new class ($name) implements ToolInterface {
+            public function __construct(private readonly string $toolName)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->toolName;
+            }
+
+            public function description(): string
+            {
+                return 'a read-only tool';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ran';
+            }
+        };
+    }
+
+    /** A write-capable shell that can hand back a read-only variant of itself — the reviewer keeps that form. */
+    private function readOnlyShellTool(string $name): ToolInterface
+    {
+        return new class ($name) implements ToolInterface, ReadOnlyVariantInterface {
+            public function __construct(private readonly string $toolName, private readonly bool $ro = false)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->toolName;
+            }
+
+            public function description(): string
+            {
+                return 'a shell';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return $this->ro ? [Effect::Read] : [Effect::Read, Effect::Write];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function readOnly(): ToolInterface
+            {
+                return new self($this->toolName, true);
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ran';
             }
         };
     }

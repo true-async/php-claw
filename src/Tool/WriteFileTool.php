@@ -22,7 +22,9 @@ final readonly class WriteFileTool implements ToolInterface
 
     public function description(): string
     {
-        return 'Write a UTF-8 text file in the workspace (creates or overwrites it).';
+        return 'Write a UTF-8 text file in the workspace. Creates the file, or OVERWRITES it WHOLE if it '
+            . 'already exists — the previous contents are lost. To change PART of an existing file use edit '
+            . 'instead; only write_file a file you are creating or have just read in full.';
     }
 
     public function inputSchema(): array
@@ -35,6 +37,11 @@ final readonly class WriteFileTool implements ToolInterface
             ],
             'required' => ['path', 'content'],
         ];
+    }
+
+    public function effects(): array
+    {
+        return [Effect::Write];
     }
 
     public function risk(): Risk

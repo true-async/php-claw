@@ -14,8 +14,14 @@ use Claw\Workflow\WorkflowValidator;
  * and saved. Dangerous by definition (it writes code that will later execute), so
  * the permission layer gates it.
  */
-final readonly class DefineWorkflowTool implements ToolInterface
+final readonly class DefineWorkflowTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['workflow', 'save', 'generate', 'define', 'procedure', 'author', 'create'];
+    }
+
     public function __construct(
         private WorkflowStore $store,
         private WorkflowValidator $validator,
@@ -49,6 +55,11 @@ final readonly class DefineWorkflowTool implements ToolInterface
             ],
             'required' => ['name', 'code'],
         ];
+    }
+
+    public function effects(): array
+    {
+        return [Effect::Write];
     }
 
     public function risk(): Risk

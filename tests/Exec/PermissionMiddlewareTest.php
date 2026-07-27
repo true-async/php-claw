@@ -8,6 +8,7 @@ use Claw\Agent\ToolResultBlock;
 use Claw\Chat\Approval;
 use Claw\Exec\PermissionMiddleware;
 use Claw\Permission\Policy;
+use Claw\Tool\Effect;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolCall;
@@ -93,6 +94,11 @@ final class PermissionMiddlewareTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk

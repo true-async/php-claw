@@ -41,7 +41,7 @@ final class FileToolsTest
         $out = $read->handle(['path' => 'big.txt']);
 
         Assert::same(substr($out, 0, 10), str_repeat('a', 10));
-        Assert::true(str_ends_with($out, '[truncated]'));
+        Assert::true(str_contains($out, '[truncated'));   // truncation is signalled (now with a windowing hint)
 
         $this->cleanup($workspace->root());
     }

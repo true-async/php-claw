@@ -13,7 +13,7 @@ use Claw\Exceptions\ToolException;
  * proc_open's pipes are driven by libuv, so the read is non-blocking; whether a
  * given command is allowed is the permission layer's job, not this tool's.
  */
-final class BashTool implements ToolInterface, ReportsResultMetaInterface
+final class BashTool implements ToolInterface, ReportsResultMetaInterface, ReadOnlyVariantInterface
 {
     /**
      * Signal numbers rather than `SIGTERM`/`SIGKILL`, because those constants come from `pcntl` and this
@@ -24,6 +24,24 @@ final class BashTool implements ToolInterface, ReportsResultMetaInterface
 
     private const int SIG_KILL = 9;
 
+    /**
+     * NAIVE write detectors for read-only mode — pattern => the thing it catches, named for the refusal.
+     * Deliberately naive (a shell can hide a write a hundred ways: `php -r 'file_put_contents(...)'`,
+     * a script it runs); this is a guard against the OBVIOUS edit, not a sandbox. It exists so a REVIEWER
+     * given a shell to RUN checks cannot casually reach for `sed -i` on the file it is judging — the exact
+     * move a live supervisor made. The real isolation, if it is ever wanted, is a throwaway copy.
+     */
+    private const array WRITE_PATTERNS = [
+        '~(^|[^0-9&])>>?\s*(?!/dev/null|&)~' => 'redirect output into a file',
+        '~\btee\b~' => 'tee (writes files)',
+        '~\b(rm|rmdir|mv|cp|mkdir|rmdir|touch|ln|dd|truncate|chmod|chown|chgrp|shred|install|mktemp)\b~' => 'a file-mutating command',
+        '~\bsed\b[^|;&]*-i~' => 'sed -i (edit in place)',
+        '~\bperl\b[^|;&]*-i~' => 'perl -i (edit in place)',
+        '~\bpatch\b~' => 'patch',
+        '~\bgit\s+(add|commit|checkout|reset|rm|mv|apply|push|clean|stash|restore|switch|merge|rebase|tag|init|config|pull|fetch)\b~' => 'a git command that writes',
+        '~\b(composer|npm|yarn|pnpm|pip|pip3|apt|apt-get|brew|gem|cargo|go)\s+(install|require|update|add|remove|uninstall|ci|get|mod)\b~' => 'a package-install command',
+    ];
+
     /** The report of the most recent handle() — read back through {@see resultMeta()}. */
     private ?ToolResultMeta $last = null;
 
@@ -31,7 +49,14 @@ final class BashTool implements ToolInterface, ReportsResultMetaInterface
         private readonly string $cwd,
         private readonly ?Secrets $secrets = null,
         private readonly int $timeoutMs = 0,
+        private readonly bool $readOnly = false,
     ) {
+    }
+
+    /** The same shell, restricted to READS — a reviewer can run checks with it but not modify the project. */
+    public function readOnly(): self
+    {
+        return new self($this->cwd, $this->secrets, $this->timeoutMs, readOnly: true);
     }
 
     public function resultMeta(): ?ToolResultMeta
@@ -44,17 +69,28 @@ final class BashTool implements ToolInterface, ReportsResultMetaInterface
         return 'bash';
     }
 
+    /** A read-only shell only reads; a normal one can `rm`, redirect, install — it writes as well. */
+    public function effects(): array
+    {
+        return $this->readOnly ? [Effect::Read] : [Effect::Read, Effect::Write];
+    }
+
     public function description(): string
     {
         $names = ($this->secrets ?? Secrets::none())->names();
 
         if ($names === []) {
-            return 'Run a shell command in the workspace and return its combined output and exit code.';
+            return 'Run a shell command in the workspace and return its combined output and exit code. For '
+                . 'editing files, reading them, running tests, linting, or evaluating PHP, prefer the '
+                . 'dedicated tools (edit, read_file, run_tests, lint, php_eval); use bash for what they do '
+                . 'not cover.';
         }
 
         // Named, never valued. The model has to know a credential is reachable or it cannot use one; it
         // must not know what the credential IS, or it could put it somewhere that gets written down.
-        return 'Run a shell command in the workspace and return its combined output and exit code. '
+        return 'Run a shell command in the workspace and return its combined output and exit code. For '
+            . 'editing files, reading them, running tests, linting, or evaluating PHP, prefer the dedicated '
+            . 'tools (edit, read_file, run_tests, lint, php_eval); use bash for what they do not cover. '
             . 'This project has credentials available to the shell as environment variables: $'
             . implode(', $', $names) . '. Use them by name — `curl -H "Authorization: Bearer $'
             . $names[0] . '" …` — and do not try to read or copy the values. A value printed verbatim is '
@@ -86,6 +122,18 @@ final class BashTool implements ToolInterface, ReportsResultMetaInterface
 
         if (trim($command) === '') {
             throw new ToolException('bash: "command" is required');
+        }
+
+        if ($this->readOnly) {
+            foreach (self::WRITE_PATTERNS as $pattern => $what) {
+                if (preg_match($pattern, $command) === 1) {
+                    throw new ToolException(
+                        "bash (read-only): refusing `{$command}` — it would {$what}. This shell may only RUN "
+                        . 'checks (tests, linters, reads); it must not modify the project. Changing the code is '
+                        . 'the step\'s job, not yours — judge what is there.',
+                    );
+                }
+            }
         }
 
         $descriptors = [

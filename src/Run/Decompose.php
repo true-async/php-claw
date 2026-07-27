@@ -49,13 +49,16 @@ final readonly class Decompose
         it — you are deciding what the separate pieces of work are.
 
         What makes a good piece:
-        - It can be finished ON ITS OWN, without waiting for a sibling. If piece B cannot start until
-          piece A lands, they are one piece, not two.
+        - It can be finished ON ITS OWN, without waiting for a sibling. If piece B cannot even be
+          STARTED — its description cannot be written concretely — until piece A lands, they are one
+          piece, not two. (Sharing some code with a sibling is normal and does NOT make them one piece.)
         - It is worth a ticket: real work someone could pick up and verify. If it is a five-minute
           change, fold it into a neighbouring piece.
         - It is SMALL ENOUGH TO BE SOLVED IN ONE RUN. This is the bound people forget, and it is the
           reason you are here: the parent was too big for one run, so a split into two enormous halves
-          has bought nothing — each half is judged too big in its turn and the whole thing stalls.
+          has bought nothing — each half is judged too big in its turn and the whole thing stalls. As a
+          rule of thumb, a piece is right-sized when one agent could finish it in a single sitting,
+          touching a handful of files — not a whole subsystem.
         - Its title says what to do, and its description carries enough context to be worked on by
           someone who has not read the parent — the sub-issue is triaged and solved on its own.
 
@@ -75,10 +78,11 @@ final readonly class Decompose
         call you make covers the last of the work — you cannot go back and widen a piece afterwards,
         because nothing edits a sub-issue once it exists.
 
-        If a call is refused because a cap was reached, stop — do not restate it or try again with
-        different wording. But understand what that means: some of the parent's work is now covered by
-        nothing, because the split you chose did not fit. That is the mistake to avoid by counting
-        first, and it is worth saying so in the last piece's description rather than leaving it silent.
+        COUNT YOUR PIECES BEFORE THE FIRST CALL. If the work needs more pieces than the cap allows, make
+        the LAST piece a wider remainder that carries what is left over — decide that up front, because
+        you cannot widen a piece once it exists. If a call is nonetheless refused because a cap was
+        reached, stop — do not restate it or try again with different wording: some of the parent's work
+        is now covered by nothing, and the only fix is the remainder you should have planned.
 
         Act only through the tools; describing a call, or printing it as JSON or code, creates
         nothing. Reply with nothing else.

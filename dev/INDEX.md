@@ -38,6 +38,8 @@ file rather than overwriting the first, so the reasoning behind what was built s
 | The knowledge base, as built | [`design/knowledge-base.md`](design/knowledge-base.md) |
 | The knowledge base, second pass | [`design/knowledge-base-next.md`](design/knowledge-base-next.md) |
 | A run's request to a person | [`design/human-requests.md`](design/human-requests.md) |
+| Resumable workflow steps | [`design/workflow-resume.md`](design/workflow-resume.md) |
+| Prior art (7 problems, borrows) | [`design/prior-art.md`](design/prior-art.md) |
 
 ## Hot paths
 

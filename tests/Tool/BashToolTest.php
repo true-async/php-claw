@@ -6,6 +6,7 @@ namespace Tests\Tool;
 
 use Claw\Exceptions\ToolException;
 use Claw\Tool\BashTool;
+use Claw\Tool\Effect;
 use Claw\Tool\Risk;
 use Testo\Assert;
 use Testo\Test;
@@ -49,6 +50,54 @@ final class BashToolTest
         Assert::same($bash->handle(['command' => 'echo fine']), 'fine');
         Assert::true(str_contains($bash->handle(['command' => 'echo oops >&2; exit 3']), '[exit 3]'));
         Assert::true(str_contains($bash->handle(['command' => 'echo oops >&2; exit 3']), 'oops'));
+    }
+
+    /**
+     * A read-only shell runs reads but refuses the obvious writes — the guard a REVIEWER needs so a shell
+     * handed to it for running checks cannot edit the very file it is judging (a live supervisor reached
+     * for `sed -i` on that file). Naive by design: it catches the direct write, not a write hidden inside
+     * an interpreter.
+     */
+    #[Test]
+    public function aReadOnlyShellRefusesTheObviousWrites(): void
+    {
+        $bash = new BashTool(sys_get_temp_dir(), null, 5000, readOnly: true);
+
+        $writes = ["sed -i 's/a/b/' x.php", 'echo hi > out.txt', 'echo x >> log', 'rm x.php', 'git commit -am wip'];
+
+        foreach ($writes as $write) {
+            $threw = false;
+
+            try {
+                $bash->handle(['command' => $write]);
+            } catch (ToolException $e) {
+                $threw = str_contains($e->getMessage(), 'read-only');
+            }
+
+            Assert::true($threw);   // each write is refused before it runs
+        }
+    }
+
+    /** ...and it STILL runs a read — that is the whole point: a reviewer must be able to run its checks. */
+    #[Test]
+    public function aReadOnlyShellStillRunsReads(): void
+    {
+        $bash = new BashTool(sys_get_temp_dir(), null, 5000, readOnly: true);
+
+        Assert::same($bash->handle(['command' => 'echo checking']), 'checking');
+        Assert::same($bash->handle(['command' => 'true 2>/dev/null']), '(no output)');   // stderr redirect is fine
+    }
+
+    /** The effect a palette filters on: a normal shell writes, its read-only clone does not. */
+    #[Test]
+    public function readOnlyModeIsReflectedInTheToolsEffects(): void
+    {
+        $normal = new BashTool(sys_get_temp_dir());
+        $readOnly = $normal->readOnly();
+
+        Assert::true(\in_array(Effect::Write, $normal->effects(), true));
+        Assert::false(\in_array(Effect::Write, $readOnly->effects(), true));
+        Assert::true(\in_array(Effect::Read, $readOnly->effects(), true));
     }
 
     /** How many processes carry $marker — read from /proc, because a `pgrep` would match its own shell. */

@@ -30,8 +30,14 @@ use Claw\Knowledge\KnowledgeWriterInterface;
  *    notes make to the code. Use it whenever you have a path, because a fuzzy search would be slower
  *    and only roughly right.
  */
-final readonly class KnowledgeTool implements ToolInterface
+final readonly class KnowledgeTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['knowledge', 'notes', 'memory', 'recall', 'remember', 'docs', 'wiki', 'search', 'lookup'];
+    }
+
     /**
      * $writer is the WRITE half, obtained separately by design (see {@see KnowledgeWriterInterface}):
      * without one, `record` is absent from the schema and the description — a palette that must not
@@ -107,6 +113,12 @@ final readonly class KnowledgeTool implements ToolInterface
         }
 
         return ['type' => 'object', 'properties' => $properties, 'required' => ['action']];
+    }
+
+    public function effects(): array
+    {
+        // Always queries (read); records notes (write) when a writer is wired in.
+        return $this->writer === null ? [Effect::Read] : [Effect::Read, Effect::Write];
     }
 
     public function risk(): Risk

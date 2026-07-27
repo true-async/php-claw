@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Claw\Tool;
 
+use Claw\Http\CurlHttpClient;
 use Claw\Knowledge\KnowledgeBaseInterface;
 use Claw\Knowledge\KnowledgeWriterInterface;
 use Claw\Project\Project;
@@ -38,7 +39,28 @@ final class ToolFactory
         // output. See ReadFileTool::handle().
         $registry->add(new ReadFileTool($workspace, secrets: $secrets));
         $registry->add(new WriteFileTool($workspace));
+        // The default WRITE: a targeted old->new replace (one call can carry many edits, across files,
+        // all-or-nothing). write_file stays for creating a file or a full rewrite.
+        $registry->add(new EditTool($workspace, $secrets, $timeoutMs));
         $registry->add(new ListFilesTool($workspace));
+        // Locate-before-read, as their own READ-only tools rather than grep/find shelled through bash:
+        // bounded output, they skip vendor/.git, and a reviewer can hold them without a shell.
+        $registry->add(new GrepTool($workspace));
+        $registry->add(new GlobTool($workspace));
+        // The cheap symbol tier: "where is this class/function/method DEFINED", definition-aware so it
+        // beats grep for jump-to-definition. Type-resolved references stay a separate (LSP) track.
+        $registry->add(new FindDefinitionTool($workspace));
+        // Curated commands as first-class READ tools: what changed (diff), the tests, a lint/analysis.
+        // A step records their output as evidence; a reviewer runs them to judge — no raw shell needed.
+        $registry->add(new DiffTool($workspace, $secrets, $timeoutMs));
+        $registry->add(new RunTestsTool($workspace, $secrets, $timeoutMs));
+        $registry->add(new LintTool($workspace, $secrets, $timeoutMs));
+        // The network, as a first-class capability rather than a curl shelled out through bash: a step
+        // that needs external data carries `http_request` in its palette, and one that must not touch the
+        // network simply does not. Bounded by the run's tool timeout so a hung request cannot hold it open.
+        $registry->add(new HttpTool(new CurlHttpClient($timeoutMs > 0 ? $timeoutMs : 30_000)));
+        // Search when the URL is not known yet — the other half of the search/fetch pair.
+        $registry->add(new WebSearchTool(new CurlHttpClient($timeoutMs > 0 ? $timeoutMs : 30_000)));
 
         // The knowledge base, when the project has a usable one. Offered rather than required: a base
         // that cannot answer would be a tool a model spends turns interrogating before believing it.

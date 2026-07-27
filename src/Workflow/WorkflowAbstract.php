@@ -13,12 +13,17 @@ use Claw\Agent\ToolUseBlock;
 use Claw\Agent\TurnLoopInterface;
 use Claw\Exceptions\ToolException;
 use Claw\Exceptions\WorkflowException;
+use Claw\Exec\ExecutorInterface;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Tool\DeferredToolInterface;
+use Claw\Tool\Effect;
+use Claw\Tool\ReadOnlyVariantInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
 use Claw\Tool\ToolResultMeta;
+use Claw\Tool\ToolSearchTool;
 use Claw\Trace\Level;
 use Claw\Trace\Tracer;
 
@@ -75,6 +80,19 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     /** The step currently running, so {@see artifact()} attaches its outputs to the right step; transient. */
     private string $currentStep = '';
+
+    /**
+     * Every tool run of the CURRENT step's work exchange, keyed by step then by the `run#N` handle the
+     * model sees appended to that run's output. It is how {@see recordArtifact()}'s `run` channel freezes
+     * a run the model ALREADY did into evidence — the output comes from here, the runtime's own record of
+     * the execution, never re-typed by the model, so it is proof the same way {@see recordArtifact()}'s
+     * `command` channel is, without running the thing a second time. Written by {@see recordRun()} through
+     * the recording executor; read by the `run` channel. Per-step so a later step cannot cite an earlier
+     * step's run.
+     *
+     * @var array<string, array<string, array{call: ToolCall, result: ToolResultBlock}>>
+     */
+    private array $runLedger = [];
 
     /**
      * True while a CRITIC's exchange is running — which happens inside the step it is reviewing, so
@@ -560,11 +578,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
             foreach ($step->params as $request) {
                 $value = trim($this->runTurns(
                     "Before this step ends, answer EXACTLY this and nothing else: {$request->instruction}\n\n"
-                    . 'Reply with only the value — no prose, no explanation, no quotes.',
+                    . 'Reply with only the value — no prose, no explanation, no quotes. If the conversation '
+                    . 'did NOT produce this value, reply exactly `UNAVAILABLE` and it will be left unset.',
                     [],
                     'extract',
                     $workHistory,
                 ));
+
+                // Do not pin a fabrication: UNAVAILABLE (the step never produced the value) leaves the
+                // param unset, so the reading step gets null — far better than an invented value pinned
+                // as fact for a later step to read as real.
+                if (strtoupper(trim($value, " \t`*_.")) === 'UNAVAILABLE') {
+                    continue;
+                }
+
                 $this->setParam($request->forStep, $request->name, $value);
             }
         } finally {
@@ -742,31 +769,37 @@ abstract class WorkflowAbstract implements WorkflowInterface
      *                       turned into a tool result, so it would take the whole run down, and on a
      *                       generated solver it would then trigger a repair pass for code that is fine
      */
-    #[Tool(name: 'artifact', description: 'Record a named output of this step: what you produced, kept in '
+    #[Tool(name: 'artifact', effects: [Effect::Write], description: 'Record a named output of this step: what you produced, kept in '
         . 'the run journal and shown to the reviewer who judges this step. Pass EXACTLY ONE of: '
         . '`text` (your own words — a decision, a summary, generated source: useful, but it is a claim); '
-        . '`file` (the path of a file you wrote — the reviewer opens it itself); or '
-        . '`command` (a shell command to RUN NOW, whose verbatim output is recorded as evidence — use '
-        . 'this whenever the thing being judged is a fact a command settles, such as tests passing or a '
-        . 'clean lint; do not paste output you already have, name the command and it will be re-run). '
-        . '`note` is optional and only meaningful with `command`: your own reading of the output, kept '
-        . 'separate from it and shown as your claim about it, never merged into the evidence.')]
+        . '`file` (the path of a file you wrote — the reviewer opens it itself); '
+        . '`run` (the handle of a tool run you ALREADY did this step — shown as `[run#N]` after that '
+        . "tool's output — to freeze THAT run's real output as evidence: prefer this over `command` when "
+        . 'you have already run the thing, e.g. you ran the tests and they passed — no need to run them '
+        . 'again); or `command` (a shell command to RUN NOW, whose verbatim output is recorded as '
+        . 'evidence — use when you have NOT run it yet; do not paste output you already have, name the '
+        . 'command and it will be run). `note` is optional and meaningful with `command` or `run`: your '
+        . 'own reading of the output, kept separate from it and shown as your claim about it.')]
     protected function recordArtifact(
         string $label,
         string $text = '',
         string $file = '',
         string $command = '',
+        string $run = '',
         string $note = '',
     ): string {
         if (trim($label) === '') {
             throw new ToolException("artifact: 'label' is required — it is how the reviewer refers to this output");
         }
 
-        $given = array_keys(array_filter(['text' => $text, 'file' => $file, 'command' => $command], static fn (string $v): bool => trim($v) !== ''));
+        $given = array_keys(array_filter(
+            ['text' => $text, 'file' => $file, 'command' => $command, 'run' => $run],
+            static fn (string $v): bool => trim($v) !== '',
+        ));
 
         if (\count($given) !== 1) {
             throw new ToolException(
-                'artifact: pass exactly one of `text`, `file` or `command`'
+                'artifact: pass exactly one of `text`, `file`, `command` or `run`'
                 . ($given === [] ? ' — none was given' : ' — got ' . implode(' and ', $given)),
             );
         }
@@ -780,6 +813,31 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 . 'that produced it (`command: "…"`); it will be re-run here and recorded verbatim as '
                 . 'evidence, with its real exit status.',
             );
+        }
+
+        if ($run !== '') {
+            $record = $this->runLedger[$this->currentStep][$run] ?? null;
+
+            if ($record === null) {
+                $handles = array_keys($this->runLedger[$this->currentStep] ?? []);
+
+                throw new ToolException($handles === []
+                    ? "artifact: no run '{$run}' — you have not run a tool this step whose output can be frozen. "
+                        . 'Run the command first, then record its `[run#N]`; or use `command` to run and record in one go.'
+                    : "artifact: no run '{$run}'. Runs you can freeze this step: '" . implode("', '", $handles) . "'.");
+            }
+
+            // The output comes from the ledger — the runtime's verbatim record of a real execution, not text
+            // the model typed — so this is evidence exactly as the `command` channel is, without a second run.
+            // `from` carries the shell command for a bash run so the reviewer can replay it (rerun_evidence);
+            // for any other tool there is nothing bash can replay, so it stays captured-but-not-replayable.
+            $call = $record['call'];
+            $out = self::clip($record['result']->content);
+            $source = $call->name === 'bash' ? (string) ($call->input['command'] ?? '') : '';
+            $this->artifact($label, text: $note !== '' ? $note : null, evidence: $out, from: $source, meta: $record['result']->meta);
+
+            return "recorded '{$label}' as evidence — the frozen output of {$run}"
+                . ($source !== '' ? " (`{$source}`)." : " ({$call->name}).");
         }
 
         if ($command !== '') {
@@ -822,7 +880,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * `bash` — see {@see judge()}): the model chose only WHICH record to replay; the command text
      * comes from the artifact, so this is not the shell-by-indirection hole the palette closes.
      */
-    #[Tool(name: 'rerun_evidence', reviewOnly: true, description: 'Re-run a command the reviewed step '
+    #[Tool(name: 'rerun_evidence', reviewOnly: true, effects: [Effect::Read], description: 'Re-run a command the reviewed step '
         . 'recorded as evidence, EXACTLY as recorded, and see its fresh output. Pass `label` — the '
         . 'label of the evidence artifact. This is your only way to execute anything: verification '
         . 'here means replaying recorded evidence, never composing commands of your own.')]
@@ -879,7 +937,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * a reject without the rubric item and the observed fact is refused at the call, not discovered
      * in a rework round.
      */
-    #[Tool(name: 'verdict', reviewOnly: true, description: 'Record your verdict on the reviewed step — '
+    #[Tool(name: 'verdict', reviewOnly: true, effects: [Effect::Write], description: 'Record your verdict on the reviewed step — '
         . 'call this exactly once, as your final act of the review. `decision` is one of: accept (the '
         . 'rubric is satisfied), reject (it is not — cite `rubric_item`, the rubric requirement '
         . 'violated, and `fact`, the concrete thing YOU observed that shows it), or cannot_verify (a '
@@ -958,7 +1016,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
         // The handoff from the previous step is fed in automatically — the selective context carry-over —
         // plus the available tools named up front so the model reliably reaches for the right one
         // (recall, done, ...) instead of only sometimes noticing them.
-        $system = $scope->findSystemPrompt() . $this->handoffContext() . $palette->briefing('Tools available to you this step — call them by name when useful');
+        $system = $scope->findSystemPrompt() . $this->handoffContext();   // the tool briefing is the turn loop's now
 
         // The ask channel (if any) makes the turn loop interactive: the model can pause to ask a
         // person/agent mid-call via the [question] marker, not only through an explicit $this->ask().
@@ -1065,6 +1123,13 @@ abstract class WorkflowAbstract implements WorkflowInterface
     {
         $registry = $this->withLocalTools($this->env->findRegistry());
         $palette = $tools === null ? $registry : $registry->only($tools);
+
+        // When the palette holds occasional (deferred) tools, add search_tools so their schemas can be
+        // withheld from the context until the model asks — it carries the palette to answer that ask.
+        if ($this->hasDeferred($palette)) {
+            $palette = $palette->with(new ToolSearchTool($palette));
+        }
+
         $scope = $this->env->child()->set(EnvKey::Registry, $palette);
 
         $model = $agent !== null ? $this->agentModel($agent) : null;
@@ -1076,6 +1141,18 @@ abstract class WorkflowAbstract implements WorkflowInterface
         return $scope;
     }
 
+    /** Whether a palette holds any occasional (deferred) tool — the trigger for adding search_tools. */
+    private function hasDeferred(Registry $palette): bool
+    {
+        foreach ($palette->all() as $tool) {
+            if ($tool instanceof DeferredToolInterface) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Build the turn loop for one exchange from the call's scope. Kept a method (not a newed-up local)
      * so the wiring lives in one place and the loop is an overridable {@see TurnLoopInterface} seam —
@@ -1083,9 +1160,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     private function makeTurnLoop(Environment $scope, string $system, ?SpeakerInterface $ask): TurnLoopInterface
     {
+        // The work exchange's runs are ledgered so the model can later freeze one into an artifact by its
+        // handle (see {@see $runLedger}). A critic's or an extraction's exchange is not the step's work —
+        // it never records artifacts — so it runs on the raw executor, unledgered.
+        $executor = ($this->reviewing || $this->extracting)
+            ? $scope->executor()
+            : $this->recordingExecutor($scope->executor());
+
         return new DefaultTurnLoop(
             $scope->findWorker(),
-            $scope->executor(),
+            $executor,
             $scope->findModelId(),
             $system,
             $scope->findRegistry(),
@@ -1106,6 +1190,49 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 $this->env->findStore()->saveExchange($this->runId, $this->currentStep, $history);
             },
         );
+    }
+
+    /**
+     * Wrap the exchange's executor so every tool run the model makes is ledgered and comes back tagged
+     * with a `run#N` handle the model can later hand to `artifact(run:)`. The wrapping is one anonymous
+     * {@see ExecutorInterface} — a thin passthrough that reports each result to {@see recordRun()} — so
+     * the tool-running middleware chain underneath is untouched.
+     */
+    private function recordingExecutor(ExecutorInterface $inner): ExecutorInterface
+    {
+        return new class ($inner, $this->recordRun(...)) implements ExecutorInterface {
+            /** @param \Closure(ToolCall, ToolResultBlock): ToolResultBlock $onResult */
+            public function __construct(
+                private readonly ExecutorInterface $inner,
+                private readonly \Closure $onResult,
+            ) {
+            }
+
+            public function call(ToolCall $call): ToolResultBlock
+            {
+                return ($this->onResult)($call, $this->inner->call($call));
+            }
+        };
+    }
+
+    /**
+     * Ledger one run of the current step's work exchange and hand the model its handle. A handle is the
+     * ONLY way to later freeze this run into evidence, so it is appended to the output the model reads —
+     * `[run#3]` — and the run (its call and verbatim result) is kept for {@see recordArtifact()}'s `run`
+     * channel. Two kinds of run get NO handle, because promoting them is meaningless: a run that ERRORED
+     * (there is no real output to freeze), and the meta-tools whose output is not the step's work —
+     * `artifact` itself (freezing a recording of a recording) and `search_tools` (a palette lookup).
+     */
+    private function recordRun(ToolCall $call, ToolResultBlock $result): ToolResultBlock
+    {
+        if ($result->isError || \in_array($call->name, ['artifact', 'search_tools'], true)) {
+            return $result;
+        }
+
+        $handle = 'run#' . (\count($this->runLedger[$this->currentStep] ?? []) + 1);
+        $this->runLedger[$this->currentStep][$handle] = ['call' => $call, 'result' => $result];
+
+        return new ToolResultBlock($result->toolUseId, $result->content . "\n[{$handle}]", $result->isError, $result->meta);
     }
 
     /**
@@ -1132,10 +1259,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->pendingHandoff = null;   // clear FIRST: the formation below drives the turn loop again
 
         $this->incomingHandoff = $pending['history'] === [] ? '' : trim($this->runTurns(
-            'Now, before this step ends, CONSCIOUSLY write the HANDOFF to the NEXT step: in a few '
-            . 'sentences, state what you accomplished here and the findings the next step must pay '
-            . 'attention to — decisions made, files/paths touched, what remains, gotchas. Pass on only '
-            . 'what matters, not everything. Reply with that handoff only.',
+            'Now, before this step ends, write the HANDOFF to the NEXT step. The next step starts FRESH: '
+            . 'it sees ONLY this text, none of this conversation — so name every file, path, symbol and '
+            . 'value explicitly; "the file I created above" or "as we discussed" will mean nothing to it. '
+            . 'In a few sentences, state what you accomplished here and the findings the next step must '
+            . 'pay attention to — decisions made, files/paths touched, what remains, gotchas. Pass on '
+            . 'only what matters, not everything. Reply with that handoff only.',
             [],
             'handoff',              // its own trace role, so the exchange is not read as the next step's work
             $pending['history'],    // continue the work conversation — the model still has the full context
@@ -1433,51 +1562,83 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     private function judge(string $name, string $rubric, string $artifacts): Verdict
     {
-        // The review palette, by subtraction so a tool added to the run later reaches the critic
-        // without a revisit here. What goes: every channel that composes a check or ACTS — `bash`
-        // and `php_eval` (a critic replays recorded evidence, it does not invent commands),
-        // `write_file` (a reviewer reports, it never fixes), `artifact` (recording would land on
-        // the step under review and pollute the very record being judged), and `define_workflow` /
-        // `project_manager` / `schedule` (on the authoring path the reviewer would otherwise hold
-        // the tool that overwrites the very solver it is judging). What arrives instead: the
-        // review-only `rerun_evidence` and `verdict`, present because {@see $reviewing} is set.
+        // The review palette is CAPABILITY-based, so a tool added to the run later reaches the critic
+        // on its own effect with no revisit here. Drop every WRITE-capable tool — `edit`, `write_file`,
+        // `php_eval`, `artifact` (recording would land on the step under review), `define_workflow` /
+        // `project_manager` / `schedule`, and a plain shell — all fall away because a reviewer reports
+        // and never mutates the work it judges. Then bring back a READ-ONLY form of any tool that offers
+        // one ({@see ReadOnlyVariantInterface}): the shell today, so the critic can RUN the tests and the
+        // linter it needs to judge, but cannot edit. `verdict` is review-only yet Write-effect (it is how
+        // the critic records its judgement), so restore it explicitly; `rerun_evidence` is read-only and
+        // survives on its own. Both exist only because {@see $reviewing} is set.
         $registry = $this->withLocalTools($this->env->findRegistry());
-        $names = array_map(static fn (ToolInterface $t): string => $t->name(), $registry->all());
-        $toolNames = array_values(array_diff(
-            $names,
-            ['bash', 'php_eval', 'write_file', 'artifact', 'define_workflow', 'project_manager', 'schedule'],
-        ));
+        $palette = $registry->exceptEffect(Effect::Write);
+
+        foreach ($registry->all() as $tool) {
+            if ($tool instanceof ReadOnlyVariantInterface) {
+                $palette = $palette->with($tool->readOnly());
+            }
+        }
+
+        foreach ($this->localTools() as $tool) {
+            if ($tool->reviewOnly() && !$palette->has($tool->name())) {
+                $palette = $palette->with($tool);
+            }
+        }
+
+        $toolNames = array_map(static fn (ToolInterface $t): string => $t->name(), $palette->all());
 
         $this->verdict = null;
+
+        $handoff = $this->incomingHandoff === ''
+            ? ''
+            : "The handoff this step was given by the previous step (what it was set up to do):\n"
+                . self::clip($this->incomingHandoff, 800) . "\n\n";
 
         $reply = trim($this->runTurns(
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
+            . 'Everything below is method for weighing evidence; wherever it seems to conflict with the '
+            . "rubric, the rubric wins.\n\n"
+            . $handoff
             . "Artifacts it recorded:\n{$artifacts}\n\n"
             . $this->renderParams($this->stepParams[$name] ?? [])
             . $this->verificationToolbox($name)
-            . 'An artifact is what the step SAYS it did. It is a claim, not evidence: a step writes its own '
-            . 'artifact text and can assert success it never achieved — one reported "All tests passed" '
-            . 'while the suite was erroring, and was believed. So when the step CLAIMS to have ALREADY '
-            . 'achieved something checkable — the tests pass, the lint is clean, a file now contains '
-            . 'something, a command succeeded — you MUST establish it yourself with a tool and judge the '
-            . 'OUTPUT YOU SAW, never the summary. Accepting a claim you did not check is the one '
-            . "failure this review cannot have.\n\n"
-            . 'The RUBRIC decides what counts, and it OUTRANKS this instruction. In particular: if it tells '
-            . 'you the artifact is code or a plan that has NOT run yet, the project as it stands is not '
-            . 'evidence about it. Judge it on its own terms and do NOT hold the current state of the files, '
-            . "or a red test suite, against work that was never supposed to have happened yet.\n\n"
-            . 'Where verification does apply, your only executor is rerun_evidence: it replays a command '
-            . 'the step itself recorded, and you judge the output YOU see. You cannot compose commands '
-            . 'here — that is deliberate. A checkable claim that no recorded evidence and no tool of '
-            . 'yours can settle is a cannot_verify verdict: never reject because YOU could not check, '
-            . 'and never accept a bare claim. Do NOT go spelunking the journal: '
-            . "recall(what='step', name='{$name}') is available ONCE if you need to see what the step did, "
-            . "and not beyond that.\n\n"
+            . 'Your materials are the step\'s artifacts, the handoff it was given, and the project itself, '
+            . 'which you can read. Fix your attention on what the step was meant to do (the rubric and the '
+            . "handoff) and on its ARTIFACTS.\n\n"
+            . "An artifact is one of two things, and that decides how far to trust it:\n"
+            . '  - THE STEP\'S OWN ANSWER — what it wrote itself. TEXT (a summary, a decision, generated '
+            . 'source) is printed IN FULL above: read it right here, no tool fetches it, and if the rubric '
+            . 'is about that text (e.g. reviewing generated source) this inline text IS your subject — do '
+            . 'not go looking for it as a file or a note. A FILE is a path it wrote: open it with read_file.'
+            . "\n"
+            . '  - THE RESULT OF A TOOL RUN — a command\'s real output, recorded verbatim by the runtime '
+            . 'with the runtime\'s own grade (ok/fail). This is not the step\'s word, it is what actually '
+            . "happened: read the outcome there.\n\n"
+            . 'If you think the result is poor, or does not solve the step\'s task, you can replay a '
+            . 'recorded run with rerun_evidence(label) and judge the fresh output. You do not compose your '
+            . "own commands — only what the step recorded can be replayed. recall(what='step', "
+            . "name='{$name}') is also available if you need to see what the step did.\n\n"
+            . 'Trust what you SEE, not a retelling: a checkable claim the step made only in its own TEXT — '
+            . '"the tests pass", "the file now contains X" — with no tool-run artifact behind it is not '
+            . 'established. Replay the evidence that settles it, or, if nothing recorded and no tool of '
+            . "yours can, return cannot_verify — never reject merely because YOU could not check.\n\n"
+            . 'And evidence proves only as much as the command behind it. A green result from a WEAK or '
+            . 'SELF-AUTHORED check — a test the step wrote so it would pass, an assertion deleted, a '
+            . 'command narrowed to the easy case — is not the step\'s job done. Look at the command that '
+            . 'produced an evidence artifact (its source), not only its output: does THAT run actually '
+            . 'establish what the rubric asks? If the oracle is weak, or the step shaped it to succeed, '
+            . "that is a reject.\n\n"
+            . 'The rubric decides what counts and it OUTRANKS all of this. If it says the artifact is code '
+            . 'or a plan that has NOT run yet, the project as it stands is not evidence about it — judge it '
+            . 'on its own terms; do not hold the current files, or a red test suite, against work that was '
+            . "never meant to have happened yet.\n\n"
             . 'When you have judged, CALL the `verdict` tool: accept if the rubric is satisfied; reject, '
             . 'citing the rubric item violated and the concrete fact you observed; or cannot_verify with '
-            . 'the reason. The tool call is the verdict — prose alone is not one.',
+            . 'the reason. The tool call is the verdict — prose alone is not read reliably, so CALL THE '
+            . 'TOOL rather than answering in prose.',
             $toolNames,
             'reviewer',
             [],   // a critic exchange is always fresh — it never continues a prior conversation
@@ -1557,10 +1718,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
      */
     protected function criticRole(): string
     {
-        return 'You are a REVIEWER of a workflow step. Your ONLY job is to verify the work against the '
-            . 'rubric: read the files the step touched, replay its recorded evidence, and report on '
-            . 'what you actually observed. Assume nothing from a summary — the step wrote that summary. '
-            . 'Do NOT implement, edit, or fix anything yourself: you judge and list findings, nothing more.';
+        return 'You are the critic of a workflow step. A workflow moves forward one step at a time, and each '
+            . "step's work is done by an agent that then declares it is finished. You are the independent "
+            . 'check before the workflow believes that and moves on: a fresh, separate look whose one '
+            . 'purpose is to decide whether the step ACTUALLY did its job — solved what it was for, to a '
+            . 'real standard of quality — or only claims to have. Nothing else in the run re-examines this '
+            . 'step; if a weak or unfinished result passes you, it passes for good. You judge and report — '
+            . 'you never do, edit, or fix the work yourself: stepping in would destroy the independence that '
+            . 'is the whole reason your judgement is worth anything.';
     }
 
     /**
@@ -1599,11 +1764,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return $findings;
         }
 
-        // $work is the step's result (its artifacts) — the same context the critic had, and on the run
-        // path it is ALL the supervisor gets: that tier is built tool-less (see IssueRunner::
-        // supervisorSpeaker()), so it judges from this text and cannot go and look. Behind it the human
-        // tier can. Do not write here that it can recall() for more; it could not, and the claim stood
-        // in this comment for as long as the behaviour contradicted it.
+        // $work is the step's result (its artifacts) — the same context the critic had. It is the START
+        // of what the supervisor tier gets, not the whole of it: on the run path that tier is a supervisor
+        // AGENT built with the project's tools MINUS write_file (see IssueRunner::supervisorSpeaker()), so
+        // it can read the changed files and run the tests itself before it answers — which is exactly what
+        // SUPERVISOR_SYSTEM tells it to do — but it cannot edit. Behind it the human tier decides the calls
+        // that are not the agent's to make.
         //
         // The two control words are quoted so the reply can be matched EXACTLY. Anything else is
         // guidance, which is the safe default: a misread must send the step back for another attempt,
@@ -1614,12 +1780,16 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 . ($stuck ? "This is round {$round} of {$maxRounds}: verification keeps failing.\n" : '')
                 . "What could not be established:\n{$findings}\n\n"
                 . "The step's result (artifacts):\n{$work}\n\n"
-                . 'Settle it: reply with exactly `accept` to take the work as-is, exactly `stop` to abort, '
-                . 'or guidance for one more attempt (for instance, how the step should record runnable '
-                . 'evidence). Anything else is read as guidance.',
+                . 'You have the project\'s tools and the critic did not — so CHECK IT YOURSELF FIRST: read '
+                . 'the files the step changed and run the test or command that settles this, and judge what '
+                . 'you actually see. Do not merely bounce "record the evidence" back as a deflection — you '
+                . 'are the one who can establish it. THEN settle it: reply with exactly `accept` if what '
+                . 'you ran shows the work is right, exactly `stop` to abort, or concrete guidance for one '
+                . 'more attempt (naming the exact command the step must run and record is fine when you '
+                . 'genuinely could not run it yourself). Anything else is read as guidance.',
             $stuck => "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
                 . "Latest findings:\n{$findings}\n\nThe step's result (artifacts):\n{$work}\n\n"
-                . 'Is this OK? Reply with exactly `accept` to keep it as is, exactly `stop` to abort, '
+                . 'Decide: reply with exactly `accept` to keep it as is, exactly `stop` to abort, '
                 . 'or guidance for one more try. Anything else is read as guidance.',
             default => "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
                 . "The step's result (artifacts):\n{$work}\n\n"

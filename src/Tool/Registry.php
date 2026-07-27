@@ -135,6 +135,39 @@ final class Registry
     }
 
     /**
+     * A new registry holding every tool in this one EXCEPT those with any of the given effects — the
+     * palette narrowed by CAPABILITY instead of by name. `exceptEffect(Effect::Write)` is a read-only
+     * palette: read_file and list_files stay, write_file and a write-capable shell go. Unlike
+     * {@see except()}, which subtracts a fixed list and must be revisited each time a new tool is added,
+     * this keeps meaning what it says — a Write tool registered later is excluded on its own effect,
+     * with no edit here — which is exactly the failure mode {@see \Claw\Tool\Effect} exists to close.
+     *
+     * A tool with an EMPTY effect list is kept by any exceptEffect(): it declares no capability to deny.
+     */
+    public function exceptEffect(Effect ...$effects): self
+    {
+        $subset = new self();
+
+        foreach ($this->tools as $tool) {
+            $denied = false;
+
+            foreach ($tool->effects() as $effect) {
+                if (\in_array($effect, $effects, true)) {
+                    $denied = true;
+
+                    break;
+                }
+            }
+
+            if (!$denied) {
+                $subset->add($tool);
+            }
+        }
+
+        return $subset;
+    }
+
+    /**
      * A new registry holding every tool in this one PLUS $tool, sharing the same instances — the
      * palette WIDENED by one for a scope, without touching this registry. The counterpart to
      * {@see only()}: used to mix a scope-only tool (e.g. the workflow-authoring tool, added just

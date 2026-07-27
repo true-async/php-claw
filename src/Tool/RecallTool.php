@@ -61,6 +61,11 @@ final readonly class RecallTool implements ToolInterface
         ];
     }
 
+    public function effects(): array
+    {
+        return [Effect::Read];
+    }
+
     public function risk(): Risk
     {
         return Risk::Safe;

@@ -12,8 +12,14 @@ use Claw\Exceptions\ToolException;
  * Dangerous: this runs arbitrary PHP in-process. It is gated by the permission
  * layer; intended for quick calculations like `strtoupper("hi")` or `gmdate(...)`.
  */
-final readonly class PhpEvalTool implements ToolInterface
+final readonly class PhpEvalTool implements ToolInterface, DeferredToolInterface
 {
+    /** @return list<string> */
+    public function searchTags(): array
+    {
+        return ['php', 'eval', 'run', 'execute', 'compute', 'snippet', 'expression', 'calculate'];
+    }
+
     public function name(): string
     {
         return 'php_eval';
@@ -21,7 +27,9 @@ final readonly class PhpEvalTool implements ToolInterface
 
     public function description(): string
     {
-        return 'Evaluate a single PHP expression and return its value, e.g. strlen("abc") or 2 ** 10. Runs arbitrary PHP.';
+        return 'Evaluate ONE PHP expression and return its value, e.g. strlen("abc") or 2 ** 10 — a single '
+            . 'expression with no semicolons and no trailing statements. For multi-line scripts, running a '
+            . 'command, or side effects, use bash (php -r "...") instead.';
     }
 
     public function inputSchema(): array
@@ -33,6 +41,12 @@ final readonly class PhpEvalTool implements ToolInterface
             ],
             'required' => ['code'],
         ];
+    }
+
+    public function effects(): array
+    {
+        // Runs arbitrary PHP — it can read, and it can write files or reach the network.
+        return [Effect::Read, Effect::Write];
     }
 
     public function risk(): Risk

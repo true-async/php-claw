@@ -55,7 +55,8 @@ final class ReviewFileWorkflow extends WorkflowAbstract
         return new AiStep(
             'Propose concrete fixes for these problems, then record your proposal with the artifact tool '
             . "(label 'proposal'):\n\n" . (string) $this->param('issues'),
-            ['artifact'],
+            // No tools argument at all is the same as null — the FULL palette. Narrow only when a step
+            // must genuinely be kept from a capability, never by default.
         );
     }
 
