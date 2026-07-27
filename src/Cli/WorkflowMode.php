@@ -12,12 +12,14 @@ use Claw\Knowledge\KnowledgeBase;
 use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
+use Claw\Project\RunStatus;
 use Claw\Project\Strategy;
 use Claw\Run\Triage;
 use Claw\Server;
 use Claw\ServerClient;
 use Claw\ServerLocator;
 use Claw\Trace\Level;
+use Claw\Trace\TraceFormat;
 use Claw\Trace\TraceReader;
 
 /**
@@ -262,23 +264,103 @@ final class WorkflowMode
         // run to it rather than opening the db here. If none is running, start one and wait for it.
         $client = new ServerClient(new CurlHttpClient(), $this->appHome(), $this->root);
 
+        $key = $store->project()->id;
+
         try {
             if ($client->running() === null) {
                 fwrite(STDOUT, "claw run: no server running for this workspace — starting one…\n");
             }
 
             $server = $client->ensure();
-            $client->startRun($server, $store->project()->id, $issue->id);
+            $before = $client->latestRunId($server, $key, $issue->id);
+            $client->startRun($server, $key, $issue->id);
+            $runId = $client->awaitRun($server, $key, $issue->id, $before);
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw run: ' . $e->getMessage() . "\n");
 
             return 1;
         }
 
-        fwrite(STDOUT, "Run started for issue #{$issue->id} on the server at {$server['host']}:{$server['port']}.\n");
-        fwrite(STDOUT, "  watch it:  claw log\n");
+        if ($runId === null) {
+            // The run is going, we just could not attach a tail to it; the trace is still on the server.
+            fwrite(STDOUT, "Run started for issue #{$issue->id}; watch it with: claw log\n");
 
-        return 0;
+            return 0;
+        }
+
+        return $this->tailRun($client, $server, $key, $issue->id, $runId, $verbosity);
+    }
+
+    /**
+     * Follow a server-side run to the end, printing its trace as it arrives — the terminal's live view
+     * of a run it no longer hosts. Polls the same trace rows an SSE subscriber gets and renders them
+     * exactly as an in-process run would ({@see ConsoleTraceSink}), so detaching (Ctrl-C) loses only the
+     * view: the run keeps going on the server, and `claw log` shows the rest.
+     *
+     * @param array{host: string, port: int} $server
+     */
+    private function tailRun(ServerClient $client, array $server, string $key, string $issueId, string $runId, ?Level $verbosity): int
+    {
+        $threshold = ($verbosity ?? Level::Info)->value;
+        $color = stream_isatty(STDOUT) && getenv('NO_COLOR') === false;
+        $since = 0;
+        $flaggedGate = false;
+
+        while (true) {
+            foreach ($client->trace($server, $key, $runId, $since) as $row) {
+                $since = max($since, \is_int($row['seq'] ?? null) ? $row['seq'] : $since);
+
+                if ((\is_int($row['level'] ?? null) ? $row['level'] : 0) < $threshold) {
+                    continue;
+                }
+
+                $data = \is_array($row['data'] ?? null) ? $row['data'] : [];
+                $head = TraceFormat::line((string) ($row['phase'] ?? ''), (string) ($row['type'] ?? ''), $data);
+                $depth = \is_int($row['depth'] ?? null) ? $row['depth'] : 0;
+                fwrite(STDOUT, str_repeat('  ', $depth) . TraceFormat::paint((string) ($row['type'] ?? ''), $head, $color) . "\n");
+
+                if (($row['type'] ?? '') === 'question' && !$flaggedGate) {
+                    $flaggedGate = true;
+                    fwrite(STDOUT, "  ⏸ waiting for a human — answer it in the dashboard; Ctrl-C detaches (the run continues).\n");
+                }
+
+                if (($row['type'] ?? '') === 'answer') {
+                    $flaggedGate = false;
+                }
+            }
+
+            $status = $this->runStatus($client->runs($server, $key, $issueId), $runId);
+
+            if ($status === RunStatus::Done->value) {
+                fwrite(STDOUT, "Run #{$runId} finished issue #{$issueId}.\n");
+
+                return 0;
+            }
+
+            if ($status === RunStatus::Failed->value) {
+                fwrite(STDERR, "Run #{$runId} failed; see `claw log {$runId}`.\n");
+
+                return 1;
+            }
+
+            usleep(500_000);
+        }
+    }
+
+    /**
+     * A run's current status from a runs listing, or '' when it is not there.
+     *
+     * @param list<array{id: string, status: string}> $runs
+     */
+    private function runStatus(array $runs, string $runId): string
+    {
+        foreach ($runs as $run) {
+            if ($run['id'] === $runId) {
+                return $run['status'];
+            }
+        }
+
+        return '';
     }
 
     /**

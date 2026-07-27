@@ -353,6 +353,12 @@ final class Server
                 return;
             }
 
+            if (\preg_match('#^/api/projects/([^/]+)/issues/([^/]+)/runs$#', $path, $matches)) {
+                $response->json($this->store($matches[1])->runsFor($matches[2]));
+
+                return;
+            }
+
             if (\preg_match('#^/api/projects/([^/]+)/runs/([^/]+)/stream$#', $path, $matches)) {
                 $this->stream($request, $response, $matches[1], $matches[2]);
 

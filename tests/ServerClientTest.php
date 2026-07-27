@@ -113,4 +113,48 @@ final class ServerClientTest
     {
         Assert::same(ServerClient::spawnCommand('/nowhere/at/all', '127.0.0.1', 8787), null);
     }
+
+    #[Test]
+    public function latestRunIdIsTheHighestNotTheLast(): void
+    {
+        $client = $this->client(new HttpResponse(200, '[{"id":"3","status":"done"},{"id":"11","status":"running"},{"id":"7","status":"failed"}]'));
+
+        Assert::same($client->latestRunId(['host' => '127.0.0.1', 'port' => 8787], 'proj', '5'), 11);
+    }
+
+    #[Test]
+    public function latestRunIdIsZeroWhenThereAreNoRuns(): void
+    {
+        Assert::same(
+            $this->client(new HttpResponse(200, '[]'))->latestRunId(['host' => '127.0.0.1', 'port' => 8787], 'proj', '5'),
+            0,
+        );
+    }
+
+    #[Test]
+    public function awaitRunReturnsTheFirstRunBeyondTheMark(): void
+    {
+        $client = $this->client(new HttpResponse(200, '[{"id":"9","status":"running"}]'));
+
+        Assert::same($client->awaitRun(['host' => '127.0.0.1', 'port' => 8787], 'proj', '5', 8), '9');
+    }
+
+    #[Test]
+    public function traceReturnsTheRowsVerbatim(): void
+    {
+        $client = $this->client(new HttpResponse(200, '[{"seq":1,"depth":0,"type":"info","phase":"run","level":20,"data":{}}]'));
+
+        $rows = $client->trace(['host' => '127.0.0.1', 'port' => 8787], 'proj', '9', 0);
+
+        Assert::same(\count($rows), 1);
+        Assert::same($rows[0]['seq'] ?? null, 1);
+    }
+
+    #[Test]
+    public function traceIsEmptyOnAnErrorResponse(): void
+    {
+        $client = $this->client(new HttpResponse(404, 'nope'));
+
+        Assert::same($client->trace(['host' => '127.0.0.1', 'port' => 8787], 'proj', '9', 0), []);
+    }
 }
