@@ -13,10 +13,9 @@ use Claw\Project\Issue;
 use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Project\Strategy;
-use Claw\Run\ConsoleRunFrontend;
-use Claw\Run\IssueRunner;
 use Claw\Run\Triage;
 use Claw\Server;
+use Claw\ServerClient;
 use Claw\ServerLocator;
 use Claw\Trace\Level;
 use Claw\Trace\TraceReader;
@@ -253,23 +252,33 @@ final class WorkflowMode
         try {
             $store = $this->resolve($projectDir);
             $issue = $store->loadIssue($issueId);
-            $config = Config::load($this->root . '/.env');
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw run: ' . $e->getMessage() . "\n");
 
             return 1;
         }
 
-        $agent = AgentFactory::make($config, new CurlHttpClient());
+        // The CLI is a thin client: the server is the one process that writes a project db, so hand the
+        // run to it rather than opening the db here. If none is running, start one and wait for it.
+        $client = new ServerClient(new CurlHttpClient(), $this->appHome(), $this->root);
 
-        if ($agent === null) {
-            fwrite(STDERR, "claw run: agent '{$config->agent}' is not wired yet.\n");
+        try {
+            if ($client->running() === null) {
+                fwrite(STDOUT, "claw run: no server running for this workspace — starting one…\n");
+            }
+
+            $server = $client->ensure();
+            $client->startRun($server, $store->project()->id, $issue->id);
+        } catch (ClawException $e) {
+            fwrite(STDERR, 'claw run: ' . $e->getMessage() . "\n");
 
             return 1;
         }
 
-        return new IssueRunner($this->projectsDir(), $store, $config, $agent, new ConsoleRunFrontend($verbosity))
-            ->run($issue);
+        fwrite(STDOUT, "Run started for issue #{$issue->id} on the server at {$server['host']}:{$server['port']}.\n");
+        fwrite(STDOUT, "  watch it:  claw log\n");
+
+        return 0;
     }
 
     /**
