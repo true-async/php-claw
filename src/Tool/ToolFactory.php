@@ -47,6 +47,9 @@ final class ToolFactory
         // bounded output, they skip vendor/.git, and a reviewer can hold them without a shell.
         $registry->add(new GrepTool($workspace));
         $registry->add(new GlobTool($workspace));
+        // The cheap symbol tier: "where is this class/function/method DEFINED", definition-aware so it
+        // beats grep for jump-to-definition. Type-resolved references stay a separate (LSP) track.
+        $registry->add(new FindDefinitionTool($workspace));
         // Curated commands as first-class READ tools: what changed (diff), the tests, a lint/analysis.
         // A step records their output as evidence; a reviewer runs them to judge — no raw shell needed.
         $registry->add(new DiffTool($workspace, $secrets, $timeoutMs));
