@@ -121,6 +121,29 @@ final class EditToolTest
         $this->cleanup($ws->root());
     }
 
+    /** A .php edit whose result would not parse is refused, and the file is left untouched. */
+    #[Test]
+    public function anEditThatBreaksPhpSyntaxIsRefused(): void
+    {
+        $ws = $this->workspace();
+        $original = "<?php\nfunction f() { return 1; }\n";
+        file_put_contents($ws->root() . '/code.php', $original);
+
+        $threw = false;
+
+        try {
+            // Delete the closing brace — the file no longer parses.
+            new EditTool($ws)->handle(['path' => 'code.php', 'old_string' => 'return 1; }', 'new_string' => 'return 1;']);
+        } catch (ToolException $e) {
+            $threw = str_contains($e->getMessage(), 'would not be valid PHP');
+        }
+
+        Assert::true($threw);
+        Assert::same((string) file_get_contents($ws->root() . '/code.php'), $original);   // unchanged
+
+        $this->cleanup($ws->root());
+    }
+
     #[Test]
     public function itWritesAndIsMutating(): void
     {

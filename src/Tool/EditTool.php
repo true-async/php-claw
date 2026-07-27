@@ -24,8 +24,11 @@ use Claw\Exceptions\ToolException;
  */
 final readonly class EditTool implements ToolInterface
 {
-    public function __construct(private Workspace $workspace)
-    {
+    public function __construct(
+        private Workspace $workspace,
+        private ?Secrets $secrets = null,
+        private int $timeoutMs = 0,
+    ) {
     }
 
     public function name(): string
@@ -103,7 +106,13 @@ final readonly class EditTool implements ToolInterface
             ++$files[$real]['edits'];
         }
 
-        // Phase 2: everything matched — commit.
+        // Phase 1.5: a .php result must still PARSE. A syntax-breaking edit is refused here, before any
+        // write, so all-or-nothing holds and a broken file never lands — the lint-gated edit of SWE-agent.
+        foreach ($files as $file) {
+            $this->assertPhpParses($file['path'], $file['content']);
+        }
+
+        // Phase 2: everything matched and parses — commit.
         foreach ($files as $real => $file) {
             if (file_put_contents($real, $file['content']) === false) {
                 throw new ToolException("edit: could not write {$file['path']}");
@@ -150,6 +159,43 @@ final readonly class EditTool implements ToolInterface
         $pos = strpos($content, $old);   // count === 1, so this is the only occurrence
 
         return substr_replace($content, $new, (int) $pos, \strlen($old));
+    }
+
+    /**
+     * Refuse an edit whose RESULT would not be valid PHP. Only .php files are checked: the new content is
+     * written to a throwaway temp file and run through `php -l`. A real parse error is a refusal (nothing
+     * is committed). A linter that could not RUN at all — php not on PATH — is NOT held against a valid
+     * edit: a tooling gap is never evidence the work is wrong, the same discipline the reviewers use.
+     */
+    private function assertPhpParses(string $relPath, string $content): void
+    {
+        if (!str_ends_with($relPath, '.php')) {
+            return;
+        }
+
+        $tmp = tempnam(sys_get_temp_dir(), 'claw_edit_lint_');
+
+        if ($tmp === false) {
+            return;   // no temp file — do not block the edit on that
+        }
+
+        file_put_contents($tmp, $content);
+        $out = new BashTool(sys_get_temp_dir(), $this->secrets, $this->timeoutMs)
+            ->handle(['command' => 'php -l ' . escapeshellarg($tmp)]);
+        @unlink($tmp);
+
+        if (stripos($out, 'No syntax errors detected') !== false) {
+            return;   // valid
+        }
+
+        if (stripos($out, 'parse error') === false && stripos($out, 'syntax error') === false) {
+            return;   // php could not lint (not installed, etc.) — a tooling gap, not a broken edit
+        }
+
+        throw new ToolException(
+            "edit ({$relPath}): the result would not be valid PHP, so nothing was written — "
+            . trim(str_replace($tmp, $relPath, $out)),
+        );
     }
 
     /**
