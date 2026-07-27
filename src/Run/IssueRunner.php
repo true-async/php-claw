@@ -28,6 +28,7 @@ use Claw\Project\Strategy;
 use Claw\Tool\BashTool;
 use Claw\Tool\Effect;
 use Claw\Tool\RecallTool;
+use Claw\Tool\Registry;
 use Claw\Tool\Secrets;
 use Claw\Tool\ToolFactory;
 use Claw\Tool\Workspace;
@@ -483,16 +484,15 @@ final readonly class IssueRunner
      * turn loop that decides ONE thing, outside the work, with tools to check for itself, and whose
      * answer the CODE branches on.
      *
-     * Its palette is narrowed to reading — plus `bash`, because a judge that cannot RUN the tests
-     * cannot judge anything, which is the whole point. That does mean the palette is not read-only
-     * in the sense the word usually carries: `bash` writes as readily as it reads. Nothing mechanical
-     * stops the judge editing the project, so {@see JUDGE_SYSTEM} forbids it in as many words. Said
-     * plainly here because a comment claiming a restraint the code does not impose is exactly the
-     * kind of paper gate this pass exists to remove.
+     * Its palette is a REVIEWER's ({@see reviewPalette}): every read-only tool — read_file, grep, glob,
+     * diff, run_tests, lint — plus a READ-ONLY shell, so it can RUN the tests it needs to judge but cannot
+     * edit the project it is judging. That restraint used to be paper (a plain `bash` writes as readily as
+     * it reads, and only {@see JUDGE_SYSTEM} told it not to); now it is real, by effect, the same way the
+     * supervisor's is.
      */
     private function unsolvedReason(RunContext $ctx): ?string
     {
-        $registry = $ctx->env->findRegistry()->only(['read_file', 'list_files', 'bash']);
+        $registry = $this->reviewPalette($ctx->env->findRegistry());
         $judge = new DefaultTurnLoop(
             $this->agent,
             $ctx->env->child()->set(EnvKey::Registry, $registry)->executor(),
@@ -873,6 +873,27 @@ final readonly class IssueRunner
     }
 
     /**
+     * A REVIEWER's palette, shared by the two review roles here (the supervisor tier and the completion
+     * judge): every read-only tool the run has — read_file, grep, glob, diff, run_tests, lint, recall —
+     * plus a READ-ONLY clone of the run's shell, so a reviewer can RUN the checks it needs but cannot edit
+     * the work it is judging. exceptEffect is capability-based: a Write tool added to the run later stays
+     * out on its own effect, with no revisit; and the read-only shell refuses the direct edit (`sed -i` on
+     * the file under review) a live supervisor once reached for.
+     */
+    private function reviewPalette(Registry $run): Registry
+    {
+        $palette = $run->exceptEffect(Effect::Write);
+
+        foreach ($run->all() as $tool) {
+            if ($tool instanceof BashTool) {
+                $palette = $palette->with($tool->readOnly());
+            }
+        }
+
+        return $palette;
+    }
+
+    /**
      * The supervisor tier of the ask channel: an agent on the `supervisor` model that settles in-run
      * escalations (accept / stop / guidance) on its own judgement, so a stuck step does not wait on —
      * or churn against — the human. Replying `ESCALATE` returns null, so {@see EscalatingSpeaker}
@@ -891,20 +912,7 @@ final readonly class IssueRunner
      */
     private function supervisorSpeaker(Environment $env): SpeakerInterface
     {
-        // A REVIEWER's palette: every read-only tool, and a READ-ONLY shell in place of the run's normal
-        // one — so the supervisor can RUN the checks (tests, linters) it needs to judge, but cannot edit
-        // the very work under review. A live supervisor reached for `sed -i` on the file it was judging;
-        // read-only bash refuses that. exceptEffect is capability-based: a Write tool added to the run
-        // later is kept out of here on its own effect, with no revisit.
-        $run = $env->findRegistry();
-        $palette = $run->exceptEffect(Effect::Write);
-
-        foreach ($run->all() as $tool) {
-            if ($tool instanceof BashTool) {
-                $palette = $palette->with($tool->readOnly());
-            }
-        }
-
+        $palette = $this->reviewPalette($env->findRegistry());
         $loop = new DefaultTurnLoop(
             $this->agent,
             $env->child()->set(EnvKey::Registry, $palette)->executor(),
