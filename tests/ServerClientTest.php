@@ -99,13 +99,13 @@ final class ServerClientTest
     public function theSpawnCommandCarriesTheExtensionHostAndPort(): void
     {
         // bin/claw must exist under the root for a command to be built, so point the root at the repo
-        $root = \dirname(__DIR__);
-        $command = ServerClient::spawnCommand($root, '127.0.0.1', 8787);
+        $command = ServerClient::spawnCommand(\dirname(__DIR__), '127.0.0.1', 8787) ?? [];
 
-        Assert::notSame($command, null);
-        Assert::same(str_contains((string) $command, 'extension='), true);
-        Assert::same(str_contains((string) $command, 'serve --host'), true);
-        Assert::same(str_contains((string) $command, '--port 8787'), true);
+        Assert::same(\in_array('serve', $command, true), true);
+        Assert::same(\in_array('--host', $command, true), true);
+        Assert::same(\in_array('127.0.0.1', $command, true), true);
+        Assert::same(\in_array('8787', $command, true), true);
+        Assert::same(array_any($command, static fn (string $a): bool => str_starts_with($a, 'extension=')), true);
     }
 
     #[Test]

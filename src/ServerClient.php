@@ -93,12 +93,19 @@ final readonly class ServerClient
     }
 
     /**
-     * The command that launches a server, or null when one cannot be built (no php binary, or bin/claw
-     * is not where it should be). Pure so the shape can be asserted without spawning anything.
+     * The argv that launches a server, or null when one cannot be built (bin/claw is not where it
+     * should be). Returned as a list, not a shell string, so it carries no quoting to get wrong and can
+     * be handed to proc_open's array form on either platform. Pure, so the shape can be asserted without
+     * spawning anything.
+     *
+     * The extension defaults to the `.so` name php resolves from its extension_dir; on Windows (a `.dll`)
+     * or a non-standard install, set CLAW_SERVER_EXTENSION to the file to load.
+     *
+     * @return list<string>|null
      */
-    public static function spawnCommand(string $root, string $host, int $port): ?string
+    public static function spawnCommand(string $root, string $host, int $port): ?array
     {
-        $claw = $root . '/bin/claw';
+        $claw = $root . \DIRECTORY_SEPARATOR . 'bin' . \DIRECTORY_SEPARATOR . 'claw';
 
         if (!is_file($claw)) {
             return null;
@@ -107,14 +114,10 @@ final readonly class ServerClient
         $extension = getenv('CLAW_SERVER_EXTENSION');
         $extension = $extension === false || $extension === '' ? 'true_async_server.so' : $extension;
 
-        return sprintf(
-            '%s -d extension=%s %s serve --host %s --port %d',
-            escapeshellarg(\PHP_BINARY),
-            escapeshellarg($extension),
-            escapeshellarg($claw),
-            escapeshellarg($host),
-            $port,
-        );
+        return [
+            \PHP_BINARY, '-d', 'extension=' . $extension,
+            $claw, 'serve', '--host', $host, '--port', (string) $port,
+        ];
     }
 
     /**
@@ -129,26 +132,10 @@ final readonly class ServerClient
         $command = self::spawnCommand($this->root, $this->host, $this->port);
 
         if ($command === null) {
-            throw new ClawException('cannot start a server: no php binary or bin/claw to launch');
+            throw new ClawException('cannot start a server: bin/claw is not where it should be');
         }
 
-        // setsid puts the server in its own session so it outlives this CLI and holds no terminal; the
-        // descriptor spec points its stdio at files, so it never inherits — and never blocks — the pipe
-        // this process was invoked through. The loser of a bind race exits on its own duplicate-guard,
-        // and the poll below simply finds the winner instead.
-        $log = $this->workspace . \DIRECTORY_SEPARATOR . 'server.log';
-        $descriptors = [
-            0 => ['file', '/dev/null', 'r'],
-            1 => ['file', $log, 'a'],
-            2 => ['file', $log, 'a'],
-        ];
-        // --fork so setsid forks the server and returns at once: without it setsid execs the server in
-        // place and proc_close would block on it for the server's whole life.
-        $process = @proc_open('setsid --fork ' . $command, $descriptors, $pipes);
-
-        if (\is_resource($process)) {
-            proc_close($process);
-        }
+        $this->launchDetached($command);
 
         $waited = 0;
 
@@ -165,7 +152,45 @@ final readonly class ServerClient
 
         throw new ClawException(
             'the server did not come up within ' . (self::SPAWN_TIMEOUT_MS / 1000) . 's — is the server '
-            . 'extension available? (set CLAW_SERVER_EXTENSION to its .so path)',
+            . 'extension available? (set CLAW_SERVER_EXTENSION to its .so/.dll path)',
         );
+    }
+
+    /**
+     * Start the server as a process that outlives this CLI and holds none of its stdio.
+     *
+     * The two platforms detach differently, and neither is the shell `&` a terminal-launched CLI would
+     * leak its console through. POSIX: `setsid --fork` gives the server its own session and returns at
+     * once (without --fork setsid execs in place and proc_close would block for the server's life).
+     * Windows: `create_new_console` cuts it from this console so it survives the CLI exiting. Either way
+     * the descriptor spec points stdio at files, so the server never inherits the pipe we were called
+     * through.
+     *
+     * @param list<string> $command
+     */
+    private function launchDetached(array $command): void
+    {
+        $log = $this->workspace . \DIRECTORY_SEPARATOR . 'server.log';
+        $windows = \PHP_OS_FAMILY === 'Windows';
+
+        $descriptors = [
+            0 => ['file', $windows ? 'NUL' : '/dev/null', 'r'],
+            1 => ['file', $log, 'a'],
+            2 => ['file', $log, 'a'],
+        ];
+
+        if ($windows) {
+            $process = @proc_open($command, $descriptors, $pipes, null, null, [
+                'bypass_shell' => true,
+                'create_new_console' => true,
+                'create_process_group' => true,
+            ]);
+        } else {
+            $process = @proc_open(['setsid', '--fork', ...$command], $descriptors, $pipes);
+        }
+
+        if (\is_resource($process)) {
+            proc_close($process);
+        }
     }
 }
