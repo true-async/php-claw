@@ -74,30 +74,29 @@ keep-alive timeouts and never touches the two above. So an idle connection is pi
 line of our code. A browser answers PING at the protocol level. The extension's own note says
 as much: "Handlers rarely need this."
 
-**What is genuinely open, and is worse than what this entry claimed.** Whether
-`setReadTimeout(15)` (`src/Server.php:110`) applies to the socket after the upgrade. If it
-does, an idle connection dies at 15s — before the first ping at 30s — and the reconnect churn
-would look exactly like a flaky network. The documentation describes the timeout as "for
-receiving request" and says nothing about WebSocket. Not answerable from the stub: it needs a
-running server and a connection left idle.
+**Measured — NOT a bug.** The open question was whether `setReadTimeout(15)`
+(`src/Server.php:110`) applies to the socket after the upgrade, killing an idle connection at 15s
+before the first ping. Answered against a running server with a real idle (no-inbound) WS
+connection: the server sent its keepalive PING at t≈29.7s and the connection stayed open past 75s —
+no teardown at 15s. So the read timeout does not apply to a WebSocket after the upgrade, and an
+idle connection is kept alive by the extension's own ping. Nothing to fix here.
 
 Also unverified here: whether the dashboard reconnects when the server does drop a dead
 connection. That code is in the UI repository, not this one.
 
-### 1b. Only run traces resume; boards do not
+### 1b. Only run traces resume; boards do not — FIXED (#97)
 
-`wsSubscribe()` replays the journal past `since` — but only for a topic matching
-`project/{key}/run/{id}/trace` (`src/Server.php:888-903`). A board room
-(`project/{key}/issues`) falls through the regex and returns having sent nothing.
+A board `subscribe` now dumps the current board to that socket — the same first-tick dump the
+SSE stream does from its per-connection cursor — so a WS subscriber bootstraps a correct board
+from `subscribe` alone. Before, `wsSubscribe()` replayed the journal only for a run-trace topic
+and a board room fell through, sending nothing; and `broadcastBoard()` diffs against a `$sent`
+cursor that is server-global, not per-connection, so an unchanged issue is never re-sent to a
+late joiner. Verified live with a WS client.
 
-That leaves the board room unable to bootstrap a subscriber at all. `broadcastBoard()` diffs
-against `$sent`, which is **server-global, not per-connection** (`src/Server.php:915`, `944`) — so
-an issue that has not changed since the server last published it is never sent again, and a
-client subscribing later simply does not receive it. The board has to be fetched over REST
-first, and there is a race between that snapshot and the subscription taking effect.
-
-Boards need what traces already have: a cursor a subscriber can resume from, so subscribe
-alone is enough to arrive at a correct board.
+What remains is the ORDERING half, and it belongs to 1d: the bootstrap can still race a
+concurrent change delivered on the same socket, because a board message carries no `seq` to
+de-dupe by the way a trace row does. The fix is a per-message board cursor (1d), not more
+bootstrap.
 
 ### 1c. Board updates are polled, not pushed — but wait for item 2
 
