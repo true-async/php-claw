@@ -41,6 +41,12 @@ final readonly class PhpEvalTool implements ToolInterface, DeferredToolInterface
         ];
     }
 
+    public function effects(): array
+    {
+        // Runs arbitrary PHP — it can read, and it can write files or reach the network.
+        return [Effect::Read, Effect::Write];
+    }
+
     public function risk(): Risk
     {
         return Risk::Dangerous;

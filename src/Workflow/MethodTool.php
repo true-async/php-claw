@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Claw\Workflow;
 
 use Claw\Exceptions\ToolException;
+use Claw\Tool\Effect;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
 
@@ -54,6 +55,18 @@ final class MethodTool implements ToolInterface
     public function risk(): Risk
     {
         return Risk::Safe;
+    }
+
+    /**
+     * The effects declared on the {@see Tool} attribute. An UNDECLARED local tool is assumed to write:
+     * a bespoke method a solver gave itself could do anything, so the safe default keeps it out of a
+     * read-only palette until its author says otherwise with `effects:`.
+     *
+     * @return list<Effect>
+     */
+    public function effects(): array
+    {
+        return $this->meta->effects === [] ? [Effect::Read, Effect::Write] : $this->meta->effects;
     }
 
     /** Whether this tool exists only while a critic reviews — see {@see Tool::$reviewOnly}. */

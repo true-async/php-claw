@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Tool;
 
 use Claw\Exceptions\ToolException;
+use Claw\Tool\Effect;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
@@ -149,6 +150,77 @@ final class RegistryTest
         Assert::true($threw);
     }
 
+    #[Test]
+    public function exceptEffectDropsEveryToolThatCanWriteAndKeepsTheReadOnlyOnes(): void
+    {
+        $registry = new Registry();
+        $registry->add($this->effectTool('reader', Effect::Read));
+        $registry->add($this->effectTool('writer', Effect::Write));
+        $registry->add($this->effectTool('both', Effect::Read, Effect::Write));
+
+        $kept = array_map(
+            static fn (ToolInterface $t): string => $t->name(),
+            $registry->exceptEffect(Effect::Write)->all(),
+        );
+
+        Assert::same($kept, ['reader']);   // writer and both are out — anything that can write is denied
+    }
+
+    #[Test]
+    public function exceptEffectKeepsAToolThatDeclaresNoEffectAtAll(): void
+    {
+        $registry = new Registry();
+        $registry->add($this->effectTool('reader', Effect::Read));
+        $registry->add($this->effectTool('effectless'));   // empty effects: it denies nothing, so it stays
+
+        $kept = array_map(
+            static fn (ToolInterface $t): string => $t->name(),
+            $registry->exceptEffect(Effect::Write)->all(),
+        );
+
+        Assert::same($kept, ['reader', 'effectless']);
+    }
+
+    private function effectTool(string $name, Effect ...$effects): ToolInterface
+    {
+        return new class ($name, array_values($effects)) implements ToolInterface {
+            /** @param list<Effect> $effects */
+            public function __construct(private readonly string $toolName, private readonly array $effects)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->toolName;
+            }
+
+            public function description(): string
+            {
+                return 'x';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return $this->effects;
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ok';
+            }
+        };
+    }
+
     private function noopTool(): ToolInterface
     {
         return new class () implements ToolInterface {
@@ -165,6 +237,11 @@ final class RegistryTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk

@@ -44,6 +44,11 @@ final readonly class ToolSearchTool implements ToolInterface
         ];
     }
 
+    public function effects(): array
+    {
+        return [Effect::Read];
+    }
+
     public function risk(): Risk
     {
         return Risk::Safe;   // it only reveals schemas — no side effect

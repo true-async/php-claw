@@ -150,6 +150,12 @@ final readonly class ProjectManagerTool implements ToolInterface
         ];
     }
 
+    public function effects(): array
+    {
+        // Reads the ticket ledger and creates/updates tickets and strategy attempts.
+        return [Effect::Read, Effect::Write];
+    }
+
     public function risk(): Risk
     {
         return Risk::Mutating;

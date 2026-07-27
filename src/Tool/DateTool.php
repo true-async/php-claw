@@ -39,6 +39,11 @@ final readonly class DateTool implements ToolInterface, DeferredToolInterface
         ];
     }
 
+    public function effects(): array
+    {
+        return [Effect::Read];
+    }
+
     public function risk(): Risk
     {
         return Risk::Safe;

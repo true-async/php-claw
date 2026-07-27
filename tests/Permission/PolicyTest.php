@@ -6,6 +6,7 @@ namespace Tests\Permission;
 
 use Claw\Permission\Decision;
 use Claw\Permission\Policy;
+use Claw\Tool\Effect;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
 use Testo\Assert;
@@ -71,6 +72,11 @@ final class PolicyTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk

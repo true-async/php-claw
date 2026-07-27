@@ -17,6 +17,7 @@ use Claw\Exec\ExecutorInterface;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\DeferredToolInterface;
+use Claw\Tool\Effect;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
@@ -758,7 +759,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      *                       turned into a tool result, so it would take the whole run down, and on a
      *                       generated solver it would then trigger a repair pass for code that is fine
      */
-    #[Tool(name: 'artifact', description: 'Record a named output of this step: what you produced, kept in '
+    #[Tool(name: 'artifact', effects: [Effect::Write], description: 'Record a named output of this step: what you produced, kept in '
         . 'the run journal and shown to the reviewer who judges this step. Pass EXACTLY ONE of: '
         . '`text` (your own words — a decision, a summary, generated source: useful, but it is a claim); '
         . '`file` (the path of a file you wrote — the reviewer opens it itself); '
@@ -869,7 +870,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * `bash` — see {@see judge()}): the model chose only WHICH record to replay; the command text
      * comes from the artifact, so this is not the shell-by-indirection hole the palette closes.
      */
-    #[Tool(name: 'rerun_evidence', reviewOnly: true, description: 'Re-run a command the reviewed step '
+    #[Tool(name: 'rerun_evidence', reviewOnly: true, effects: [Effect::Read], description: 'Re-run a command the reviewed step '
         . 'recorded as evidence, EXACTLY as recorded, and see its fresh output. Pass `label` — the '
         . 'label of the evidence artifact. This is your only way to execute anything: verification '
         . 'here means replaying recorded evidence, never composing commands of your own.')]
@@ -926,7 +927,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
      * a reject without the rubric item and the observed fact is refused at the call, not discovered
      * in a rework round.
      */
-    #[Tool(name: 'verdict', reviewOnly: true, description: 'Record your verdict on the reviewed step — '
+    #[Tool(name: 'verdict', reviewOnly: true, effects: [Effect::Write], description: 'Record your verdict on the reviewed step — '
         . 'call this exactly once, as your final act of the review. `decision` is one of: accept (the '
         . 'rubric is satisfied), reject (it is not — cite `rubric_item`, the rubric requirement '
         . 'violated, and `fact`, the concrete thing YOU observed that shows it), or cannot_verify (a '
@@ -1737,11 +1738,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
             return $findings;
         }
 
-        // $work is the step's result (its artifacts) — the same context the critic had, and on the run
-        // path it is ALL the supervisor gets: that tier is built tool-less (see IssueRunner::
-        // supervisorSpeaker()), so it judges from this text and cannot go and look. Behind it the human
-        // tier can. Do not write here that it can recall() for more; it could not, and the claim stood
-        // in this comment for as long as the behaviour contradicted it.
+        // $work is the step's result (its artifacts) — the same context the critic had. It is the START
+        // of what the supervisor tier gets, not the whole of it: on the run path that tier is a supervisor
+        // AGENT built with the project's tools MINUS write_file (see IssueRunner::supervisorSpeaker()), so
+        // it can read the changed files and run the tests itself before it answers — which is exactly what
+        // SUPERVISOR_SYSTEM tells it to do — but it cannot edit. Behind it the human tier decides the calls
+        // that are not the agent's to make.
         //
         // The two control words are quoted so the reply can be matched EXACTLY. Anything else is
         // guidance, which is the safe default: a misread must send the step back for another attempt,
@@ -1752,9 +1754,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 . ($stuck ? "This is round {$round} of {$maxRounds}: verification keeps failing.\n" : '')
                 . "What could not be established:\n{$findings}\n\n"
                 . "The step's result (artifacts):\n{$work}\n\n"
-                . 'Settle it: reply with exactly `accept` to take the work as-is, exactly `stop` to abort, '
-                . 'or guidance for one more attempt (for instance, how the step should record runnable '
-                . 'evidence). Anything else is read as guidance.',
+                . 'You have the project\'s tools and the critic did not — so CHECK IT YOURSELF FIRST: read '
+                . 'the files the step changed and run the test or command that settles this, and judge what '
+                . 'you actually see. Telling the step to record evidence is NOT an answer here — you are the '
+                . 'one who can establish it. THEN settle it: reply with exactly `accept` if what you ran '
+                . 'shows the work is right, exactly `stop` to abort, or concrete guidance for one more '
+                . 'attempt. Anything else is read as guidance.',
             $stuck => "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
                 . "Latest findings:\n{$findings}\n\nThe step's result (artifacts):\n{$work}\n\n"
                 . 'Is this OK? Reply with exactly `accept` to keep it as is, exactly `stop` to abort, '

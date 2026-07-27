@@ -115,6 +115,12 @@ final readonly class KnowledgeTool implements ToolInterface, DeferredToolInterfa
         return ['type' => 'object', 'properties' => $properties, 'required' => ['action']];
     }
 
+    public function effects(): array
+    {
+        // Always queries (read); records notes (write) when a writer is wired in.
+        return $this->writer === null ? [Effect::Read] : [Effect::Read, Effect::Write];
+    }
+
     public function risk(): Risk
     {
         return $this->writer === null ? Risk::Safe : Risk::Mutating;

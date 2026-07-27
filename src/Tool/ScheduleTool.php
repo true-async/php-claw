@@ -52,6 +52,11 @@ final readonly class ScheduleTool implements ToolInterface, DeferredToolInterfac
         ];
     }
 
+    public function effects(): array
+    {
+        return [Effect::Write];
+    }
+
     public function risk(): Risk
     {
         return Risk::Safe;

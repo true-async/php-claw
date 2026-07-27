@@ -20,6 +20,7 @@ use Claw\Agent\Usage;
 use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
+use Claw\Tool\Effect;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolCall;
@@ -872,6 +873,11 @@ final class WorkflowAbstractTest
                 return ['type' => 'object'];
             }
 
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
+            }
+
             public function risk(): Risk
             {
                 return Risk::Safe;
@@ -1529,6 +1535,11 @@ final class WorkflowAbstractTest
             public function inputSchema(): array
             {
                 return ['type' => 'object', 'properties' => ['command' => ['type' => 'string']]];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk
@@ -2227,6 +2238,11 @@ final class WorkflowAbstractTest
                 return ['type' => 'object'];
             }
 
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
+            }
+
             public function risk(): Risk
             {
                 return Risk::Mutating;
@@ -2498,6 +2514,11 @@ final class WorkflowAbstractTest
             public function inputSchema(): array
             {
                 return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read, Effect::Write];
             }
 
             public function risk(): Risk

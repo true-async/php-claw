@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Support;
 
+use Claw\Tool\Effect;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolInterface;
 
@@ -27,6 +28,11 @@ class StubTool implements ToolInterface
     public function inputSchema(): array
     {
         return ['type' => 'object'];
+    }
+
+    public function effects(): array
+    {
+        return [Effect::Read, Effect::Write];
     }
 
     public function risk(): Risk

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Claw\Workflow;
 
+use Claw\Tool\Effect;
+
 /**
  * Marks a workflow method as a LOCAL tool — a capability the model may call during this workflow's
  * {@see WorkflowAbstract::ai()} exchanges, and only this workflow's. Unlike a {@see \Claw\Tool\ToolInterface}
@@ -21,14 +23,17 @@ namespace Claw\Workflow;
 final class Tool
 {
     /**
-     * @param string  $description what the tool does — shown to the model, so be concrete
-     * @param ?string $name        the tool name the model calls; defaults to the method name in snake_case
-     * @param bool    $reviewOnly  exists only in a critic's exchange — the working steps never see it
+     * @param string       $description what the tool does — shown to the model, so be concrete
+     * @param ?string      $name        the tool name the model calls; defaults to the method name in snake_case
+     * @param bool         $reviewOnly  exists only in a critic's exchange — the working steps never see it
+     * @param list<Effect> $effects     what it does to the world ({@see Effect}), for palette filtering; an
+     *                                  empty list is read by {@see MethodTool::effects()} as "assume it writes"
      */
     public function __construct(
         public string $description,
         public ?string $name = null,
         public bool $reviewOnly = false,
+        public array $effects = [],
     ) {
     }
 }

@@ -57,6 +57,11 @@ final readonly class DefineWorkflowTool implements ToolInterface, DeferredToolIn
         ];
     }
 
+    public function effects(): array
+    {
+        return [Effect::Write];
+    }
+
     public function risk(): Risk
     {
         return Risk::Dangerous;

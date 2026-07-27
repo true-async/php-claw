@@ -66,6 +66,12 @@ final readonly class HttpTool implements ToolInterface, DeferredToolInterface
         ];
     }
 
+    public function effects(): array
+    {
+        // Network egress: it fetches (read) but can also POST/PUT and reach out to the world (write).
+        return [Effect::Read, Effect::Write];
+    }
+
     public function risk(): Risk
     {
         // Any URL is reachable and a POST changes state somewhere out there — the same class as the shell
