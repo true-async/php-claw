@@ -42,8 +42,9 @@ final readonly class EditTool implements ToolInterface
             . '"old_string" must occur EXACTLY ONCE in the file (add surrounding context to make it '
             . 'unique) unless "replace_all" is set. To change many places at once — even across different '
             . 'files — pass an "edits" array of {path, old_string, new_string, replace_all?}; they are '
-            . 'applied all-or-nothing, so if any one fails to match, none are written. Use write_file to '
-            . 'CREATE a file or replace it whole.';
+            . 'applied all-or-nothing, so if any one fails to match, none are written. Pass EITHER the '
+            . 'top-level path/old_string/new_string OR an "edits" array — not both, and not neither. Use '
+            . 'write_file to CREATE a file or replace it whole.';
     }
 
     public function inputSchema(): array
@@ -66,6 +67,7 @@ final readonly class EditTool implements ToolInterface
                             'new_string' => ['type' => 'string'],
                             'replace_all' => ['type' => 'boolean'],
                         ],
+                        'required' => ['path', 'old_string', 'new_string'],
                     ],
                 ],
             ],

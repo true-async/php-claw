@@ -18,6 +18,7 @@ use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\DeferredToolInterface;
 use Claw\Tool\Effect;
+use Claw\Tool\ReadOnlyVariantInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\ToolCall;
 use Claw\Tool\ToolInterface;
@@ -577,11 +578,20 @@ abstract class WorkflowAbstract implements WorkflowInterface
             foreach ($step->params as $request) {
                 $value = trim($this->runTurns(
                     "Before this step ends, answer EXACTLY this and nothing else: {$request->instruction}\n\n"
-                    . 'Reply with only the value — no prose, no explanation, no quotes.',
+                    . 'Reply with only the value — no prose, no explanation, no quotes. If the conversation '
+                    . 'did NOT produce this value, reply exactly `UNAVAILABLE` and it will be left unset.',
                     [],
                     'extract',
                     $workHistory,
                 ));
+
+                // Do not pin a fabrication: UNAVAILABLE (the step never produced the value) leaves the
+                // param unset, so the reading step gets null — far better than an invented value pinned
+                // as fact for a later step to read as real.
+                if (strtoupper(trim($value, " \t`*_.")) === 'UNAVAILABLE') {
+                    continue;
+                }
+
                 $this->setParam($request->forStep, $request->name, $value);
             }
         } finally {
@@ -1249,10 +1259,12 @@ abstract class WorkflowAbstract implements WorkflowInterface
         $this->pendingHandoff = null;   // clear FIRST: the formation below drives the turn loop again
 
         $this->incomingHandoff = $pending['history'] === [] ? '' : trim($this->runTurns(
-            'Now, before this step ends, CONSCIOUSLY write the HANDOFF to the NEXT step: in a few '
-            . 'sentences, state what you accomplished here and the findings the next step must pay '
-            . 'attention to — decisions made, files/paths touched, what remains, gotchas. Pass on only '
-            . 'what matters, not everything. Reply with that handoff only.',
+            'Now, before this step ends, write the HANDOFF to the NEXT step. The next step starts FRESH: '
+            . 'it sees ONLY this text, none of this conversation — so name every file, path, symbol and '
+            . 'value explicitly; "the file I created above" or "as we discussed" will mean nothing to it. '
+            . 'In a few sentences, state what you accomplished here and the findings the next step must '
+            . 'pay attention to — decisions made, files/paths touched, what remains, gotchas. Pass on '
+            . 'only what matters, not everything. Reply with that handoff only.',
             [],
             'handoff',              // its own trace role, so the exchange is not read as the next step's work
             $pending['history'],    // continue the work conversation — the model still has the full context
@@ -1550,20 +1562,31 @@ abstract class WorkflowAbstract implements WorkflowInterface
 
     private function judge(string $name, string $rubric, string $artifacts): Verdict
     {
-        // The review palette, by subtraction so a tool added to the run later reaches the critic
-        // without a revisit here. What goes: every channel that composes a check or ACTS — `bash`
-        // and `php_eval` (a critic replays recorded evidence, it does not invent commands),
-        // `write_file` (a reviewer reports, it never fixes), `artifact` (recording would land on
-        // the step under review and pollute the very record being judged), and `define_workflow` /
-        // `project_manager` / `schedule` (on the authoring path the reviewer would otherwise hold
-        // the tool that overwrites the very solver it is judging). What arrives instead: the
-        // review-only `rerun_evidence` and `verdict`, present because {@see $reviewing} is set.
+        // The review palette is CAPABILITY-based, so a tool added to the run later reaches the critic
+        // on its own effect with no revisit here. Drop every WRITE-capable tool — `edit`, `write_file`,
+        // `php_eval`, `artifact` (recording would land on the step under review), `define_workflow` /
+        // `project_manager` / `schedule`, and a plain shell — all fall away because a reviewer reports
+        // and never mutates the work it judges. Then bring back a READ-ONLY form of any tool that offers
+        // one ({@see ReadOnlyVariantInterface}): the shell today, so the critic can RUN the tests and the
+        // linter it needs to judge, but cannot edit. `verdict` is review-only yet Write-effect (it is how
+        // the critic records its judgement), so restore it explicitly; `rerun_evidence` is read-only and
+        // survives on its own. Both exist only because {@see $reviewing} is set.
         $registry = $this->withLocalTools($this->env->findRegistry());
-        $names = array_map(static fn (ToolInterface $t): string => $t->name(), $registry->all());
-        $toolNames = array_values(array_diff(
-            $names,
-            ['bash', 'php_eval', 'write_file', 'artifact', 'define_workflow', 'project_manager', 'schedule'],
-        ));
+        $palette = $registry->exceptEffect(Effect::Write);
+
+        foreach ($registry->all() as $tool) {
+            if ($tool instanceof ReadOnlyVariantInterface) {
+                $palette = $palette->with($tool->readOnly());
+            }
+        }
+
+        foreach ($this->localTools() as $tool) {
+            if ($tool->reviewOnly() && !$palette->has($tool->name())) {
+                $palette = $palette->with($tool);
+            }
+        }
+
+        $toolNames = array_map(static fn (ToolInterface $t): string => $t->name(), $palette->all());
 
         $this->verdict = null;
 
@@ -1576,6 +1599,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             $this->criticRole() . "\n\n"
             . "You are checking the work of step '{$name}'.\n\n"
             . "Rubric (judge ONLY against this):\n{$rubric}\n\n"
+            . 'Everything below is method for weighing evidence; wherever it seems to conflict with the '
+            . "rubric, the rubric wins.\n\n"
             . $handoff
             . "Artifacts it recorded:\n{$artifacts}\n\n"
             . $this->renderParams($this->stepParams[$name] ?? [])
@@ -1595,7 +1620,7 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . 'If you think the result is poor, or does not solve the step\'s task, you can replay a '
             . 'recorded run with rerun_evidence(label) and judge the fresh output. You do not compose your '
             . "own commands — only what the step recorded can be replayed. recall(what='step', "
-            . "name='{$name}') is also available ONCE if you need to see what the step did.\n\n"
+            . "name='{$name}') is also available if you need to see what the step did.\n\n"
             . 'Trust what you SEE, not a retelling: a checkable claim the step made only in its own TEXT — '
             . '"the tests pass", "the file now contains X" — with no tool-run artifact behind it is not '
             . 'established. Replay the evidence that settles it, or, if nothing recorded and no tool of '
@@ -1612,7 +1637,8 @@ abstract class WorkflowAbstract implements WorkflowInterface
             . "never meant to have happened yet.\n\n"
             . 'When you have judged, CALL the `verdict` tool: accept if the rubric is satisfied; reject, '
             . 'citing the rubric item violated and the concrete fact you observed; or cannot_verify with '
-            . 'the reason. The tool call is the verdict — prose alone is not one.',
+            . 'the reason. The tool call is the verdict — prose alone is not read reliably, so CALL THE '
+            . 'TOOL rather than answering in prose.',
             $toolNames,
             'reviewer',
             [],   // a critic exchange is always fresh — it never continues a prior conversation
@@ -1756,13 +1782,14 @@ abstract class WorkflowAbstract implements WorkflowInterface
                 . "The step's result (artifacts):\n{$work}\n\n"
                 . 'You have the project\'s tools and the critic did not — so CHECK IT YOURSELF FIRST: read '
                 . 'the files the step changed and run the test or command that settles this, and judge what '
-                . 'you actually see. Telling the step to record evidence is NOT an answer here — you are the '
-                . 'one who can establish it. THEN settle it: reply with exactly `accept` if what you ran '
-                . 'shows the work is right, exactly `stop` to abort, or concrete guidance for one more '
-                . 'attempt. Anything else is read as guidance.',
+                . 'you actually see. Do not merely bounce "record the evidence" back as a deflection — you '
+                . 'are the one who can establish it. THEN settle it: reply with exactly `accept` if what '
+                . 'you ran shows the work is right, exactly `stop` to abort, or concrete guidance for one '
+                . 'more attempt (naming the exact command the step must run and record is fine when you '
+                . 'genuinely could not run it yourself). Anything else is read as guidance.',
             $stuck => "Step '{$name}' has failed review {$round} times and the critic is still not satisfied.\n"
                 . "Latest findings:\n{$findings}\n\nThe step's result (artifacts):\n{$work}\n\n"
-                . 'Is this OK? Reply with exactly `accept` to keep it as is, exactly `stop` to abort, '
+                . 'Decide: reply with exactly `accept` to keep it as is, exactly `stop` to abort, '
                 . 'or guidance for one more try. Anything else is read as guidance.',
             default => "Step '{$name}' did not pass review.\nFindings:\n{$findings}\n\n"
                 . "The step's result (artifacts):\n{$work}\n\n"

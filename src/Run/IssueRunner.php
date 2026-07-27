@@ -25,8 +25,8 @@ use Claw\Project\IssueType;
 use Claw\Project\ProjectStoreInterface;
 use Claw\Project\RunStatus;
 use Claw\Project\Strategy;
-use Claw\Tool\BashTool;
 use Claw\Tool\Effect;
+use Claw\Tool\ReadOnlyVariantInterface;
 use Claw\Tool\RecallTool;
 use Claw\Tool\Registry;
 use Claw\Tool\Secrets;
@@ -67,10 +67,12 @@ final readonly class IssueRunner
     private const string DIRECT_SYSTEM = <<<'PROMPT'
         You are solving one small, self-contained ticket in this project, directly. It was judged not
         to need a plan or a workflow, so do the work: read what you need, make the change, and prove
-        it holds — run the linter or the tests and read their output before you believe yourself.
+        it holds — read the output of what you run before you believe yourself. A clean syntax or lint
+        check is never proof a task is finished: if the project has tests covering what you touched,
+        run them and read their result.
 
-        A clean syntax check is not proof that a task is finished. If the project has tests covering
-        what you touched, run them.
+        Tests that were already failing for reasons unrelated to your change are not yours to chase —
+        note that they were red before you started, and judge your change by what it actually touched.
 
         When the change exists and you have SEEN it work, stop and say in one line what you changed
         and what you ran to verify it. Whether the ticket counts as solved is then checked against the
@@ -78,8 +80,9 @@ final readonly class IssueRunner
         a claim that does not hold simply sends the ticket back.
 
         If you CANNOT finish — the ticket is unclear, it asks for something that is not there, or it
-        turns out to be far bigger than it looked — say so using the `[question]` protocol described
-        above: it reaches a person, and your reply comes back so you can carry on.
+        turns out to be far bigger than it looked — STOP and say plainly what blocks you. If a
+        `[question]` protocol is described below, use it to reach a person and your reply will come
+        back so you can carry on.
         PROMPT;
 
     /**
@@ -91,25 +94,29 @@ final readonly class IssueRunner
         project, claiming to address the ticket below. Your job is to establish whether they did.
 
         Do not take anyone's word for it, and do not reason from what a sensible worker would have
-        done. Look: read the files the ticket is about, and RUN the thing that would prove it — the
-        project's tests, the command in the ticket, whatever settles the question. A clean syntax
-        check proves nothing. An unread file proves nothing.
+        done. Look: read the files the ticket is about, and RUN the narrowest thing that settles it —
+        the project's tests, the command in the ticket, whatever proves the point (do not sit through a
+        full suite when one test answers the question). A clean syntax check proves nothing. An unread
+        file proves nothing.
 
         Judge only the ticket in front of you. A test suite that was already failing for unrelated
         reasons is not this ticket's problem; say so and judge what this ticket asked for.
 
-        You may read and run things. You must NOT change anything — no edits, no state-changing git or
-        shell commands. A project you modified is a verdict you invalidated.
+        Your tools are read-only against the project's source; the ordinary side effects of running a
+        check (caches, temp files, a test database) do not count as changing it. But if PROVING this
+        ticket would need you to EDIT the project, you cannot prove it — say so and judge UNSOLVED.
 
-        Your FIRST LINE is the verdict, and it must be one of these two words and NOTHING else on
-        that line — no backticks, no bold, no preamble, no trailing sentence:
+        Your FIRST LINE is the verdict, and it must be EXACTLY one of these two words, alone on that
+        line:
 
             SOLVED
             UNSOLVED
 
-        Put what you checked and what you saw on the lines AFTER it: one or two sentences naming the
-        command you ran and its result, or what is still missing. On an UNSOLVED verdict those lines
-        are what the next attempt is given to work from, so say what is wrong, not that it is wrong.
+        Anything on the SAME LINE after the word breaks it — "SOLVED. Tests green." is read as
+        UNSOLVED. Put what you checked and what you saw on the lines AFTER it: one or two sentences
+        naming the command you ran and its result, or what is still missing. On an UNSOLVED verdict
+        those lines are what the next attempt is given to work from, so say what is wrong, not that
+        it is wrong.
 
         The first line is read by code, not by a person, and a line that is neither word counts as
         UNSOLVED. If you cannot establish it either way, that is UNSOLVED — say what you could not
@@ -140,7 +147,10 @@ final readonly class IssueRunner
         THE CONTROL WORDS ARE WHOLE REPLIES. `accept`, `stop` and `ESCALATE` count only when the word is
         the ENTIRE answer — nothing before it, nothing after. A reply that merely CONTAINS one is read as
         guidance and sent back to the step, which is deliberate: "Stop rerunning the whole suite, run only
-        the failing test" is advice, not an order to abandon the run.
+        the failing test" is advice, not an order to abandon the run. So when you DO mean one of them,
+        send the word ALONE, with no reasons attached: `accept — tests pass` is NOT an acceptance, it is
+        read as guidance and mailed back to the step to act on. Your reasoning lives in the checks you
+        ran, not in the reply (case does not matter — `accept` and `ACCEPT` are the same).
 
         SETTLE IT YOURSELF — you can, and that is why you exist. You have the project's tools; the step or
         the critic could not run the check, but you can. When the block is a CHECKABLE claim — the tests
@@ -149,24 +159,23 @@ final readonly class IssueRunner
         tests or the linter YOURSELF — first work out how THIS project runs its checks (it may be a plain
         `php <file>`, a Makefile target or a composer script, not always phpunit) — and let what you observe
         decide. Your shell RUNS checks but cannot edit files: you review, you do not modify the project.
-        A `cannot_verify` is not a reason to
-        bounce "record the evidence" back to the step — it is your cue to go establish it. Guidance that
+        A critic verdict of `cannot_verify` is not a reason to bounce "record the evidence" back to the
+        step — it is your cue to go establish it yourself. Guidance that
         only repeats the critic ("record a runnable command") adds nothing; the run consulted you because
         you can do what it could not. `accept` is then your own claim, on the strength of what YOU saw — or
         because the critic's objection is about form, not substance — never because the step says so; and
         evidence proves only as much as the command behind it (a green from a test the step weakened is not
         the job done).
 
-        A BLOCKER YOU CANNOT VERIFY IS `ESCALATE`, NOT `accept`. Every "the environment is at fault" claim
-        — "the test runner is missing", "the dependency is not installed" — go and check; if you can, act
-        on what you found; if you cannot, say so upward. "This claim has no evidence behind it" is never
-        grounds to accept.
-
-        BUT FAILING TO RUN A CHECK IS NOT GROUNDS TO `stop`. If you could not launch the suite yet the code
-        plainly reads as correct, `accept` on what you READ — inspection is evidence too. `stop` is for work
-        that is WRONG or a goal that cannot be reached here (a gate that is unsatisfiable, a step looping
-        with no progress) — never for a test you simply could not start. When you can neither confirm nor
-        refute, that is `ESCALATE`, not `stop`.
+        WHEN A CHECK WILL NOT RUN, work DOWN this ladder — do not jump to a control word:
+        1. RUN it yourself first. The step or the critic could not; you have the project's tools, so try.
+        2. If it truly will not run, READ the code the step changed. Inspection is evidence: if reading
+           plainly settles that the work is right, `accept` on that; if it plainly shows the work is
+           wrong, `stop`.
+        3. If neither running nor reading settles it — including an "the environment is at fault" claim
+           ("the runner is missing", "the dependency is not installed") that you went and could not
+           confirm — that is `ESCALATE`. "This claim has no evidence behind it" is never grounds to
+           `accept`, and a check you merely could not START is never grounds to `stop`.
 
         END THE CHURN. If a step has failed several times for the SAME reason and you have seen why, decide
         — `accept` (only when you verified the work is right) or `stop` — do NOT keep saying "try again".
@@ -875,17 +884,18 @@ final readonly class IssueRunner
     /**
      * A REVIEWER's palette, shared by the two review roles here (the supervisor tier and the completion
      * judge): every read-only tool the run has — read_file, grep, glob, diff, run_tests, lint, recall —
-     * plus a READ-ONLY clone of the run's shell, so a reviewer can RUN the checks it needs but cannot edit
-     * the work it is judging. exceptEffect is capability-based: a Write tool added to the run later stays
-     * out on its own effect, with no revisit; and the read-only shell refuses the direct edit (`sed -i` on
-     * the file under review) a live supervisor once reached for.
+     * plus a READ-ONLY clone of any tool that can offer one, so a reviewer can RUN the checks it needs but
+     * cannot edit the work it is judging. exceptEffect is capability-based: a Write tool added to the run
+     * later stays out on its own effect, with no revisit; and any {@see ReadOnlyVariantInterface} tool (the
+     * shell today) comes back in a form that refuses the direct edit (`sed -i` on the file under review) a
+     * live supervisor once reached for.
      */
     private function reviewPalette(Registry $run): Registry
     {
         $palette = $run->exceptEffect(Effect::Write);
 
         foreach ($run->all() as $tool) {
-            if ($tool instanceof BashTool) {
+            if ($tool instanceof ReadOnlyVariantInterface) {
                 $palette = $palette->with($tool->readOnly());
             }
         }

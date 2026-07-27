@@ -72,8 +72,7 @@ final class SuperviseWorkflow extends WorkflowAbstract
         }
 
         $this->repairAttempted = true;
-        $this->back('repair', "The corrected class was rejected when it was saved: {$result}\n\n"
-            . 'Rewrite the FULL class fixing exactly that.');
+        $this->back('repair', "The corrected class was rejected when it was saved: {$result}");
     }
 
     private function repairPrompt(): string
@@ -83,8 +82,10 @@ final class SuperviseWorkflow extends WorkflowAbstract
         // its prior attempt. Hand it the whole brief again (the broken source and the error persist as run
         // params) with the complaint on top; the complaint alone tells it to "fix" a class it cannot see.
         $critique = $this->critique();
-        $rework = $critique === null ? '' : "A reviewer REJECTED your previous corrected class:\n\n{$critique}\n\n"
-            . "Rewrite the FULL class fixing exactly that. The complete brief follows.\n\n\n";
+        $rework = $critique === null ? '' : 'Your PREVIOUS attempt at this repair was rejected — you '
+            . "cannot see it now, but here is WHY it was rejected:\n\n{$critique}\n\n"
+            . 'Write a FRESH corrected class from the original broken source below, avoiding that '
+            . "rejection. The complete brief follows.\n\n\n";
 
         $namespace = (string) $this->param('fixedNamespace');
         $class = (string) $this->param('fixedName');
@@ -118,7 +119,9 @@ final class SuperviseWorkflow extends WorkflowAbstract
             - NEVER call PHP builtins such as file_get_contents, fopen, exec, shell_exec, system, eval,
               include/require, or a dynamic `\$var(...)` call — they are forbidden and the code is rejected
 
-            Return ONLY the corrected PHP source — no prose, no markdown fences.
+            You MAY read the project's files to trace the real cause before you rewrite. Work out the fix
+            now — you will be asked at the end to output the complete corrected source, so do not paste the
+            whole class in this turn; that request comes separately.
             PROMPT;
     }
 }

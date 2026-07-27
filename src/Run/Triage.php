@@ -104,7 +104,7 @@ final readonly class Triage
         a shelf entry, not to the kind of work, and reading one into the type is how every small bug ends
         up paying for a workflow it did not need.
 
-        THEN the FIRST decision, and it is BINARY: can the AI solve this ticket ITSELF, or does it
+        THEN the PIVOTAL decision, and it is BINARY: can the AI solve this ticket ITSELF, or does it
         need a WORKFLOW?
 
         "Itself" does NOT mean one model reply. It means ONE agent, in ONE continuous context, looping
@@ -123,20 +123,20 @@ final readonly class Triage
         something on the shelf would also fit, `direct` still wins: a shelf entry spends a whole workflow
         to do what one continuous sitting would have done.
 
-        ONLY when the answer is honestly no — you cannot name the files without going to find out,
-        or the work truly has several distinct stages — choose which multi-stage shape, listed
+        ONLY when the answer is honestly no — even after looking, you cannot bound the change to one
+        continuous sitting, or the work truly has several distinct stages — choose which multi-stage shape, listed
         CHEAPEST FIRST (that order is the tie-break: when two fit, take the earlier one):
 
         - `library`   — the work needs more than one sitting, AND one of the ready-made WORKFLOWS listed
                         in the ticket brief fits it as it stands. The cheapest of the shelf verdicts: it
                         is code a person wrote and tested, it runs as written, and nothing is generated.
-                        Name it when you record the verdict.
+                        Name it as the `workflow` argument when you record the verdict.
         - `approach`  — the work needs more than one sitting, and no ready-made workflow fits, but one of
                         the listed APPROACHES does. An
                         approach is a written strategy for work of this kind; a solver is generated for
                         THIS ticket that follows it. Costs a generation pass, and buys a solver shaped to
                         the ticket rather than to the average of every ticket like it. Name the approach
-                        when you record the verdict.
+                        as the `workflow` argument when you record the verdict.
         - `generate`  — nothing on the shelf fits at all, so a solver is written from nothing. The last
                         resort before a person: say in your reason why no approach fitted, because if
                         one nearly did, the answer is to say so rather than to improvise.

@@ -21,6 +21,7 @@ use Claw\Exceptions\WorkflowException;
 use Claw\Project\Issue;
 use Claw\Project\Project;
 use Claw\Tool\Effect;
+use Claw\Tool\ReadOnlyVariantInterface;
 use Claw\Tool\Registry;
 use Claw\Tool\Risk;
 use Claw\Tool\ToolCall;
@@ -806,17 +807,19 @@ final class WorkflowAbstractTest
     }
 
     #[Test]
-    public function theCriticsPaletteReplacesComposedCommandsWithRecordedEvidence(): void
+    public function theCriticsPaletteDropsWritersButKeepsAReadOnlyShell(): void
     {
-        // The critic reads whatever it needs, but the compose-a-command channels are deliberately
-        // absent from its palette: it executes only through `rerun_evidence` (replaying commands the
-        // reviewed step recorded) and it answers through `verdict`. Bare bash burned real review
-        // rounds on invented invocations, and `artifact` would record onto the very step under
-        // review. The review-only tools, in turn, must not exist for the working step.
+        // The critic is READ-ONLY by CAPABILITY, not by a name list: every write-capable tool is
+        // dropped (so `edit` cannot reach the work it judges, and `artifact` cannot record onto the
+        // very step under review), EXCEPT that a tool offering a read-only variant (the shell) comes
+        // back in that form — the critic can RUN the tests it needs but not mutate. It answers through
+        // `verdict` and replays recorded runs through `rerun_evidence`; the review-only tools, in turn,
+        // must not exist for the working step.
         $worker = new ScriptedAgent($this->answer('the work'), $this->answer('OK'));
         $registry = new Registry();
-        $registry->add($this->echoTool('read'));
-        $registry->add($this->echoTool('bash'));
+        $registry->add($this->readOnlyEchoTool('read'));   // read-only: survives untouched
+        $registry->add($this->echoTool('edit'));           // read+write, no variant: gone for the critic
+        $registry->add($this->readOnlyShellTool('bash'));  // read+write, offers a read-only variant
         $wf = new class ($this->config(worker: $worker, registry: $registry), 'r1') extends WorkflowAbstract {
             public function name(): string
             {
@@ -837,15 +840,16 @@ final class WorkflowAbstractTest
 
         $wf->run();
 
-        // request 0 = the step: the run's tools plus `artifact`; the review-only tools do not exist here.
+        // request 0 = the step: the run's full tools plus `artifact`; review-only tools do not exist here.
         $step = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[0]->tools);
         sort($step);
-        Assert::same($step, ['artifact', 'bash', 'read']);
+        Assert::same($step, ['artifact', 'bash', 'edit', 'read']);
 
-        // request 1 = the critic: bash and artifact are gone; rerun_evidence and verdict arrived.
+        // request 1 = the critic: `edit` is gone (write, no read-only form); `bash` returns in its
+        // read-only variant; rerun_evidence and verdict arrived.
         $critic = array_map(static fn (ToolSpec $spec): string => $spec->name, $worker->requests[1]->tools);
         sort($critic);
-        Assert::same($critic, ['read', 'rerun_evidence', 'verdict']);
+        Assert::same($critic, ['bash', 'read', 'rerun_evidence', 'verdict']);
     }
 
     #[Test]
@@ -2529,6 +2533,91 @@ final class WorkflowAbstractTest
             public function handle(array $input): string
             {
                 return 'ran:' . (\is_string($input['x'] ?? null) ? $input['x'] : '');
+            }
+        };
+    }
+
+    /** A purely read-only tool — it survives a reviewer's capability filter untouched. */
+    private function readOnlyEchoTool(string $name): ToolInterface
+    {
+        return new class ($name) implements ToolInterface {
+            public function __construct(private readonly string $toolName)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->toolName;
+            }
+
+            public function description(): string
+            {
+                return 'a read-only tool';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return [Effect::Read];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ran';
+            }
+        };
+    }
+
+    /** A write-capable shell that can hand back a read-only variant of itself — the reviewer keeps that form. */
+    private function readOnlyShellTool(string $name): ToolInterface
+    {
+        return new class ($name) implements ToolInterface, ReadOnlyVariantInterface {
+            public function __construct(private readonly string $toolName, private readonly bool $ro = false)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->toolName;
+            }
+
+            public function description(): string
+            {
+                return 'a shell';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function effects(): array
+            {
+                return $this->ro ? [Effect::Read] : [Effect::Read, Effect::Write];
+            }
+
+            public function risk(): Risk
+            {
+                return Risk::Safe;
+            }
+
+            public function readOnly(): ToolInterface
+            {
+                return new self($this->toolName, true);
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ran';
             }
         };
     }

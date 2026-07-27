@@ -13,7 +13,7 @@ use Claw\Exceptions\ToolException;
  * proc_open's pipes are driven by libuv, so the read is non-blocking; whether a
  * given command is allowed is the permission layer's job, not this tool's.
  */
-final class BashTool implements ToolInterface, ReportsResultMetaInterface
+final class BashTool implements ToolInterface, ReportsResultMetaInterface, ReadOnlyVariantInterface
 {
     /**
      * Signal numbers rather than `SIGTERM`/`SIGKILL`, because those constants come from `pcntl` and this
@@ -80,12 +80,17 @@ final class BashTool implements ToolInterface, ReportsResultMetaInterface
         $names = ($this->secrets ?? Secrets::none())->names();
 
         if ($names === []) {
-            return 'Run a shell command in the workspace and return its combined output and exit code.';
+            return 'Run a shell command in the workspace and return its combined output and exit code. For '
+                . 'editing files, reading them, running tests, linting, or evaluating PHP, prefer the '
+                . 'dedicated tools (edit, read_file, run_tests, lint, php_eval); use bash for what they do '
+                . 'not cover.';
         }
 
         // Named, never valued. The model has to know a credential is reachable or it cannot use one; it
         // must not know what the credential IS, or it could put it somewhere that gets written down.
-        return 'Run a shell command in the workspace and return its combined output and exit code. '
+        return 'Run a shell command in the workspace and return its combined output and exit code. For '
+            . 'editing files, reading them, running tests, linting, or evaluating PHP, prefer the dedicated '
+            . 'tools (edit, read_file, run_tests, lint, php_eval); use bash for what they do not cover. '
             . 'This project has credentials available to the shell as environment variables: $'
             . implode(', $', $names) . '. Use them by name — `curl -H "Authorization: Bearer $'
             . $names[0] . '" …` — and do not try to read or copy the values. A value printed verbatim is '

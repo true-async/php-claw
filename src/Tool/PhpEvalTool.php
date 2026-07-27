@@ -27,7 +27,9 @@ final readonly class PhpEvalTool implements ToolInterface, DeferredToolInterface
 
     public function description(): string
     {
-        return 'Evaluate a single PHP expression and return its value, e.g. strlen("abc") or 2 ** 10. Runs arbitrary PHP.';
+        return 'Evaluate ONE PHP expression and return its value, e.g. strlen("abc") or 2 ** 10 — a single '
+            . 'expression with no semicolons and no trailing statements. For multi-line scripts, running a '
+            . 'command, or side effects, use bash (php -r "...") instead.';
     }
 
     public function inputSchema(): array
