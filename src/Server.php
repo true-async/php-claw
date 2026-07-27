@@ -1021,17 +1021,33 @@ final class Server
     {
         $ws->subscribe($topic);
 
-        if (!\preg_match('#^project/([^/]+)/run/([^/]+)/trace$#', $topic, $m)) {
+        if (\preg_match('#^project/([^/]+)/run/([^/]+)/trace$#', $topic, $m)) {
+            foreach ($this->reader($m[1])->tail($m[2], $since) as $row) {
+                $ws->send(\json_encode([
+                    'topic' => $topic,
+                    'kind' => 'trace',
+                    'seq' => $row['seq'],
+                    'data' => $row,
+                ], self::JSON));
+            }
+
             return;
         }
 
-        foreach ($this->reader($m[1])->tail($m[2], $since) as $row) {
-            $ws->send(\json_encode([
-                'topic' => $topic,
-                'kind' => 'trace',
-                'seq' => $row['seq'],
-                'data' => $row,
-            ], self::JSON));
+        // A board room. Bootstrap this subscriber with the current board — the same first-tick dump the
+        // SSE stream does from a per-connection cursor. Without it a late WS subscriber sees nothing
+        // until an issue next changes, because broadcastBoards() diffs against a cursor that is
+        // server-global, not per-connection: an issue unchanged since the server last published it is
+        // never re-sent, so a room a client joins later cannot be arrived at from subscribe alone.
+        // Subscribe FIRST (above) so nothing published mid-dump is lost; the client keys by issue id.
+        if (\preg_match('#^project/([^/]+)/issues$#', $topic, $m)) {
+            foreach ($this->issues($m[1]) as $issue) {
+                $ws->send(\json_encode([
+                    'topic' => $topic,
+                    'kind' => 'issue',
+                    'data' => $issue,
+                ], self::JSON));
+            }
         }
     }
 
