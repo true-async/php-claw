@@ -47,6 +47,11 @@ final class ToolFactory
         // bounded output, they skip vendor/.git, and a reviewer can hold them without a shell.
         $registry->add(new GrepTool($workspace));
         $registry->add(new GlobTool($workspace));
+        // Curated commands as first-class READ tools: what changed (diff), the tests, a lint/analysis.
+        // A step records their output as evidence; a reviewer runs them to judge — no raw shell needed.
+        $registry->add(new DiffTool($workspace, $secrets, $timeoutMs));
+        $registry->add(new RunTestsTool($workspace, $secrets, $timeoutMs));
+        $registry->add(new LintTool($workspace, $secrets, $timeoutMs));
         // The network, as a first-class capability rather than a curl shelled out through bash: a step
         // that needs external data carries `http_request` in its palette, and one that must not touch the
         // network simply does not. Bounded by the run's tool timeout so a hung request cannot hold it open.
