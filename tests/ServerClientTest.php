@@ -157,4 +157,31 @@ final class ServerClientTest
 
         Assert::same($client->trace(['host' => '127.0.0.1', 'port' => 8787], 'proj', '9', 0), []);
     }
+
+    #[Test]
+    public function anAnswerAcceptedReturnsQuietlyAndCarriesTheText(): void
+    {
+        $http = new FakeHttpClient(new HttpResponse(202, ''));
+        new ServerClient($http, $this->workspace, '/opt/claw')
+            ->answer(['host' => '127.0.0.1', 'port' => 8787], 'proj', '7', 'use the merge sort');
+
+        Assert::same(str_ends_with((string) $http->lastUrl, '/issues/7/answer'), true);
+        Assert::same(str_contains((string) $http->lastBody, 'use the merge sort'), true);
+    }
+
+    #[Test]
+    public function answeringAGateThatIsNotWaitingIsReported(): void
+    {
+        $threw = false;
+
+        try {
+            $this->client(new HttpResponse(409, '{"error":"the run is not waiting for an answer right now"}'))
+                ->answer(['host' => '127.0.0.1', 'port' => 8787], 'proj', '7', 'hi');
+        } catch (ClawException $e) {
+            $threw = true;
+            Assert::same(str_contains($e->getMessage(), 'not waiting'), true);
+        }
+
+        Assert::same($threw, true);
+    }
 }

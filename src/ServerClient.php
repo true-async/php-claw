@@ -94,6 +94,36 @@ final readonly class ServerClient
     }
 
     /**
+     * Send a person's reply to a run's open gate.
+     *
+     * @param array{host: string, port: int} $server
+     *
+     * @throws ClawException when the run is not waiting (409) or the server refuses the answer
+     */
+    public function answer(array $server, string $key, string $issueId, string $text): void
+    {
+        $url = sprintf(
+            'http://%s:%d/api/projects/%s/issues/%s/answer',
+            $server['host'],
+            $server['port'],
+            rawurlencode($key),
+            rawurlencode($issueId),
+        );
+
+        $response = $this->http->post($url, (string) json_encode(['text' => $text]), ['Content-Type: application/json']);
+
+        if ($response->status === 202) {
+            return;
+        }
+
+        if ($response->status === 409) {
+            throw new ClawException('the run is not waiting for an answer right now');
+        }
+
+        throw new ClawException("the server refused the answer (HTTP {$response->status})");
+    }
+
+    /**
      * The runs recorded for an issue, oldest first — how the CLI finds the run a start produced, since
      * the id is minted inside the run and not returned by the start.
      *

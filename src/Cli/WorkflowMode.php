@@ -303,30 +303,31 @@ final class WorkflowMode
     {
         $threshold = ($verbosity ?? Level::Info)->value;
         $color = stream_isatty(STDOUT) && getenv('NO_COLOR') === false;
+        $interactive = stream_isatty(STDIN);
         $since = 0;
-        $flaggedGate = false;
+        $openPrompt = null;   // the prompt of a question not yet answered, or null
+        $hinted = false;
 
         while (true) {
             foreach ($client->trace($server, $key, $runId, $since) as $row) {
                 $since = max($since, \is_int($row['seq'] ?? null) ? $row['seq'] : $since);
+                $type = (string) ($row['type'] ?? '');
+                $data = \is_array($row['data'] ?? null) ? $row['data'] : [];
+
+                if ($type === 'question') {
+                    $openPrompt = (string) ($data['prompt'] ?? 'the run is waiting for a human');
+                    $hinted = false;
+                } elseif ($type === 'answer') {
+                    $openPrompt = null;
+                }
 
                 if ((\is_int($row['level'] ?? null) ? $row['level'] : 0) < $threshold) {
                     continue;
                 }
 
-                $data = \is_array($row['data'] ?? null) ? $row['data'] : [];
-                $head = TraceFormat::line((string) ($row['phase'] ?? ''), (string) ($row['type'] ?? ''), $data);
+                $head = TraceFormat::line((string) ($row['phase'] ?? ''), $type, $data);
                 $depth = \is_int($row['depth'] ?? null) ? $row['depth'] : 0;
-                fwrite(STDOUT, str_repeat('  ', $depth) . TraceFormat::paint((string) ($row['type'] ?? ''), $head, $color) . "\n");
-
-                if (($row['type'] ?? '') === 'question' && !$flaggedGate) {
-                    $flaggedGate = true;
-                    fwrite(STDOUT, "  ⏸ waiting for a human — answer it in the dashboard; Ctrl-C detaches (the run continues).\n");
-                }
-
-                if (($row['type'] ?? '') === 'answer') {
-                    $flaggedGate = false;
-                }
+                fwrite(STDOUT, str_repeat('  ', $depth) . TraceFormat::paint($type, $head, $color) . "\n");
             }
 
             $status = $this->runStatus($client->runs($server, $key, $issueId), $runId);
@@ -343,8 +344,53 @@ final class WorkflowMode
                 return 1;
             }
 
+            // A gate is open. On a terminal, answer it here and the run carries on; otherwise say where
+            // it can be answered and keep following, so a piped `claw run` never blocks on input.
+            if ($openPrompt !== null) {
+                if ($interactive) {
+                    if ($this->answerGate($client, $server, $key, $issueId, $openPrompt)) {
+                        $openPrompt = null;
+                    } else {
+                        $interactive = false;   // input closed — stop asking, fall to the hint next round
+                    }
+                } elseif (!$hinted) {
+                    $hinted = true;
+                    fwrite(STDOUT, "  ⏸ waiting for a human — answer it in the dashboard; Ctrl-C detaches (the run continues).\n");
+                }
+            }
+
             usleep(500_000);
         }
+    }
+
+    /**
+     * Ask the person the run's open question and send their reply.
+     *
+     * Returns false ONLY when the input stream is closed (Ctrl-D / a pipe ran dry) — the one case the
+     * caller must stop asking on, or it would spin on an EOF that never carries text. An answer that
+     * the server rejects returns true: the gate is handled (it was answered elsewhere, or the run moved
+     * on), so the caller drops it rather than re-prompting in a tight loop.
+     *
+     * @param array{host: string, port: int} $server
+     */
+    private function answerGate(ServerClient $client, array $server, string $key, string $issueId, string $prompt): bool
+    {
+        fwrite(STDOUT, "\n⏸ {$prompt}\n› ");
+        $line = fgets(STDIN);
+
+        if ($line === false) {
+            fwrite(STDOUT, "\n  (input closed — detaching; the run continues, answer it in the dashboard.)\n");
+
+            return false;
+        }
+
+        try {
+            $client->answer($server, $key, $issueId, trim($line));
+        } catch (ClawException $e) {
+            fwrite(STDERR, '  ' . $e->getMessage() . "\n");
+        }
+
+        return true;
     }
 
     /**
