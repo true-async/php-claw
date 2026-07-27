@@ -17,6 +17,7 @@ use Claw\Run\ConsoleRunFrontend;
 use Claw\Run\IssueRunner;
 use Claw\Run\Triage;
 use Claw\Server;
+use Claw\ServerLocator;
 use Claw\Trace\Level;
 use Claw\Trace\TraceReader;
 
@@ -97,6 +98,18 @@ final class WorkflowMode
         if (!\class_exists('TrueAsync\\HttpServer')) {
             fwrite(STDERR, "claw serve: the TrueAsync server extension is not loaded.\n");
             fwrite(STDERR, "  php -d extension=/path/to/true_async_server.so bin/claw serve\n");
+
+            return 1;
+        }
+
+        // One server per workspace: two would write the same project dbs. A record left by a crash is
+        // ignored — the guard is the live connection, not the file.
+        $locator = new ServerLocator($this->appHome());
+        $existing = $locator->locate();
+
+        if ($existing !== null && $locator->alive($existing['host'], $existing['port'])) {
+            fwrite(STDERR, 'claw serve: a server for this workspace is already running at '
+                . "{$existing['host']}:{$existing['port']} (pid {$existing['pid']}).\n");
 
             return 1;
         }

@@ -138,7 +138,16 @@ final class Server
 
         $this->adoptOrphanedRuns();
 
+        // Record where we can be reached, then serve. A process that FAILS to bind never became the
+        // server, so it must not clear the record on the way out — the winner of the bind race owns
+        // it. Only a clean return from start() (a graceful stop) drops the file; a crash leaves it for
+        // the next serve's liveness check to discard.
+        $locator = new ServerLocator($this->workspace);
+        $locator->record($host, $port);
+
         $server->start();
+
+        $locator->clear();
     }
 
     /**
