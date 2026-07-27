@@ -6,6 +6,7 @@ namespace Claw;
 
 use Claw\Exceptions\ClawException;
 use Claw\Http\HttpClientInterface;
+use Claw\Http\HttpResponse;
 
 /**
  * The CLI's side of the one-writer rule: it does not open a project db, it asks the server to. The
@@ -96,11 +97,16 @@ final readonly class ServerClient
     /**
      * Send a person's reply to a run's open gate.
      *
+     * $questionId names the question being answered (0 to omit). The server refuses a reply aimed at a
+     * question that has since been answered and replaced — the id is what closes the terminal-vs-dashboard
+     * race the blocking prompt opens.
+     *
      * @param array{host: string, port: int} $server
      *
-     * @throws ClawException when the run is not waiting (409) or the server refuses the answer
+     * @throws ClawException when the run is not waiting, the question has moved on (409), or the server
+     *                       refuses the answer
      */
-    public function answer(array $server, string $key, string $issueId, string $text): void
+    public function answer(array $server, string $key, string $issueId, string $text, int $questionId = 0): void
     {
         $url = sprintf(
             'http://%s:%d/api/projects/%s/issues/%s/answer',
@@ -110,7 +116,13 @@ final readonly class ServerClient
             rawurlencode($issueId),
         );
 
-        $body = json_encode(['text' => $text]);
+        $fields = ['text' => $text];
+
+        if ($questionId > 0) {
+            $fields['question'] = $questionId;
+        }
+
+        $body = json_encode($fields);
 
         if ($body === false) {
             throw new ClawException('cannot send the answer: it is not valid text');
@@ -123,10 +135,18 @@ final readonly class ServerClient
         }
 
         if ($response->status === 409) {
-            throw new ClawException('the run is not waiting for an answer right now');
+            throw new ClawException($this->errorText($response) ?? 'the run is not waiting for an answer right now');
         }
 
         throw new ClawException("the server refused the answer (HTTP {$response->status})");
+    }
+
+    /** The server's own `error` message from a JSON body, or null when there is not one to show. */
+    private function errorText(HttpResponse $response): ?string
+    {
+        $data = json_decode($response->body, true);
+
+        return \is_array($data) && \is_string($data['error'] ?? null) ? $data['error'] : null;
     }
 
     /**
