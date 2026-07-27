@@ -305,7 +305,7 @@ final class WorkflowMode
         $color = stream_isatty(STDOUT) && getenv('NO_COLOR') === false;
         $interactive = stream_isatty(STDIN);
         $since = 0;
-        $openPrompt = null;   // the prompt of a question not yet answered, or null
+        $openPrompt = null;
         $hinted = false;
 
         while (true) {
@@ -351,7 +351,10 @@ final class WorkflowMode
                     if ($this->answerGate($client, $server, $key, $issueId, $openPrompt)) {
                         $openPrompt = null;
                     } else {
-                        $interactive = false;   // input closed — stop asking, fall to the hint next round
+                        // input closed — stop asking; suppress the hint this round so it is not doubled
+                        // with the "detaching" line answerGate just printed, and let the next gate re-hint
+                        $interactive = false;
+                        $hinted = true;
                     }
                 } elseif (!$hinted) {
                     $hinted = true;
@@ -375,22 +378,35 @@ final class WorkflowMode
      */
     private function answerGate(ServerClient $client, array $server, string $key, string $issueId, string $prompt): bool
     {
-        fwrite(STDOUT, "\n⏸ {$prompt}\n› ");
-        $line = fgets(STDIN);
+        fwrite(STDOUT, "\n⏸ {$prompt}\n");
 
-        if ($line === false) {
-            fwrite(STDOUT, "\n  (input closed — detaching; the run continues, answer it in the dashboard.)\n");
+        while (true) {
+            fwrite(STDOUT, '› ');
+            $line = fgets(STDIN);
 
-            return false;
+            if ($line === false) {
+                fwrite(STDOUT, "\n  (input closed — detaching; the run continues, answer it in the dashboard.)\n");
+
+                return false;
+            }
+
+            $text = trim($line);
+
+            if ($text === '') {
+                // An empty reply wakes the run with nothing to act on — ask again rather than spend the gate.
+                fwrite(STDOUT, "  (type a reply — an empty answer would spend the gate for nothing.)\n");
+
+                continue;
+            }
+
+            try {
+                $client->answer($server, $key, $issueId, $text);
+            } catch (ClawException $e) {
+                fwrite(STDERR, '  ' . $e->getMessage() . "\n");
+            }
+
+            return true;
         }
-
-        try {
-            $client->answer($server, $key, $issueId, trim($line));
-        } catch (ClawException $e) {
-            fwrite(STDERR, '  ' . $e->getMessage() . "\n");
-        }
-
-        return true;
     }
 
     /**

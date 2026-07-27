@@ -110,7 +110,13 @@ final readonly class ServerClient
             rawurlencode($issueId),
         );
 
-        $response = $this->http->post($url, (string) json_encode(['text' => $text]), ['Content-Type: application/json']);
+        $body = json_encode(['text' => $text]);
+
+        if ($body === false) {
+            throw new ClawException('cannot send the answer: it is not valid text');
+        }
+
+        $response = $this->http->post($url, $body, ['Content-Type: application/json']);
 
         if ($response->status === 202) {
             return;
