@@ -95,6 +95,44 @@ final readonly class ServerClient
     }
 
     /**
+     * Open an issue on the server and return its id. The server records it and triages it behind the
+     * response, so this returns as soon as the ticket exists — it never waits on a model.
+     *
+     * @param array{host: string, port: int} $server
+     *
+     * @throws ClawException when the server rejects the title or refuses to open the issue
+     */
+    public function openIssue(array $server, string $key, string $title): int
+    {
+        $url = sprintf(
+            'http://%s:%d/api/projects/%s/issues',
+            $server['host'],
+            $server['port'],
+            rawurlencode($key),
+        );
+
+        $body = json_encode(['title' => $title]);
+
+        if ($body === false) {
+            throw new ClawException('cannot send the issue title: it is not valid text');
+        }
+
+        $response = $this->http->post($url, $body, ['Content-Type: application/json']);
+
+        if ($response->status === 201) {
+            $data = json_decode($response->body, true);
+
+            return \is_array($data) && isset($data['id']) ? (int) $data['id'] : 0;
+        }
+
+        if ($response->status === 400) {
+            throw new ClawException($this->errorText($response) ?? 'the server rejected the issue');
+        }
+
+        throw new ClawException("the server refused to open the issue (HTTP {$response->status})");
+    }
+
+    /**
      * Send a person's reply to a run's open gate.
      *
      * $questionId names the question being answered (0 to omit). The server refuses a reply aimed at a
