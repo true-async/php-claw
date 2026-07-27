@@ -39,6 +39,9 @@ final class ToolFactory
         // output. See ReadFileTool::handle().
         $registry->add(new ReadFileTool($workspace, secrets: $secrets));
         $registry->add(new WriteFileTool($workspace));
+        // The default WRITE: a targeted old->new replace (one call can carry many edits, across files,
+        // all-or-nothing). write_file stays for creating a file or a full rewrite.
+        $registry->add(new EditTool($workspace));
         $registry->add(new ListFilesTool($workspace));
         // Locate-before-read, as their own READ-only tools rather than grep/find shelled through bash:
         // bounded output, they skip vendor/.git, and a reviewer can hold them without a shell.
