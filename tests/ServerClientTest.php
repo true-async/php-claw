@@ -170,16 +170,36 @@ final class ServerClientTest
     }
 
     #[Test]
-    public function answeringAGateThatIsNotWaitingIsReported(): void
+    public function anAnswerNamesTheQuestionItIsFor(): void
+    {
+        $http = new FakeHttpClient(new HttpResponse(202, ''));
+        new ServerClient($http, $this->workspace, '/opt/claw')
+            ->answer(['host' => '127.0.0.1', 'port' => 8787], 'proj', '7', 'merge sort', 42);
+
+        Assert::same(str_contains((string) $http->lastBody, '"question":42'), true);
+    }
+
+    #[Test]
+    public function withoutAQuestionIdNoneIsSent(): void
+    {
+        $http = new FakeHttpClient(new HttpResponse(202, ''));
+        new ServerClient($http, $this->workspace, '/opt/claw')
+            ->answer(['host' => '127.0.0.1', 'port' => 8787], 'proj', '7', 'hi');
+
+        Assert::same(str_contains((string) $http->lastBody, 'question'), false);
+    }
+
+    #[Test]
+    public function aRejectedAnswerSurfacesTheServersOwnReason(): void
     {
         $threw = false;
 
         try {
-            $this->client(new HttpResponse(409, '{"error":"the run is not waiting for an answer right now"}'))
-                ->answer(['host' => '127.0.0.1', 'port' => 8787], 'proj', '7', 'hi');
+            $this->client(new HttpResponse(409, '{"error":"that question has been answered — a newer one is waiting"}'))
+                ->answer(['host' => '127.0.0.1', 'port' => 8787], 'proj', '7', 'hi', 42);
         } catch (ClawException $e) {
             $threw = true;
-            Assert::same(str_contains($e->getMessage(), 'not waiting'), true);
+            Assert::same(str_contains($e->getMessage(), 'a newer one is waiting'), true);
         }
 
         Assert::same($threw, true);

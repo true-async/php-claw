@@ -306,6 +306,7 @@ final class WorkflowMode
         $interactive = stream_isatty(STDIN);
         $since = 0;
         $openPrompt = null;
+        $openQuestion = 0;
         $hinted = false;
 
         while (true) {
@@ -316,6 +317,7 @@ final class WorkflowMode
 
                 if ($type === 'question') {
                     $openPrompt = (string) ($data['prompt'] ?? 'the run is waiting for a human');
+                    $openQuestion = \is_int($row['spanId'] ?? null) ? $row['spanId'] : 0;
                     $hinted = false;
                 } elseif ($type === 'answer') {
                     $openPrompt = null;
@@ -348,7 +350,7 @@ final class WorkflowMode
             // it can be answered and keep following, so a piped `claw run` never blocks on input.
             if ($openPrompt !== null) {
                 if ($interactive) {
-                    if ($this->answerGate($client, $server, $key, $issueId, $openPrompt)) {
+                    if ($this->answerGate($client, $server, $key, $issueId, $openPrompt, $openQuestion)) {
                         $openPrompt = null;
                     } else {
                         // input closed — stop asking; suppress the hint this round so it is not doubled
@@ -376,7 +378,7 @@ final class WorkflowMode
      *
      * @param array{host: string, port: int} $server
      */
-    private function answerGate(ServerClient $client, array $server, string $key, string $issueId, string $prompt): bool
+    private function answerGate(ServerClient $client, array $server, string $key, string $issueId, string $prompt, int $questionId): bool
     {
         fwrite(STDOUT, "\n⏸ {$prompt}\n");
 
@@ -400,7 +402,7 @@ final class WorkflowMode
             }
 
             try {
-                $client->answer($server, $key, $issueId, $text);
+                $client->answer($server, $key, $issueId, $text, $questionId);
             } catch (ClawException $e) {
                 fwrite(STDERR, '  ' . $e->getMessage() . "\n");
             }

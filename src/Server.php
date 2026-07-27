@@ -223,6 +223,20 @@ final class Server
      * the resumed run reads the journal on its way into the gate, so the answer has to be there before
      * it looks. Reversed, it would ask again and the reply would land on a question nobody is at.
      */
+    /** The id of the question an issue's run is currently waiting on, or null when none is open. */
+    private function openQuestionId(ProjectStoreInterface $store, string $issueId): ?int
+    {
+        $reader = new TraceReader($store->pdo());
+
+        foreach ($store->runningRuns() as $run) {
+            if ($run['issue'] === $issueId && ($gate = $reader->openGate($run['id'])) !== null) {
+                return (int) $gate['id'];
+            }
+        }
+
+        return null;
+    }
+
     private function deliverToADeadGate(
         HttpResponse $response,
         ProjectStoreInterface $store,
@@ -1252,6 +1266,20 @@ final class Server
 
         $payload = \json_decode($request->getBody(), true);
         $text = \is_array($payload) && isset($payload['text']) ? (string) $payload['text'] : '';
+
+        // When the caller names the question it is answering, refuse a reply meant for one that has
+        // already moved on — a terminal user typing while the same gate was answered in the dashboard
+        // and the run opened a new question. The id lives in the trace the caller is reading. Callers
+        // that send no id (older ones) keep the previous behaviour.
+        $question = \is_array($payload) && isset($payload['question']) ? (int) $payload['question'] : 0;
+        $open = $question > 0 ? $this->openQuestionId($store, $issueId) : null;
+
+        if ($open !== null && $open !== $question) {
+            $response->json(['error' => 'that question has been answered — a newer one is waiting'], 409);
+
+            return;
+        }
+
         $channel = $this->gates[$key . '/' . $issueId] ?? null;
 
         if ($channel !== null) {
