@@ -170,6 +170,34 @@ final class ServerClientTest
     }
 
     #[Test]
+    public function openingAnIssueReturnsItsIdAndCarriesTheTitle(): void
+    {
+        $http = new FakeHttpClient(new HttpResponse(201, '{"id":42,"title":"add isEven","status":"open"}'));
+        $id = new ServerClient($http, $this->workspace, '/opt/claw')
+            ->openIssue(['host' => '127.0.0.1', 'port' => 8787], 'proj', 'add isEven');
+
+        Assert::same($id, 42);
+        Assert::same(str_ends_with((string) $http->lastUrl, '/api/projects/proj/issues'), true);
+        Assert::same(str_contains((string) $http->lastBody, 'add isEven'), true);
+    }
+
+    #[Test]
+    public function aRejectedIssueSurfacesTheServersReason(): void
+    {
+        $threw = false;
+
+        try {
+            $this->client(new HttpResponse(400, '{"error":"a title is required"}'))
+                ->openIssue(['host' => '127.0.0.1', 'port' => 8787], 'proj', '');
+        } catch (ClawException $e) {
+            $threw = true;
+            Assert::same(str_contains($e->getMessage(), 'title is required'), true);
+        }
+
+        Assert::same($threw, true);
+    }
+
+    #[Test]
     public function anAnswerNamesTheQuestionItIsFor(): void
     {
         $http = new FakeHttpClient(new HttpResponse(202, ''));

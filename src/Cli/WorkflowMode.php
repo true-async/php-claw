@@ -4,17 +4,12 @@ declare(strict_types=1);
 
 namespace Claw\Cli;
 
-use Claw\Agent\AgentFactory;
 use Claw\Config;
 use Claw\Exceptions\ClawException;
 use Claw\Http\CurlHttpClient;
 use Claw\Knowledge\KnowledgeBase;
-use Claw\Project\Issue;
-use Claw\Project\IssueStatus;
 use Claw\Project\ProjectStore;
 use Claw\Project\RunStatus;
-use Claw\Project\Strategy;
-use Claw\Run\Triage;
 use Claw\Server;
 use Claw\ServerClient;
 use Claw\ServerLocator;
@@ -181,54 +176,35 @@ final class WorkflowMode
         }
 
         try {
-            $store = $this->resolve($projectDir);
-            $issue = $store->addIssue($title);
+            // Read-only: the CLI opens the db only to name the project the server should file under. The
+            // write — and the triage behind it — belong to the server, the one process that writes.
+            $key = $this->resolve($projectDir)->project()->id;
         } catch (ClawException $e) {
             fwrite(STDERR, 'claw -i: ' . $e->getMessage() . "\n");
 
             return 1;
         }
 
-        fwrite(STDOUT, "Issue #{$issue->id} opened: {$issue->title}\n");
-        fwrite(STDOUT, '  project: ' . $issue->project . "\n");
-        fwrite(STDOUT, '  status:  ' . $issue->status->name . "\n");
+        $client = new ServerClient(new CurlHttpClient(), $this->appHome(), $this->root);
 
-        // The ticket is already open and recorded — everything below is the second stage, and the
-        // issue stands whether or not it succeeds. Run inline rather than detached: on a one-shot
-        // command there is nothing left to watch the verdict arrive, so it is worth the wait here.
-        fwrite(STDOUT, "  analysing…\n");
-        $strategy = $this->triage($store, $issue);
-
-        // Three outcomes, and "no strategy" is not one thing: the ProjectManager may have PARKED the
-        // ticket for a person, which is a decision, not the absence of one.
-        $triaged = $store->loadIssue($issue->id);
-        $parked = $triaged->status === IssueStatus::WaitingHuman;
-        $type = $triaged->type === null ? 'untyped' : $triaged->type->value;
-
-        fwrite(STDOUT, match (true) {
-            $strategy !== null => "  type: {$type}\n  strategy: {$strategy->value}\n",
-            $parked => "  strategy: none — parked for a person (the ticket cannot be worked on as written)\n",
-            default => "  strategy: not decided (analysis recorded nothing — run `claw run` to solve it anyway)\n",
-        });
-
-        return 0;
-    }
-
-    /**
-     * The ProjectManager's analysis of a freshly opened ticket. Returns the strategy it recorded, or
-     * null when there is no usable agent configured or the analysis produced nothing — neither is a
-     * reason to fail the command, because the ticket itself is already safely open.
-     */
-    private function triage(ProjectStore $store, Issue $issue): ?Strategy
-    {
         try {
-            $config = Config::load($this->root . '/.env');
-            $agent = AgentFactory::make($config, new CurlHttpClient());
-        } catch (ClawException) {
-            return null;
+            if ($client->running() === null) {
+                fwrite(STDOUT, "claw -i: no server running for this workspace — starting one…\n");
+            }
+
+            $server = $client->ensure();
+            $id = $client->openIssue($server, $key, $title);
+        } catch (ClawException $e) {
+            fwrite(STDERR, 'claw -i: ' . $e->getMessage() . "\n");
+
+            return 1;
         }
 
-        return $agent === null ? null : new Triage($store, $config, $agent)->analyse($issue);
+        // Fire-and-forget: the ticket exists and the server triages it behind the response. Nothing to
+        // wait for, so nothing is shown but the confirmation.
+        fwrite(STDOUT, "OK — issue #{$id} opened.\n");
+
+        return 0;
     }
 
     /**
