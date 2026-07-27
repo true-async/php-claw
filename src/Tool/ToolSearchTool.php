@@ -80,43 +80,88 @@ final readonly class ToolSearchTool implements ToolInterface
     }
 
     /**
-     * Rank the DEFERRED tools by how well $query hits their tags, name and description (a term is a hit if
-     * it appears anywhere in that text). Deterministic — the turn loop re-runs it to learn which tools a
-     * `search_tools` call loaded. Best match first; empty when nothing hits.
+     * Rank the DEFERRED tools against $query by BM25 over their tags, name and description. BM25 beats a
+     * flat term-count in the two ways that matter for a small tool catalogue: a rare, distinctive term (a
+     * tag like "schedule") outweighs a common one ("the", "a"), and a tool whose tags repeat the term
+     * scores above one that mentions it once. Deterministic — the turn loop re-runs it to learn which tools
+     * a `search_tools` call loaded. Best match first; empty when nothing hits.
      *
      * @return list<string>
      */
     public function matches(string $query): array
     {
-        $terms = array_values(array_filter(preg_split('/[^a-z0-9]+/', strtolower($query)) ?: []));
+        $queryTerms = self::tokenize($query);
 
-        if ($terms === []) {
+        if ($queryTerms === []) {
             return [];
         }
 
-        $scored = [];
+        $docs = [];   // tool name => its tokenized (name + tags + description)
 
         foreach ($this->palette->all() as $tool) {
-            if (!$tool instanceof DeferredToolInterface) {
-                continue;
+            if ($tool instanceof DeferredToolInterface) {
+                $docs[$tool->name()] = self::tokenize(
+                    $tool->name() . ' ' . implode(' ', $tool->searchTags()) . ' ' . $tool->description(),
+                );
             }
+        }
 
-            $haystack = strtolower($tool->name() . ' ' . implode(' ', $tool->searchTags()) . ' ' . $tool->description());
-            $score = 0;
+        if ($docs === []) {
+            return [];
+        }
 
-            foreach ($terms as $term) {
-                if (str_contains($haystack, $term)) {
-                    ++$score;
+        $count = \count($docs);
+        $avgLength = array_sum(array_map(static fn (array $tokens): int => \count($tokens), $docs)) / $count;
+
+        // Document frequency of each query term across the tool catalogue.
+        $documentFrequency = [];
+
+        foreach ($queryTerms as $term) {
+            $documentFrequency[$term] = 0;
+
+            foreach ($docs as $tokens) {
+                if (\in_array($term, $tokens, true)) {
+                    ++$documentFrequency[$term];
                 }
+            }
+        }
+
+        $k1 = 1.5;
+        $b = 0.75;
+        $scored = [];
+
+        foreach ($docs as $name => $tokens) {
+            $length = \count($tokens);
+            $frequency = array_count_values($tokens);
+            $score = 0.0;
+
+            foreach ($queryTerms as $term) {
+                $df = $documentFrequency[$term];
+                $tf = $frequency[$term] ?? 0;
+
+                if ($df === 0 || $tf === 0) {
+                    continue;
+                }
+
+                // The +1 IDF form stays non-negative, so a term present in every tool still counts a little
+                // rather than pushing a real hit to zero.
+                $idf = log(1 + ($count - $df + 0.5) / ($df + 0.5));
+                $score += $idf * ($tf * ($k1 + 1)) / ($tf + $k1 * (1 - $b + $b * ($length / $avgLength)));
             }
 
             if ($score > 0) {
-                $scored[$tool->name()] = $score;
+                $scored[$name] = $score;
             }
         }
 
         arsort($scored);
 
         return array_keys($scored);
+    }
+
+    /** @return list<string> lowercase alphanumeric tokens */
+    private static function tokenize(string $text): array
+    {
+        return array_values(array_filter(preg_split('/[^a-z0-9]+/', strtolower($text)) ?: []));
     }
 }
