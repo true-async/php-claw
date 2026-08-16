@@ -2,60 +2,63 @@
 
 ## Continue from
 
-`dev/PLAN.md` outranks this file. Stage **S6 — Rooms without WebSocket**, which the plan
-places BEFORE S2, next step **S6.3** (the core moves to its own name). The work is upstream,
-in `/home/edmond/true-async-server`, not in php-claw.
+`dev/PLAN.md` outranks this file. Stage **S6 is finished and removed from the plan** — its
+decision is in `dev/DECISIONS.md` (2026-08-16) and what it left behind is the last section of
+`dev/TODO.md`. The active stage is **S2 — Runs leave the HTTP worker**, next step **S2.1** (the
+pool exists and boots the autoloader). That is php-claw's own code, not upstream: the first step
+of this stage is the first php-claw code in a while.
 
-S6.3 is a `git mv` of the pub/sub core into `src/room/` and `include/room/` with `room_*`
-prefixes, and its own criterion says the diff is mechanical. What does NOT move: the PHP
-classes, the `setWs*` config, the `ws_*` keys in `getRuntimeStats()` and the test hook — a
-contract php-claw and the tests depend on. Watch the sed: those `ws_*` stat keys are string
-literals sitting next to identifiers with the same prefix.
+S1's remainder — **S1.11**, the half about what owns an obligation that must survive both a normal
+resume and a death — waits on Sage by Edmond's decision, not on the executor.
 
-## Landed this session, both merged into true-async/server main
+## What S6 delivered, all merged into true-async/server main
 
-- **#162** (S6.1) a session subscribes through the hub — `topic_hub_tree()` is gone from the
-  public header and from the repository; the hub answers with a status enum instead of
-  handing out its tree.
-- **#163** (S6.2) one kind of subscriber in a node — `room`-shaped now:
-  `ws_topic_receiver_t {ops, id, mark, filters}` embedded in `ws_session_t` and
-  `ws_server_sub_t`, reached by `offsetof`; the node array is `ws_topic_receiver_t **` with
-  NULL as the tombstone; `ws_topic_tree.h` names no `ws_session_t` and `topic_hub.c` does not
-  include `ws_session.h`.
+Six PRs, **#162 through #168**. The pub/sub core lives in `src/room/` (`room_hub.c`,
+`room_tree.c`, `php_room.c`, headers in `include/room/`) and no longer knows what a connection is:
+a subscriber is a `room_receiver_t {ops, id, mark, filters}` embedded in whatever receives, and
+delivery is one call through `ops->deliver`. A build configured with `--disable-websocket`
+compiles it, registers `TrueAsync\Room`, and delivers a publish from one thread to a `recv()` in
+another.
 
-## Open, and who owns it
-
-1. **`php_room.c` has no step.** The stage's shape paragraph names it — the Room class out of
-   `http_server_class.c` — but no step's `done:` covers it, and S6.3's criterion explicitly
-   wants a mechanical diff, which a 600-line extraction is not. Edmond decides: its own step,
-   folded into S6.4, or dropped.
-2. **S1.11's remaining half** — `topic_hub_count()` keeps its `zend_try`. Edmond assigned this
-   to Sage, LATER, not to the executor.
-3. **The run-control primitive** — Sage ruled run control does not belong on a room; it becomes
-   its own primitive of the room core after S6.4. Until then `run/{id}/control` stays on a room.
-4. **`server/h3/045-h3-reload-reactor-pool`** — the one red test in `tests/phpt`, red before any
-   of this work. Fix the trailing `%A` or leave it? Still unanswered.
+One deliberate BC break, approved by Edmond: `RoomDeliveryException` extends `HttpServerException`,
+because a build without WebSocket has no `WebSocketException`. `CHANGELOG.md` carries it.
 
 ## Verified state, measured on merged main
 
-- `tests/phpt`: 380 passed, 1 failed, 1 warned. The failure is the h3 reload test above; the
-  warn is an XFAIL section on a test that passes. Both pre-existing.
-- `tests/phpt/websocket`: 77 passed, 4 skipped, 0 failed — three consecutive runs.
-- `tests/valgrind-rooms.sh`: 9 tests, 0 leaked, ~42 s.
-- `fuzz_ws_topic`: 522 184 runs / 61 s; `fuzz_ws_frame`: 601 229 runs / 31 s. Clean under
-  ASAN+UBSAN.
+- `tests/phpt`: 381–382 passed, **0 failed**. Two warns: an XFAIL section on a passing test, and
+  `server/core/018-log-off-no-overhead` reporting "passed on retry" — a load-sensitive perf gate,
+  not a regression. The h3 reload test that had been red for weeks passes since the full
+  `phpize --clean` rebuild that S6.3 forced; the mechanism was never established.
+- `tests/valgrind-rooms.sh`: 10 tests, 0 leaked.
+- `--disable-websocket` build: loads, and all 11 tests in `tests/phpt/room` pass there. A CI step
+  on the debug leg builds it and asserts at least ten tests passed.
+- `fuzz_ws_topic` and `fuzz_ws_frame` both build and run in the embedded fuzz stage of CI, which
+  they did not before this session.
+
+## Open, and who owns each
+
+1. **The names at the seam.** `getRuntimeStats()`'s `ws_*` keys and the `setWs*` knobs are public
+   API and php-claw reads them; `http_server_get_topic_hub()` is internal and mechanical. Both in
+   `dev/TODO.md`. **The public half is Edmond's call.**
+2. **S1.11's remaining half** — assigned to Sage, later.
+3. **The run-control primitive.** Sage ruled run control does not belong on a room; it becomes its
+   own primitive of the room core (a channel addressed by receiver, on the same slots and
+   mailboxes, outside the topic tree). Until it exists `run/{id}/control` rides a room.
+4. **php-claw PR #120** (`feat/multi-worker-server`) is open and carries this folder.
 
 ## Traps this session paid for
 
-- **CI built neither WebSocket fuzz target**, so `fuzz_ws_topic` sat uncompiled from S1.10 to
-  S6.1 without anyone noticing. Both are built and run in the embedded fuzz stage now.
-- **The leak lane cannot see a dead-request teardown leak**: it excludes tests 073 and 074, the
-  two that reach one with a live subscription. S6.2 leaked a filter list there and the lane
-  stayed green.
-- **Do not benchmark under a concurrent valgrind run.** `fuzz_ws_frame` measured 1 exec/s that
-  way and ~19k exec/s alone, and the wrong figure reached a CI comment before it was corrected.
-- After a `gh pr merge --delete-branch` the shell lands on `main`. Two commits went there
-  before the next branch existed; they were moved and `main` reset to `origin/main`.
+- **A green build proves nothing about a PHP extension.** A shared object links with undefined
+  symbols and fails at `dlopen`; `php -d extension=<abs .so>` is discarded when a scan-dir ini
+  already loaded the module by name; `run-tests` exits 0 when everything skips. Memory:
+  `php-extension-load-traps`.
+- **Do not benchmark under a concurrent valgrind run.** `fuzz_ws_frame` measured 1 exec/s that way
+  and ~19k exec/s alone, and the wrong figure reached a CI comment before it was corrected.
+- **After `gh pr merge --delete-branch` the shell lands on `main`.** Two commits went there before
+  the next branch existed.
+- **`phpize --clean` deletes `config.nice`.** The invocation this tree needs is
+  `./configure --with-php-config=/usr/local/bin/php-config`; a config.m4 change needs `phpize`
+  before `./configure`, or the Makefile keeps building the old source list.
 
 ## Commands and paths
 

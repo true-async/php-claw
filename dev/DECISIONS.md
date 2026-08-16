@@ -444,3 +444,45 @@ resolution to its request by `id` closes that at the root, for every kind.
 **Open.** One `resolve` endpoint keyed by request id vs. per-kind endpoints (leaning one). Whether all
 five sites convert at once or `question` + `budget` land first. Whether `IssueStatus` gains a per-kind
 hint or the board reads the kind off the open request. See the design doc.
+
+---
+
+## 2026-08-16 — Rooms are the server's pub/sub primitive, and a connection is one receiver in it
+
+**Decision.** The dependency between rooms and WebSocket is INVERTED rather than the two
+mechanisms split. The pub/sub core — the worker slot table with its mailboxes, the filter tree,
+the fan-out, the reliable send — lives in `src/room/` of `true-async/server` and knows nothing
+about connections. A subscriber is a `room_receiver_t { ops, id, mark, filters }` embedded in
+whatever receives, and delivery is one indirect call through `ops->deliver`. A WebSocket session
+embeds one; so does a server-side ring that a coroutine reads with `Room::recv()`. A build
+configured with `--disable-websocket` serves rooms.
+
+Splitting the mechanisms was rejected on one measured ground: the name space stays ONE per server,
+so a `Room::publish()` reaches a WebSocket subscriber of the same name with no bridge and no copy
+— which is the live-board path php-claw runs on today (`project/{key}/issues`). What stays shared
+— the slots, the mailboxes, the one refcounted body per publish, the interest filter — is shared
+because a receiver belongs to a thread, and that is a property of the threading model, not of
+WebSocket.
+
+**Why it mattered enough to do first.** Every line of php-claw that rides rooms would have made
+the untangling dearer, and S2 onwards rides them for run control, live trace and the board.
+
+**What it cost, and what that bought.** Six PRs (true-async/server #162–#168) and one deliberate
+BC break: `RoomDeliveryException` extends `HttpServerException`, because a build without WebSocket
+has no `WebSocketException`. Two defects were reachable only by building the configuration that
+had never been built — `getRuntimeStats()` reported no room counters, and the request-shutdown
+sweep that detaches a subscribed thread sat behind the WebSocket flag, so such a thread leaked its
+mailbox and left a live libuv handle. Both are fixed, and a CI leg now builds `--disable-websocket`
+and runs the room suite against it.
+
+**Open.** The names at the seam still say WebSocket where the inside says room:
+`getRuntimeStats()`'s `ws_*` keys, the `setWs*` config knobs, and
+`http_server_get_topic_hub()`. They are the only names a room user sees in a build with no
+WebSocket. Recorded in [`TODO.md`](TODO.md); the public half needs a deliberate call.
+
+**Not on a room, and this is a ruling rather than an omission.** Run control does not belong on a
+room: its contract is one addressed reader, no loss, with acknowledgement, against a broadcast with
+a drop-oldest ring. It becomes its own primitive of the room core — a channel addressed by receiver,
+on the same slots and mailboxes, outside the topic tree. Until it exists `run/{id}/control` rides a
+room, where `send()` is acknowledged by the target worker's mailbox and loss is visible through
+`lostCount()`.
