@@ -290,3 +290,40 @@ foundation for a second consumer of it.
   nowhere in `src/Workflow/`, so a workflow step is sequential today by construction, not by
   constraint. (The debounce and coalescing half of the same idea is independent of this and
   moved up to item 1.)
+
+## Upstream, left by stage S6 — the names at the seam still say WebSocket
+
+Raised by the stage's Code Reviewer, 2026-08-16, ranked by his order. All in
+`true-async/server`; none blocks php-claw. The first two are one thought: the room core is now
+uniformly `room_*` while everything it touches says `topic_hub`, `ws_sub_overflow`,
+`setWsPublish*` — so the module reads cleanly until it talks to anyone, and then a reader carries
+two vocabularies for one concept.
+
+- **The public `ws*` surface.** `getRuntimeStats()` exports `ws_topic_posted`, `ws_sub_overflow`,
+  `ws_bodies` and the rest; the knobs are `setWsPublishRateLimit`, `setWsPublishRetryQueueMax`,
+  `setWsPublishRetryTimeoutMs`, `setWsPublishRetryIntervalMs`. In a `--disable-websocket` build
+  these are the only names a room user sees, and `Ws` names something that does not exist. This is
+  public API and php-claw reads those keys, so it wants a deliberate call: alias the new names and
+  deprecate the old, or rename at the next major. **Edmond decides.**
+- **`topic_hub` is the last un-renamed name, and it is the boundary one.**
+  `http_server_get_topic_hub()`, `http_server_topic_hub_ensure()` and the
+  `http_server_object::topic_hub` field. Internal and mechanical, no ABI concern —
+  `php_room.c` reads a `room_hub_t *` out of something called `get_topic_hub` at seven call sites.
+- **`Room::publish()` returns an array, `Room::publishBinary()` returns an int.** Two methods that
+  differ only in frame type answer in incompatible shapes, so one result handler cannot serve both.
+  `HttpServer::publish()` takes a `$binary` flag and always returns the array, which shows the
+  intended shape. Either give `publishBinary` the array, or fold it into
+  `publish(string $message, bool $binary = false)` and deprecate it. A BC break worth taking while
+  rooms are young.
+- **8 KB of stack per reliable send.** `retry_target_t full[ROOM_HUB_MAX_WORKERS]` — 1024 × 8 bytes
+  on a COROUTINE stack, in both send entry points, allocated whether or not any target is full.
+  Size it from `hub->slots_used`, which is already tracked, or heap-allocate on the first full
+  target; the common path has none.
+- **`room_hub_try_send` and `room_hub_send` are 90 % one function.** Identical hub guard, fan-out,
+  `nfull == 0` verdict, `local == NULL` and `queue_max` blocks; five copies of the same
+  `QUEUE_FULL` return between them. They diverge only in whether they park, in the last 40 lines.
+  Not introduced by S6, but S6 moved the file and now owns it.
+- **`.clang-format` is a third source of truth nobody runs.** Its `IndentWidth`, `UseTab: Always`
+  and `ColumnLimit: 100` disagree with the 4-space, occasionally-120-column reality of all 61k
+  lines of `src/`. Make it true or delete it; as it stands it re-breaks alignment for whoever runs
+  it next.
