@@ -23,6 +23,8 @@ The knowledge map is [`ARCHITECTURE.md`](../ARCHITECTURE.md) in the repository r
 
 ## Project conventions
 
+- What is being built and in what order: [`PLAN.md`](PLAN.md) — stages, steps, and what closes each.
+- Where the last session stopped: [`HANDOFF.md`](HANDOFF.md) — replaced whole each time, not a log.
 - How work is done here: [`WORKFLOW.md`](WORKFLOW.md) — branches, commits, PRs, what must be green.
 - Why things are the way they are: [`DECISIONS.md`](DECISIONS.md).
 - What has already gone wrong: [`POSTMORTEM.md`](POSTMORTEM.md).
